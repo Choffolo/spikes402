@@ -65,19 +65,23 @@ esempio "solo proof-of-work per gli impostori"), spenta di default.
 
 **Pannello di controllo (opzionale).** Con una chiave admin
 (`SPIKES402_ADMIN_KEY`) si apre una dashboard su `http://127.0.0.1:8404`,
-visibile solo dal server stesso (da fuori con un tunnel SSH). Mostra
-statistiche, stato del nodo Lightning e impostazioni, e permette di cambiare
-al volo prezzo, proof-of-work, limiti e regole per i bot (valgono fino al
-riavvio).
+visibile solo dal server stesso (da fuori con un tunnel SSH). È **una sola
+pagina**: il monitor dell'assedio, quattro numeri e una piccola luce per il
+nodo Lightning (verde = tutto bene, rossa = c'è un problema). Tutto il resto
+sta dietro il link **Impostazioni** ("Settings"): prezzo, proof-of-work,
+limiti e regole per i bot (cambiano al volo e valgono fino al riavvio), le
+proposte dell'assistente AI e, in un riquadro rosso separato in fondo, i
+prelievi.
 
 **Il monitor dell'assedio.** Una vista dal vivo delle mura: ogni richiesta a
-una pagina protetta è un puntino che parte da sinistra ("la frontiera") e
-corre verso il muro di energia davanti al sito. Il colore dice chi è: blu =
-bot firmato, verde = crawler verificato, rosso = impostore, grigio =
-sconosciuto. Al muro: ⚡ ha pagato e ⚙ ha fatto il lavoro, e passano dalla
-porta; `402` si ferma (ha ricevuto il prezzo); `✗`, `429` e `403` vengono
-respinti. In alto i contatori, sotto chi bussa e l'elenco degli ultimi
-arrivi. Gli indirizzi dei visitatori sono anonimizzati.
+una pagina protetta è un puntino che parte da sinistra e corre verso il muro
+di energia davanti al sito. Quattro colori, come i quattro numeri in alto:
+oro = ha pagato ⚡ ed entra; azzurro = ha fatto il lavoro (proof-of-work) ed
+entra; grigio = si ferma al muro (gli è stato detto il prezzo); rosso =
+respinto (prova falsa, troppo insistente o bloccato). Passando col mouse su un
+puntino si vede chi è (per esempio "GPTBot" o "Googlebot (fake)" se è un
+impostore). "Last 10 visits" apre l'elenco delle ultime 10 visite. Gli
+indirizzi dei visitatori sono anonimizzati.
 
 **Assistente AI (MCP).** `spikes402-mcp` permette a un assistente AI di
 leggere i dati e **proporre** modifiche, che applichi tu con un clic. Non può
