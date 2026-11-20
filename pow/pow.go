@@ -1,51 +1,112 @@
-// Package pow implements the Spikes402 proof-of-work puzzle.
+// Package pow implements the Spikes402 proof-of-work puzzles.
 //
-// The puzzle is the same idea as Bitcoin mining, in miniature: find a
-// nonce such that
+// Find a nonce such that H(challenge + ":" + nonce) starts with at least
+// `difficulty` zero bits, where nonce is written as a decimal number and
+// H is one of:
 //
-//	SHA256(SHA256(challenge + ":" + nonce))
+//   - "sha256d": SHA256(SHA256(x)), like Bitcoin mining in miniature.
+//     Cheap to check, but GPUs are about 1000 times faster than a CPU.
+//   - "argon2id": Argon2id(x, salt "spikes402-pow-v1", 1 pass, M MiB,
+//     1 lane, 32 bytes). Memory-hard, so a GPU or ASIC gains much less over
+//     an ordinary CPU; each attempt (and each check) costs M MiB and some
+//     milliseconds.
 //
-// starts with at least `difficulty` zero bits, where nonce is written as
-// a decimal number. Each extra bit doubles the expected work: on average
-// 2^difficulty attempts are needed.
+// Each extra bit doubles the expected work: 2^difficulty attempts on average.
 package pow
 
 import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"math"
 	"math/bits"
 	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
+
+	"golang.org/x/crypto/argon2"
 )
 
-// MaxDifficulty is the highest difficulty this package accepts. It keeps
-// both servers and clients from being asked for absurd amounts of work.
-const MaxDifficulty = 40
+// Algorithms.
+const (
+	SHA256d  = "sha256d"
+	Argon2id = "argon2id"
+)
+
+// Bounds accepted by both servers and clients.
+const (
+	MaxDifficulty      = 40 // sha256d
+	MaxArgonDifficulty = 24
+	MinArgonMemoryMiB  = 8
+	MaxArgonMemoryMiB  = 256
+	argonSalt          = "spikes402-pow-v1"
+)
 
 // Calibration. See "Proof-of-work pricing" in the README.
 const (
-	// ReferenceHashrate is how many puzzle attempts per second one
-	// commodity CPU core does (measured: ~2.7 million/s for a Spikes402
-	// challenge on a recent x86 server core with SHA extensions, rounded
-	// down). A gaming GPU is roughly 1000 times faster.
+	// ReferenceHashrate is how many sha256d attempts per second one
+	// commodity CPU core does (measured ~2.7 million/s on a recent server
+	// core with SHA extensions, rounded down).
 	ReferenceHashrate = 2_000_000
 
+	// ReferenceArgonMiBps is how many MiB of Argon2id (1 pass) one core
+	// processes per second (measured ~1,900 MiB/s at 16-64 MiB on the
+	// same core, rounded down): one 16 MiB attempt takes ~11 ms.
+	ReferenceArgonMiBps = 1500
+
 	// Bounds for the difficulty derived from a price.
-	MinAutoDifficulty = 16 // ~0.03 s on one core: below this the puzzle is pointless
-	MaxAutoDifficulty = 32 // ~36 min on one core: above this no CPU bot would bother
+	MinAutoDifficulty = 16 // sha256d: ~0.03 s on one core
+	MaxAutoDifficulty = 32 // sha256d: ~36 min on one core
+	MinAutoArgon      = 1
+	MaxAutoArgon      = 20
 )
 
-// Hash returns SHA256(SHA256(challenge + ":" + nonce)).
-func Hash(challenge string, nonce uint64) [32]byte {
+// Params describe one puzzle.
+type Params struct {
+	Algorithm  string
+	Difficulty int
+	MemoryMiB  int // argon2id only
+}
+
+// Validate checks the parameters are within the accepted bounds.
+func (p Params) Validate() error {
+	switch p.Algorithm {
+	case SHA256d:
+		if p.Difficulty < 0 || p.Difficulty > MaxDifficulty {
+			return ErrTooHard
+		}
+	case Argon2id:
+		if p.Difficulty < 0 || p.Difficulty > MaxArgonDifficulty ||
+			p.MemoryMiB < MinArgonMemoryMiB || p.MemoryMiB > MaxArgonMemoryMiB {
+			return ErrTooHard
+		}
+	default:
+		return fmt.Errorf("pow: unknown algorithm %q", p.Algorithm)
+	}
+	return nil
+}
+
+// ErrTooHard is returned for parameters out of range.
+var ErrTooHard = errors.New("pow: parameters out of range")
+
+func input(challenge string, nonce uint64) []byte {
 	buf := make([]byte, 0, len(challenge)+21)
 	buf = append(buf, challenge...)
 	buf = append(buf, ':')
-	buf = strconv.AppendUint(buf, nonce, 10)
-	first := sha256.Sum256(buf)
+	return strconv.AppendUint(buf, nonce, 10)
+}
+
+// Hash computes the puzzle hash. p must be valid.
+func (p Params) Hash(challenge string, nonce uint64) [32]byte {
+	in := input(challenge, nonce)
+	if p.Algorithm == Argon2id {
+		var out [32]byte
+		copy(out[:], argon2.IDKey(in, []byte(argonSalt), 1, uint32(p.MemoryMiB)*1024, 1, 32))
+		return out
+	}
+	first := sha256.Sum256(in)
 	return sha256.Sum256(first[:])
 }
 
@@ -61,25 +122,22 @@ func LeadingZeroBits(h [32]byte) int {
 	return n
 }
 
-// Check reports whether nonce solves the puzzle for challenge at the
-// given difficulty.
-func Check(challenge string, nonce uint64, difficulty int) bool {
-	if difficulty < 0 || difficulty > MaxDifficulty {
-		return false
-	}
-	return LeadingZeroBits(Hash(challenge, nonce)) >= difficulty
+// Check reports whether nonce solves the puzzle. Invalid params never do.
+func (p Params) Check(challenge string, nonce uint64) bool {
+	return p.Validate() == nil && LeadingZeroBits(p.Hash(challenge, nonce)) >= p.Difficulty
 }
 
-// ErrTooHard is returned by Solve when the difficulty is out of range.
-var ErrTooHard = errors.New("pow: difficulty out of range")
-
-// Solve searches for a nonce that solves the puzzle, using all CPU cores.
-// It stops early if ctx is cancelled.
-func Solve(ctx context.Context, challenge string, difficulty int) (uint64, error) {
-	if difficulty < 0 || difficulty > MaxDifficulty {
-		return 0, ErrTooHard
+// Solve searches for a nonce, in parallel. For argon2id the number of
+// workers is capped at 4 to bound memory (4 x MemoryMiB).
+func (p Params) Solve(ctx context.Context, challenge string) (uint64, error) {
+	if err := p.Validate(); err != nil {
+		return 0, err
 	}
 	workers := uint64(runtime.NumCPU())
+	check := uint64(4096)
+	if p.Algorithm == Argon2id {
+		workers, check = min(workers, 4), 1
+	}
 	var (
 		found  atomic.Bool
 		result uint64
@@ -90,11 +148,11 @@ func Solve(ctx context.Context, challenge string, difficulty int) (uint64, error
 		wg.Add(1)
 		go func(nonce uint64) { // worker w tries w, w+workers, w+2*workers, ...
 			defer wg.Done()
-			for i := 0; ; i++ {
-				if i%4096 == 0 && (found.Load() || ctx.Err() != nil) {
+			for i := uint64(0); ; i++ {
+				if i%check == 0 && (found.Load() || ctx.Err() != nil) {
 					return
 				}
-				if LeadingZeroBits(Hash(challenge, nonce)) >= difficulty {
+				if LeadingZeroBits(p.Hash(challenge, nonce)) >= p.Difficulty {
 					once.Do(func() { result = nonce; found.Store(true) })
 					return
 				}
@@ -109,21 +167,32 @@ func Solve(ctx context.Context, challenge string, difficulty int) (uint64, error
 	return result, nil
 }
 
-// DifficultyForPrice converts a price into a puzzle difficulty, so that
-// solving takes about secondsPerSat seconds of one reference CPU core per
-// sat: difficulty = round(log2(price × secondsPerSat × ReferenceHashrate)),
-// clamped to [MinAutoDifficulty, MaxAutoDifficulty].
-func DifficultyForPrice(priceSats int64, secondsPerSat float64) int {
-	hashes := float64(priceSats) * secondsPerSat * ReferenceHashrate
-	if hashes < 1 {
-		return MinAutoDifficulty
+// attemptSeconds is the time of one attempt on one reference core.
+func attemptSeconds(algorithm string, memoryMiB int) float64 {
+	if algorithm == Argon2id {
+		return float64(memoryMiB) / ReferenceArgonMiBps
 	}
-	d := int(math.Round(math.Log2(hashes)))
-	return min(max(d, MinAutoDifficulty), MaxAutoDifficulty)
+	return 1.0 / ReferenceHashrate
 }
 
-// ExpectedSeconds is the average time one reference CPU core needs to
-// solve a puzzle of the given difficulty.
-func ExpectedSeconds(difficulty int) float64 {
-	return math.Ldexp(1, difficulty) / ReferenceHashrate
+// ForPrice returns puzzle parameters whose expected solve time on one
+// reference CPU core is about priceSats x secondsPerSat:
+// difficulty = round(log2(price x secondsPerSat / seconds per attempt)),
+// clamped (sha256d: 16-32 bits, argon2id: 1-20 bits).
+func ForPrice(algorithm string, memoryMiB int, priceSats int64, secondsPerSat float64) Params {
+	lo, hi := MinAutoDifficulty, MaxAutoDifficulty
+	if algorithm == Argon2id {
+		lo, hi = MinAutoArgon, MaxAutoArgon
+	}
+	attempts := float64(priceSats) * secondsPerSat / attemptSeconds(algorithm, memoryMiB)
+	d := lo
+	if attempts >= 1 {
+		d = min(max(int(math.Round(math.Log2(attempts))), lo), hi)
+	}
+	return Params{Algorithm: algorithm, Difficulty: d, MemoryMiB: memoryMiB}
+}
+
+// ExpectedSeconds is the average time one reference CPU core needs.
+func (p Params) ExpectedSeconds() float64 {
+	return math.Ldexp(1, p.Difficulty) * attemptSeconds(p.Algorithm, p.MemoryMiB)
 }

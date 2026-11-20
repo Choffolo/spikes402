@@ -6,19 +6,29 @@ import (
 	"time"
 )
 
+var sha = Params{Algorithm: SHA256d, Difficulty: 12}
+var argon = Params{Algorithm: Argon2id, Difficulty: 2, MemoryMiB: 8}
+
 func TestSolveAndCheck(t *testing.T) {
-	const challenge = "hello"
-	for _, d := range []int{0, 1, 12} {
-		nonce, err := Solve(context.Background(), challenge, d)
+	for _, p := range []Params{sha, {Algorithm: SHA256d}, argon} {
+		nonce, err := p.Solve(context.Background(), "hello")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !Check(challenge, nonce, d) {
-			t.Fatalf("difficulty %d: solution does not verify", d)
+		if !p.Check("hello", nonce) {
+			t.Fatalf("%+v: solution does not verify", p)
 		}
 	}
-	if Hash("hello", 1) == Hash("other", 1) {
-		t.Fatal("hash must depend on the challenge")
+	if sha.Hash("hello", 1) == sha.Hash("other", 1) || argon.Hash("hello", 1) == sha.Hash("hello", 1) {
+		t.Fatal("hash must depend on challenge and algorithm")
+	}
+}
+
+func TestArgonMemoryMatters(t *testing.T) {
+	a8, a16 := argon, argon
+	a16.MemoryMiB = 16
+	if a8.Hash("x", 1) == a16.Hash("x", 1) {
+		t.Fatal("memory parameter must change the hash")
 	}
 }
 
@@ -33,12 +43,22 @@ func TestLeadingZeroBits(t *testing.T) {
 	}
 }
 
-func TestDifficultyBounds(t *testing.T) {
-	if Check("x", 0, MaxDifficulty+1) || Check("x", 0, -1) {
-		t.Fatal("out-of-range difficulty must be rejected")
+func TestValidate(t *testing.T) {
+	bad := []Params{
+		{Algorithm: SHA256d, Difficulty: MaxDifficulty + 1},
+		{Algorithm: SHA256d, Difficulty: -1},
+		{Algorithm: Argon2id, Difficulty: MaxArgonDifficulty + 1, MemoryMiB: 16},
+		{Algorithm: Argon2id, Difficulty: 1, MemoryMiB: 4},    // too little memory
+		{Algorithm: Argon2id, Difficulty: 1, MemoryMiB: 1024}, // memory bomb
+		{Algorithm: "md5", Difficulty: 1},
 	}
-	if _, err := Solve(context.Background(), "x", MaxDifficulty+1); err != ErrTooHard {
-		t.Fatalf("got %v", err)
+	for _, p := range bad {
+		if p.Validate() == nil || p.Check("x", 0) {
+			t.Errorf("%+v accepted", p)
+		}
+		if _, err := p.Solve(context.Background(), "x"); err == nil {
+			t.Errorf("%+v: solve accepted", p)
+		}
 	}
 }
 
@@ -46,38 +66,49 @@ func TestSolveCancel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	if _, err := Solve(ctx, "x", MaxDifficulty); err == nil {
-		t.Fatal("expected cancellation")
+	for _, p := range []Params{{Algorithm: SHA256d, Difficulty: MaxDifficulty}, {Algorithm: Argon2id, Difficulty: MaxArgonDifficulty, MemoryMiB: 8}} {
+		if _, err := p.Solve(ctx, "x"); err == nil {
+			t.Fatal("expected cancellation")
+		}
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Fatal("cancellation took too long")
 	}
 }
 
-func TestDifficultyForPrice(t *testing.T) {
+func TestForPrice(t *testing.T) {
 	cases := []struct {
+		alg           string
+		mem           int
 		price         int64
 		secondsPerSat float64
 		want          int
 	}{
-		{1, 10, 24},      // 2e7 hashes  -> 2^24.25
-		{10, 10, 28},     // 2e8 hashes  -> 2^27.6
-		{100, 10, 31},    // 2e9 hashes  -> 2^30.9
-		{1000, 10, 32},   // capped
-		{1, 0.001, 16},   // raised to the minimum
-		{1, 0, 16},       // degenerate input
-		{1 << 40, 1, 32}, // huge price
-		{3, 1, 23},       // 6e6 hashes -> 2^22.5 rounds to 23
+		{SHA256d, 0, 1, 10, 24},    // 2e7 attempts -> 2^24.25
+		{SHA256d, 0, 10, 10, 28},   // 2e8 -> 2^27.6
+		{SHA256d, 0, 100, 10, 31},  // 2e9 -> 2^30.9
+		{SHA256d, 0, 1000, 10, 32}, // capped
+		{SHA256d, 0, 1, 0.001, 16}, // raised to the minimum
+		{SHA256d, 0, 1, 0, 16},     // degenerate
+		{SHA256d, 0, 3, 1, 23},     // 6e6 -> 2^22.5
+		{Argon2id, 16, 1, 10, 10},  // 10 s / (16/1500 s) = 937 -> 2^9.9
+		{Argon2id, 64, 1, 10, 8},   // 10 s / (64/1500 s) = 234 -> 2^7.9
+		{Argon2id, 16, 10, 10, 13}, // 9375 -> 2^13.2
+		{Argon2id, 16, 1 << 30, 10, 20},
+		{Argon2id, 16, 1, 0.001, 1},
 	}
 	for _, c := range cases {
-		if got := DifficultyForPrice(c.price, c.secondsPerSat); got != c.want {
-			t.Errorf("price %d at %g s/sat: got %d, want %d", c.price, c.secondsPerSat, got, c.want)
+		if got := ForPrice(c.alg, c.mem, c.price, c.secondsPerSat); got.Difficulty != c.want || got.Validate() != nil {
+			t.Errorf("%s %d MiB, %d sats at %g s/sat: got %+v, want %d", c.alg, c.mem, c.price, c.secondsPerSat, got, c.want)
 		}
 	}
 }
 
 func TestExpectedSeconds(t *testing.T) {
-	if got := ExpectedSeconds(21); got < 1.04 || got > 1.05 { // 2^21 / 2e6
+	if got := (Params{Algorithm: SHA256d, Difficulty: 21}).ExpectedSeconds(); got < 1.04 || got > 1.05 { // 2^21 / 2e6
+		t.Fatalf("got %g", got)
+	}
+	if got := (Params{Algorithm: Argon2id, Difficulty: 10, MemoryMiB: 16}).ExpectedSeconds(); got < 10.9 || got > 11.0 { // 1024 x 16/1500
 		t.Fatalf("got %g", got)
 	}
 }
