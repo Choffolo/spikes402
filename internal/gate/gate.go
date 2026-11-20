@@ -253,6 +253,7 @@ func (g *Gate) challenge(w http.ResponseWriter, r *http.Request, problem string)
 	h.Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusPaymentRequired)
 	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
 	enc.Encode(body)
 }
