@@ -548,6 +548,17 @@ withdrawals), `internal/mcp`, `internal/lightning` (fake + phoenixd),
 (bot classification), `internal/sfv` (structured header parsing), `webbotauth`
 (Web Bot Auth sign/verify), `pow`, `client`.
 
+## Donations / Donazioni
+
+If Spikes402 is useful to you, you can support it with bitcoin (on-chain):
+
+<img src="docs/donate-bitcoin.png" alt="QR code for bitcoin:3KvoTk8WfVKE1Dqhh7DHUzTwNyNXeR1GgF" width="180">
+
+`3KvoTk8WfVKE1Dqhh7DHUzTwNyNXeR1GgF`
+
+<!-- TODO(lightning): add a Lightning address / BOLT12 offer here once one exists. Do not invent one. -->
+Lightning: *coming soon.*
+
 ## License
 
 [GNU AGPLv3](LICENSE).

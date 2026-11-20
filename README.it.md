@@ -109,3 +109,14 @@ Con `-mode pay` il bot paga con un portafoglio finto invece di lavorare. Con
 `-sign` firma le richieste con Web Bot Auth e stampa la sua directory di chiavi.
 
 Licenza: [GNU AGPLv3](LICENSE).
+
+## Donazioni
+
+Se Spikes402 ti è utile, puoi sostenerlo in bitcoin (on-chain):
+
+<img src="docs/donate-bitcoin.png" alt="Codice QR per bitcoin:3KvoTk8WfVKE1Dqhh7DHUzTwNyNXeR1GgF" width="180">
+
+`3KvoTk8WfVKE1Dqhh7DHUzTwNyNXeR1GgF`
+
+<!-- TODO(lightning): aggiungere qui un indirizzo Lightning / offerta BOLT12 quando esisterà. Non inventarlo. -->
+Lightning: *in arrivo.*
