@@ -1,0 +1,66 @@
+package gate
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"strings"
+)
+
+// claims is what a Spikes402 token says. One token is issued per 402
+// answer and can be redeemed exactly once, either with the preimage of
+// its invoice (L402) or with a proof-of-work solution.
+type claims struct {
+	ID          string `json:"id"`  // random, used to stop replays
+	PaymentHash string `json:"ph"`  // hex sha256 of the invoice preimage ("" if no invoice)
+	Resource    string `json:"res"` // "METHOD /path?query" the token unlocks
+	Expires     int64  `json:"exp"` // unix seconds
+	PowBits     int    `json:"pow"` // proof-of-work difficulty
+}
+
+// Token format: base64url(JSON claims) "." base64url(HMAC-SHA256(secret, first part)).
+//
+// This is a deliberately simple stand-in for a macaroon (see README): it
+// carries the same essential facts (payment hash + what it unlocks +
+// expiry) and is just as unforgeable, but has no caveat chaining.
+
+var errBadToken = errors.New("invalid token")
+
+type signer struct{ key []byte }
+
+func (s signer) sign(c claims) (string, error) {
+	payload, err := json.Marshal(c)
+	if err != nil {
+		return "", err
+	}
+	body := base64.RawURLEncoding.EncodeToString(payload)
+	return body + "." + base64.RawURLEncoding.EncodeToString(s.mac(body)), nil
+}
+
+func (s signer) verify(token string) (claims, error) {
+	body, sig, ok := strings.Cut(token, ".")
+	if !ok {
+		return claims{}, errBadToken
+	}
+	got, err := base64.RawURLEncoding.DecodeString(sig)
+	if err != nil || !hmac.Equal(got, s.mac(body)) {
+		return claims{}, errBadToken
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(body)
+	if err != nil {
+		return claims{}, errBadToken
+	}
+	var c claims
+	if err := json.Unmarshal(payload, &c); err != nil {
+		return claims{}, errBadToken
+	}
+	return c, nil
+}
+
+func (s signer) mac(body string) []byte {
+	m := hmac.New(sha256.New, s.key)
+	m.Write([]byte(body))
+	return m.Sum(nil)
+}

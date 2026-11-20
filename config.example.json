@@ -1,0 +1,12 @@
+{
+  "listen": ":8402",
+  "origin": "http://localhost:8080",
+  "price_sats": 10,
+  "protect": ["/premium/**"],
+  "pow_difficulty": 0,
+  "challenge_ttl_seconds": 600,
+  "secret_key": "",
+  "lightning": {
+    "backend": "fake"
+  }
+}
