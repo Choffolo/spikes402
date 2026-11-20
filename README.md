@@ -86,8 +86,10 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `pow_difficulty` | Leading zero bits for the puzzle. `0` = derive from `price_sats` × `pow_seconds_per_sat` | `0` |
 | `challenge_ttl_seconds` | How long a 402 offer (token and invoice) stays valid | `600` |
 | `challenges_per_minute` | 402 answers per client per minute; beyond that, `429 Too Many Requests` | `30` |
+| `max_invoices_per_minute` | Invoices created per minute, all clients together; beyond that, proof-of-work only | `300` |
 | `max_pending_invoices` | Open (unpaid, unexpired) invoices at once; beyond that, proof-of-work only | `10000` |
-| `client_ip_header` | Read the client IP from this header, e.g. `"CF-Connecting-IP"` or `"X-Real-IP"`. **Only** set it behind a proxy that overwrites the header, or clients can fake their IP | `""` (use the connection's address) |
+| `client_ip_header` | Header holding the visitor's IP when Spikes402 runs behind your own proxy, e.g. `"X-Forwarded-For"`, `"X-Real-IP"`, `"CF-Connecting-IP"` | `""` (use the connection's address) |
+| `trusted_proxies` | IPs or CIDR ranges of those proxies, e.g. `["127.0.0.1"]`. The header is ignored from anyone else. Required with `client_ip_header` | `[]` |
 | `secret_key` | Signs tokens, ≥ 32 characters. Better set via `SPIKES402_SECRET_KEY` | random with `fake`, required otherwise |
 | `lightning.backend` | `"fake"` (development) or `"phoenixd"` | required |
 | `lightning.phoenixd_url` | phoenixd HTTP API | `"http://127.0.0.1:9740"` |
@@ -129,22 +131,38 @@ know, are built for 80-byte block headers and cannot directly solve this
 puzzle. The 32-bit cap keeps prices above ~1000 sats from producing puzzles
 no CPU bot would attempt; set `pow_difficulty` explicitly to go beyond it.
 
-## Abuse protection
+## Protecting your Lightning node
 
-Every unpaid request to a protected page costs the server something (an
-invoice on your node), so Spikes402 limits it:
+The paywall must never become a way to flood your node with invoice
+requests. Every unpaid request gets a proof-of-work challenge, which costs
+the server almost nothing. An invoice is only added when *all* of these
+allow it; otherwise the 402 answer offers proof-of-work only and the node is
+not called:
 
-- **Per client:** at most `challenges_per_minute` 402 answers per minute per
-  IP address (per /64 network for IPv6, since one machine often owns a whole
-  /64). Beyond that the answer is `429 Too Many Requests` with `Retry-After`.
-  Free pages are never limited.
-- **Same page, same offer:** a client asking again for the same page while its
-  offer is still fresh (more than half of its lifetime left) gets the same
-  invoice back instead of a new one.
-- **Global cap:** at most `max_pending_invoices` open invoices. Beyond that,
-  new visitors are offered proof-of-work only, until older invoices expire.
-- Memory stays bounded: expired entries are evicted, and at most 100,000
-  clients are tracked per minute (newcomers beyond that share one allowance).
+| Guard | Default | What it stops |
+|---|---|---|
+| Per-client limit: `challenges_per_minute` per IP (per /64 for IPv6) | 30 | One client hammering the paywall. Beyond it: `429 Too Many Requests` + `Retry-After`. Free pages are never limited |
+| Same offer reused for the same client and page while more than half its lifetime is left | on | Reloads creating new invoices |
+| Global rate: `max_invoices_per_minute`, spread evenly (bursts up to 5 seconds' worth) | 300 | Many clients at once (botnets) |
+| Global cap: `max_pending_invoices` open at once | 10,000 | Unpaid invoices piling up |
+| At most 8 invoice requests in flight, each with a 3-second timeout | on | A slow node tying up the proxy |
+| Circuit breaker: after 5 failures in a row, the node is left alone for 30 s; after that a single failure pauses it again | on | Hitting a node that is already struggling |
+
+A visitor hanging up mid-request does not count as a node failure, so
+nobody can trip the breaker on purpose. Failures are logged at most once a
+minute.
+
+**Real client IPs.** Behind a reverse proxy or CDN, every request seems to
+come from the proxy. Set `client_ip_header` *and* `trusted_proxies`: the
+header is only believed on connections from those addresses. It is read
+from right to left, skipping trusted proxies, so a fake address a client
+puts at the start of `X-Forwarded-For` is ignored.
+
+**Bounded memory.** Rate-limit windows, open offers and used tokens are
+evicted when they expire. Hard caps also apply: 100,000 tracked clients per
+minute (newcomers beyond that share one allowance), `max_pending_invoices`
+offers, and 1,000,000 used tokens. When the used-token list is full, new
+redemptions are refused ("server busy") rather than risking a replay.
 
 ## Using a real Lightning node: phoenixd
 
@@ -200,18 +218,18 @@ Paying needs a `client.Payer` (your wallet). Only a fake payer exists so far.
 - **Proof-of-work is cheaper on special hardware.** The difficulty is
   calibrated for a CPU core (see [Proof-of-work pricing](#proof-of-work-pricing));
   a GPU solves it about 1000× faster.
-- **Client IP header:** leave `client_ip_header` empty unless a proxy you
-  control sets that header, otherwise anyone can dodge the rate limit.
+- **Client IP header:** it is only trusted from `trusted_proxies`; list only
+  proxies you control.
 
 ## Known limits / not done yet
 
 - Spent tokens are remembered in memory: run **one** proxy instance; a restart
   forgets them (tokens expire after `challenge_ttl_seconds`, so the replay
   window is limited to that).
-- Rate limits are per IP. A large botnet with many addresses can still create
-  up to `max_pending_invoices` invoices per `challenge_ttl_seconds`; after that
-  it only gets proof-of-work. Bots behind one shared address (office, carrier
-  NAT) share a limit.
+- Rate limits are per IP. A botnet with many addresses can use up the global
+  invoice budget; paying visitors then get proof-of-work only until it
+  refills. The node itself stays protected. Bots behind one shared address
+  (office, carrier NAT) share a limit.
 - The proof-of-work price is an estimate (see above), not a market price.
 - If the site itself uses the `Authorization` header on protected paths,
   it will conflict with Spikes402.
