@@ -2,6 +2,8 @@ package gate
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -141,6 +143,58 @@ func TestHTMLPage(t *testing.T) {
 		!strings.Contains(body, "lnfake10sat1") {
 		t.Fatalf("bad HTML page (%d): %s", rec.Code, body)
 	}
+	invoice, token := weblnAttrs(t, body)
+	if !strings.HasPrefix(invoice, "lnfake") || token == "" ||
+		!strings.Contains(body, `id="webln-pay"`) ||
+		!strings.Contains(body, "Pay with one click") ||
+		!strings.Contains(body, "window.webln") ||
+		!strings.Contains(body, "w.enable(") ||
+		!strings.Contains(body, "w.sendPayment(") ||
+		!strings.Contains(body, `Authorization:"L402 "`) {
+		t.Fatalf("missing WebLN markup: %s", body)
+	}
+	// The script in the page is exactly what the CSP hash covers.
+	i, j := strings.Index(body, "<script>"), strings.Index(body, "</script>")
+	if i < 0 || j < i {
+		t.Fatal("script tag missing")
+	}
+	sum := sha256.Sum256([]byte(body[i+len("<script>") : j]))
+	want := "sha256-" + base64.StdEncoding.EncodeToString(sum[:])
+	csp := rec.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, want) || !strings.Contains(csp, "connect-src 'self'") {
+		t.Fatalf("CSP %q, want hash %s", csp, want)
+	}
+	// Same invoice and token as the machine-readable challenge: no new invoice.
+	l402 := rec.Header().Values("WWW-Authenticate")[0]
+	if !strings.Contains(l402, `macaroon="`+token+`"`) || !strings.Contains(l402, `invoice="`+invoice+`"`) {
+		t.Fatalf("button does not match WWW-Authenticate: %s", l402)
+	}
+	// The credential path the script uses (Authorization: L402 token:preimage)
+	// unlocks the page, including when the browser asks for HTML.
+	auth := f.pay(t, challengeBody{L402: &l402Offer{Token: token, Invoice: invoice}})
+	got := f.get("/premium/article", auth, "text/html")
+	if got.Code != http.StatusOK || got.Body.String() != "content of /premium/article" {
+		t.Fatalf("redeem via the page credential: %d %q", got.Code, got.Body.String())
+	}
+}
+
+func weblnAttrs(t *testing.T, body string) (invoice, token string) {
+	t.Helper()
+	for _, name := range []string{"data-invoice", "data-token"} {
+		key := name + `="`
+		i := strings.Index(body, key)
+		if i < 0 {
+			t.Fatalf("%s missing", name)
+		}
+		i += len(key)
+		j := strings.Index(body[i:], `"`)
+		if name == "data-invoice" {
+			invoice = body[i : i+j]
+		} else {
+			token = body[i : i+j]
+		}
+	}
+	return
 }
 
 func TestValidPayment(t *testing.T) {
@@ -286,6 +340,10 @@ func TestPoWStillWorksWhenNodeIsDown(t *testing.T) {
 	b := f.challenge(t, "/premium/article")
 	if b.L402 != nil {
 		t.Fatal("no invoice should be offered when the node is down")
+	}
+	html := f.get("/premium/article", "", "text/html")
+	if strings.Contains(html.Body.String(), "webln-pay") || strings.Contains(html.Body.String(), "<script>") {
+		t.Fatalf("WebLN markup without an invoice: %s", html.Body.String())
 	}
 	if rec := f.get("/premium/article", solve(t, b), ""); rec.Code != http.StatusOK {
 		t.Fatalf("got %d", rec.Code)
