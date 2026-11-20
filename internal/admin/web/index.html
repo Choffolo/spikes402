@@ -3,27 +3,20 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Spikes402 · Admin</title>
+<title>Spikes402</title>
 <link rel="stylesheet" href="style.css">
 <script src="app.js" defer></script>
 </head>
 <body>
 <header>
-  <h1>⚡ Spikes402 <small>admin</small></h1>
-  <nav id="tabs" hidden>
-    <button data-tab="siege" class="active">Siege monitor</button>
-    <button data-tab="overview">Overview</button>
-    <button data-tab="settings">Settings</button>
-    <button data-tab="proposals">Proposals <span id="prop-badge" class="badge" hidden></span></button>
-    <button data-tab="withdraw" id="withdraw-tab" hidden>Withdraw</button>
-  </nav>
-  <button id="logout" hidden>Log out</button>
+  <h1>⚡ Spikes402</h1>
+  <span id="node" class="node" hidden><i></i><span id="node-text">Lightning</span></span>
+  <a href="#settings" id="nav" hidden>Settings</a>
 </header>
 
 <main>
 <section id="login" class="card narrow">
-  <h2>Admin key</h2>
-  <p>Enter the admin key (<code>admin.key</code> / <code>SPIKES402_ADMIN_KEY</code>). It is kept only in this browser tab.</p>
+  <p>Admin key (<code>admin.key</code>). Kept only in this browser tab.</p>
   <form id="login-form">
     <input id="key" type="password" autocomplete="off" placeholder="admin key" required>
     <button type="submit">Open</button>
@@ -31,94 +24,61 @@
   <p id="login-error" class="error"></p>
 </section>
 
-<section id="siege" class="tab" hidden>
-  <div class="siege-top">
-    <div class="stat"><span id="s-rate">0</span><label>at the walls / min</label></div>
-    <div class="stat repelled"><span id="s-repelled">0</span><label>repelled</label></div>
-    <div class="stat paid"><span id="s-paid">0</span><label>paid the toll ⚡</label></div>
-    <div class="stat pow"><span id="s-pow">0</span><label>did the work ⚙</label></div>
-    <div class="stat impostor"><span id="s-impostor">0</span><label>impostors unmasked</label></div>
-    <label class="toggle"><input type="checkbox" id="animate" checked> animate</label>
+<section id="siege" class="page" hidden>
+  <div class="stats">
+    <div><b id="s-rate">0</b>visits / min</div>
+    <div class="paid"><b id="s-paid">0</b>paid</div>
+    <div class="pow"><b id="s-pow">0</b>proof-of-work</div>
+    <div class="repelled"><b id="s-repelled">0</b>repelled</div>
   </div>
-  <svg id="field" viewBox="0 0 1000 420" role="img" aria-label="Visitors approaching the protected walls">
-    <defs>
-      <linearGradient id="wallGrad" x1="0" x2="1">
-        <stop offset="0" stop-color="#00e5ff" stop-opacity="0.05"/>
-        <stop offset="0.5" stop-color="#00e5ff" stop-opacity="0.9"/>
-        <stop offset="1" stop-color="#00e5ff" stop-opacity="0.05"/>
-      </linearGradient>
-    </defs>
-    <text x="20" y="28" class="zone">THE FRONTIER</text>
-    <text x="980" y="28" class="zone" text-anchor="end">YOUR SITE</text>
-    <rect x="628" y="30" width="28" height="160" class="wall" />
-    <rect x="628" y="250" width="28" height="160" class="wall" />
-    <rect x="626" y="190" width="32" height="60" class="gate" />
-    <text x="642" y="268" class="gate-label" text-anchor="middle">pay · work</text>
+  <svg id="field" viewBox="0 0 1000 400" role="img" aria-label="Visitors approaching the protected walls">
+    <rect x="628" y="30" width="24" height="150" class="wall" />
+    <rect x="628" y="230" width="24" height="150" class="wall" />
     <g class="citadel">
-      <rect x="790" y="150" width="150" height="190" />
-      <rect x="770" y="110" width="40" height="230" />
-      <rect x="920" y="110" width="40" height="230" />
-      <rect x="845" y="90" width="40" height="60" />
+      <rect x="790" y="150" width="150" height="180" />
+      <rect x="770" y="110" width="40" height="220" />
+      <rect x="920" y="110" width="40" height="220" />
     </g>
     <g id="sprites"></g>
   </svg>
-  <div class="legend" id="legend"></div>
-  <p class="note">Each dot is one request to a protected page, coming from the left. Colour = who it is.
-    At the energy wall: ⚡ paid the toll, ⚙ did the proof-of-work (both pass the gate), 402 = told the price and stopped,
-    ✗ = fake proof, 429 = too many requests, 403 = blocked by a policy. Visitor addresses are anonymised.</p>
-  <div class="grid2 siege-bottom">
-    <div class="card">
-      <h3>Who comes knocking</h3>
-      <table id="bots" class="small"></table>
-    </div>
-    <div class="card">
-      <h3>Latest arrivals</h3>
-      <table id="feed" class="small feed"></table>
-    </div>
-  </div>
+  <p class="legend">
+    <span><i class="paid"></i>paid ⚡</span>
+    <span><i class="pow"></i>did the work</span>
+    <span><i class="held"></i>stopped at the wall</span>
+    <span><i class="repelled"></i>repelled</span>
+  </p>
+  <details>
+    <summary>Last 10 visits</summary>
+    <table id="feed"></table>
+  </details>
 </section>
 
-<section id="overview" class="tab" hidden>
-  <div class="grid2">
-    <div class="card"><h3>Traffic since start</h3><table id="ov-traffic"></table></div>
-    <div class="card"><h3>Lightning node</h3><table id="ov-node"></table></div>
-    <div class="card"><h3>Visitor classes</h3><table id="ov-classes"></table></div>
-    <div class="card"><h3>Paywall state</h3><table id="ov-gate"></table></div>
-  </div>
-</section>
-
-<section id="settings" class="tab" hidden>
-  <div class="grid2">
-    <div class="card"><h3>Current settings</h3><table id="set-current"></table></div>
-    <div class="card">
-      <h3>Change safe settings</h3>
-      <p class="note">Changes apply immediately and last until restart. Edit the config file to keep them.</p>
-      <form id="set-form">
-        <label>Price (sats) <input id="f-price" type="number" min="1" max="1000000"></label>
-        <label>PoW seconds per sat <input id="f-sps" type="number" min="0.001" max="3600" step="any"></label>
-        <label>402 answers per client per minute <input id="f-cpm" type="number" min="1" max="100000"></label>
-        <label>Bot policies (JSON, <code>{}</code> = everyone pays the same)
-          <textarea id="f-pol" rows="5" spellcheck="false"></textarea></label>
-        <button type="submit">Apply</button>
-        <p id="set-msg" class="msg"></p>
-      </form>
-    </div>
-  </div>
-</section>
-
-<section id="proposals" class="tab" hidden>
+<section id="settings" class="page narrow" hidden>
+  <p><a href="#">← Back to the monitor</a></p>
   <div class="card">
-    <h3>Change proposals</h3>
-    <p class="note">Suggested by the AI admin (MCP). Nothing changes until you approve.</p>
+    <h2>Settings</h2>
+    <p class="note">Changes apply immediately and last until restart. Edit the config file to keep them.</p>
+    <form id="set-form">
+      <label>Price (sats) <input id="f-price" type="number" min="1" max="1000000"></label>
+      <label>Proof-of-work seconds per sat <input id="f-sps" type="number" min="0.001" max="3600" step="any"></label>
+      <label>402 answers per visitor per minute <input id="f-cpm" type="number" min="1" max="100000"></label>
+      <label>Bot policies (JSON, <code>{}</code> = everyone pays the same)
+        <textarea id="f-pol" rows="3" spellcheck="false"></textarea></label>
+      <button type="submit">Apply</button>
+      <p id="set-msg" class="msg"></p>
+    </form>
+    <details>
+      <summary>All current settings and node details</summary>
+      <table id="set-current"></table>
+    </details>
+  </div>
+  <div class="card">
+    <h2>AI proposals</h2>
     <div id="prop-list"></div>
   </div>
-</section>
-
-<section id="withdraw" class="tab" hidden>
-  <div class="card narrow">
-    <h3>Withdraw</h3>
-    <p>Destination (fixed in the config file): <strong id="wd-dest"></strong></p>
-    <p>Balance: <strong id="wd-balance">?</strong> sats</p>
+  <div class="card withdraw" id="withdraw" hidden>
+    <h2>Withdraw</h2>
+    <p>To <strong id="wd-dest"></strong> (fixed in the config file). Balance: <strong id="wd-balance">?</strong> sats.</p>
     <form id="wd-form">
       <label>Amount (sats) <input id="wd-amount" type="number" min="1" required></label>
       <label>Withdraw password <input id="wd-pw" type="password" autocomplete="off" required></label>
@@ -133,9 +93,9 @@
       <button type="button" id="wd-cancel">Cancel</button>
     </form>
     <p id="wd-msg" class="msg"></p>
-    <h3>Recent withdrawals</h3>
-    <table id="wd-history" class="small"></table>
+    <table id="wd-history"></table>
   </div>
+  <p><button id="logout">Log out</button></p>
 </section>
 </main>
 </body>

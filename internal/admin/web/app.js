@@ -4,11 +4,14 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const state = { key: sessionStorage.getItem("spikes402-key") || "", seq: 0, first: true, recent: [], sprites: [], settingsLoaded: false, timers: [] };
+const state = { key: sessionStorage.getItem("spikes402-key") || "", seq: 0, first: true, recent: [], sprites: [], timers: [] };
 
-const CLASS_COLOR = { "verified-signed": "#5b8cff", verified: "#3ddc84", impostor: "#ff4d6d", unknown: "#9aa3c7" };
-const OUTCOME_LABEL = { paid: "paid ⚡", "pow-solved": "did the work ⚙", free: "let in (policy)", challenged: "held at the wall (402)",
-  rejected: "bad proof, repelled", "rate-limited": "too fast, repelled (429)", busy: "wait your turn (503)", blocked: "blocked (403)" };
+// One colour per outcome group: the same four as the numbers on top.
+const GROUP = { paid: "paid", "pow-solved": "pow", free: "pow", challenged: "held",
+  rejected: "repelled", "rate-limited": "repelled", busy: "repelled", blocked: "repelled" };
+const COLOR = { paid: "#ffc83d", pow: "#00e5ff", held: "#9aa3c7", repelled: "#ff4d6d" };
+const OUTCOME = { paid: "paid ⚡", "pow-solved": "did the work", free: "let in (policy)", challenged: "stopped (402)",
+  rejected: "fake proof", "rate-limited": "too fast (429)", busy: "busy (503)", blocked: "blocked (403)" };
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -27,40 +30,44 @@ function el(tag, text, cls) {
   if (cls) e.className = cls;
   return e;
 }
-function kv(table, rows) {
-  table.replaceChildren(...rows.map(([k, v, cls]) => { const tr = el("tr"); tr.append(el("td", k)); tr.append(el("td", v, "num " + (cls || ""))); return tr; }));
+function rows(table, list) {
+  table.replaceChildren(...list.map((cells) => { const tr = el("tr"); cells.forEach((c) => tr.append(el("td", c))); return tr; }));
 }
 const fmt = (n) => (n ?? 0).toLocaleString();
 const time = (t) => new Date(t).toLocaleTimeString();
+const who = (v) => (v.bot || "unknown") + (v.class === "impostor" ? " (fake)" : "");
+const msg = (id, text, cls) => { $(id).className = "msg " + (cls || ""); $(id).textContent = text; };
 
-// --- login and tabs ---
+// --- login and pages ---
 async function login() {
   try {
     const me = await api("GET", "/api/whoami");
     sessionStorage.setItem("spikes402-key", state.key);
-    $("login").hidden = true; $("tabs").hidden = false; $("logout").hidden = false;
-    $("withdraw-tab").hidden = !me.withdraw_enabled;
+    $("login").hidden = true; $("nav").hidden = false; $("node").hidden = false;
+    $("withdraw").hidden = !me.withdraw_enabled;
     if (me.role !== "admin") $("login-error").textContent = "This key has the AI role: read and propose only.";
-    show("siege");
-    state.timers.push(setInterval(pollSiege, 1000), setInterval(refresh, 3000));
+    route();
+    state.timers.push(setInterval(pollSiege, 1000), setInterval(refresh, 5000));
     pollSiege(); refresh();
     requestAnimationFrame(frame);
   } catch (e) { $("login-error").textContent = e.message; }
 }
-function logout(msg) {
+function logout(text) {
   sessionStorage.removeItem("spikes402-key"); state.key = "";
   state.timers.forEach(clearInterval); state.timers = [];
-  document.querySelectorAll(".tab").forEach((s) => (s.hidden = true));
-  $("tabs").hidden = true; $("logout").hidden = true; $("login").hidden = false;
-  $("login-error").textContent = msg || "";
+  document.querySelectorAll(".page").forEach((s) => (s.hidden = true));
+  $("nav").hidden = true; $("node").hidden = true; $("login").hidden = false;
+  $("login-error").textContent = text || "";
 }
-function show(tab) {
-  document.querySelectorAll(".tab").forEach((s) => (s.hidden = s.id !== tab));
-  document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+function route() {
+  if (!state.key) return;
+  const settings = location.hash === "#settings";
+  $("siege").hidden = settings; $("settings").hidden = !settings; $("nav").hidden = settings;
+  if (settings) { loadSettings(); loadProposals(); loadWithdrawals(); }
 }
+window.addEventListener("hashchange", route);
 $("login-form").addEventListener("submit", (e) => { e.preventDefault(); state.key = $("key").value.trim(); $("key").value = ""; login(); });
-$("logout").addEventListener("click", () => logout());
-$("tabs").addEventListener("click", (e) => { const t = e.target.closest("button"); if (t) show(t.dataset.tab); });
+$("logout").addEventListener("click", () => { location.hash = ""; logout(); });
 
 // --- siege monitor ---
 async function pollSiege() {
@@ -72,85 +79,62 @@ async function pollSiege() {
   const now = Date.now();
   for (const v of visits) state.recent.push(Date.parse(v.time));
   state.recent = state.recent.filter((t) => now - t < 60000);
+  const o = data.counts.by_outcome || {};
   $("s-rate").textContent = fmt(state.recent.length);
-  const c = data.counts, o = c.by_outcome || {};
+  $("s-paid").textContent = fmt(o.paid);
+  $("s-pow").textContent = fmt(o["pow-solved"]);
   $("s-repelled").textContent = fmt((o.rejected || 0) + (o["rate-limited"] || 0) + (o.blocked || 0) + (o.busy || 0));
-  $("s-paid").textContent = fmt(o.paid); $("s-pow").textContent = fmt(o["pow-solved"]);
-  $("s-impostor").textContent = fmt((c.by_class || {}).impostor);
-  renderLegend(c); renderBots(c); renderFeed(visits);
-  if (!state.first && $("animate").checked && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
-    const show = visits.slice(-40);
-    show.forEach((v, i) => setTimeout(() => spawn(v), (i * 900) / show.length));
+  renderFeed(visits);
+  if (!state.first && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    const show = visits.slice(-12);
+    show.forEach((v, i) => setTimeout(() => spawn(v), (i * 1000) / show.length));
   }
   state.first = false;
-}
-
-function renderLegend(c) {
-  const cls = c.by_class || {};
-  $("legend").replaceChildren(...Object.keys(CLASS_COLOR).map((k) => {
-    const s = el("span"); const dot = el("i"); dot.style.background = CLASS_COLOR[k];
-    s.append(dot, k + " " + fmt(cls[k])); return s;
-  }), el("span", "· challenged " + fmt((c.by_outcome || {}).challenged) + " · total " + fmt(c.total)));
-}
-
-function renderBots(c) {
-  const rows = Object.entries(c.by_bot || {}).sort((a, b) => b[1] - a[1]).slice(0, 15);
-  if (!rows.length) { $("bots").replaceChildren(el("tr", null)); $("bots").firstChild.append(el("td", "No known crawlers yet.")); return; }
-  kv($("bots"), rows.map(([k, v]) => [k, fmt(v), k.startsWith("fake ") ? "bad-text" : ""]));
 }
 
 function renderFeed(visits) {
   const feed = $("feed");
   for (const v of visits) {
     const tr = el("tr");
-    tr.append(el("td", time(v.time)), el("td", v.visitor));
-    const c = el("td"); c.append(el("span", v.class, "pill c-" + v.class)); tr.append(c);
-    tr.append(el("td", v.bot || ""), el("td", v.path), el("td", OUTCOME_LABEL[v.outcome] || v.outcome, "o-" + v.outcome));
+    tr.append(el("td", time(v.time)), el("td", who(v)), el("td", v.path), el("td", OUTCOME[v.outcome] || v.outcome, GROUP[v.outcome]));
     feed.prepend(tr);
   }
-  while (feed.rows.length > 40) feed.deleteRow(feed.rows.length - 1);
+  while (feed.rows.length > 10) feed.deleteRow(feed.rows.length - 1);
 }
 
-// Sprites: a visitor walks from the frontier to the energy wall; then,
-// depending on the outcome, passes the gate, waits, bounces or bursts.
+// A visitor walks from the left to the wall, then passes the gate into the
+// site or fades at the wall (repelled ones drift back). Names show on hover,
+// or next to the dot when only a few are on screen.
 const SVGNS = "http://www.w3.org/2000/svg";
-const WALL_X = 610, GATE_Y = 220;
-const PASS = { paid: ["⚡", "#ffc83d"], "pow-solved": ["⚙", "#00e5ff"], free: ["✓", "#3ddc84"] };
-const STOP = { challenged: ["402", "#ffe08a", 0], rejected: ["✗", "#ff4d6d", 130], "rate-limited": ["429", "#ff9f43", 230],
-  busy: ["503", "#9aa3c7", 60], blocked: ["403", "#ff4d6d", 0] };
+const WALL_X = 610, GATE_Y = 205, MAX_SPRITES = 60, LABEL_BELOW = 6;
 
 function spawn(v) {
-  if (state.sprites.length > 150) state.sprites.shift().g.remove();
+  if (state.sprites.length >= MAX_SPRITES) state.sprites.shift().g.remove();
+  const group = GROUP[v.outcome] || "held";
   const g = document.createElementNS(SVGNS, "g"); g.setAttribute("class", "sprite");
-  const c = document.createElementNS(SVGNS, "circle"); c.setAttribute("r", 7); c.setAttribute("fill", CLASS_COLOR[v.class] || "#999");
-  if (v.class === "verified-signed") { c.setAttribute("stroke", "#fff"); c.setAttribute("stroke-width", 2); }
-  g.append(c);
-  if (v.bot) { const t = document.createElementNS(SVGNS, "text"); t.setAttribute("x", 10); t.setAttribute("y", 4); t.textContent = v.bot; g.append(t); }
-  const tag = document.createElementNS(SVGNS, "text"); tag.setAttribute("class", "tag"); tag.setAttribute("x", -8); tag.setAttribute("y", -11); g.append(tag);
+  const c = document.createElementNS(SVGNS, "circle"); c.setAttribute("r", 6); c.setAttribute("fill", COLOR[group]);
+  const title = document.createElementNS(SVGNS, "title"); title.textContent = who(v) + " · " + (OUTCOME[v.outcome] || v.outcome);
+  const label = document.createElementNS(SVGNS, "text"); label.setAttribute("x", 10); label.setAttribute("y", 4);
+  label.textContent = v.bot ? who(v) : "";
+  g.append(c, title, label);
   $("sprites").append(g);
-  const y0 = 50 + Math.random() * 330;
-  const passes = v.outcome in PASS;
-  state.sprites.push({ g, c, tag, v, t0: performance.now(), x0: 20 + Math.random() * 60, y0, ty: passes ? GATE_Y + (Math.random() * 30 - 15) : y0 });
+  const y0 = 40 + Math.random() * 320;
+  state.sprites.push({ g, label, group, t0: performance.now(), x0: 20 + Math.random() * 60, y0, ty: group === "paid" || group === "pow" ? GATE_Y + (Math.random() * 30 - 15) : y0 });
 }
 
-const ease = (t) => (t < 0 ? 0 : t > 1 ? 1 : 1 - Math.pow(1 - t, 3));
+const ease = (t) => (t < 0 ? 0 : t > 1 ? 1 : 1 - Math.pow(1 - t, 2));
 function frame(now) {
+  const few = state.sprites.length <= LABEL_BELOW;
   state.sprites = state.sprites.filter((s) => {
-    const t = now - s.t0, walk = 1600, after = t - walk;
-    let x, y, op = 1, r = 7;
+    const t = now - s.t0, walk = 2600, after = t - walk;
+    let x, y = s.ty, op = 1;
     if (after < 0) { const k = ease(t / walk); x = s.x0 + (WALL_X - s.x0) * k; y = s.y0 + (s.ty - s.y0) * k; }
-    else if (s.v.outcome in PASS) {
-      const [sym, col] = PASS[s.v.outcome]; const k = ease(after / 1400);
-      x = WALL_X + (860 - WALL_X) * k; y = s.ty + (245 - s.ty) * k; op = 1 - Math.max(0, (after - 900) / 600);
-      s.tag.textContent = sym; s.tag.setAttribute("fill", col);
+    else if (s.group === "paid" || s.group === "pow") {
+      const k = ease(after / 1800); x = WALL_X + (860 - WALL_X) * k; y = s.ty + (240 - s.ty) * k; op = 1 - Math.max(0, (after - 1000) / 800);
     } else {
-      const [sym, col, back] = STOP[s.v.outcome] || ["?", "#999", 0]; const k = ease(after / 900);
-      x = WALL_X - back * k; y = s.ty; op = 1 - Math.max(0, (after - 700) / 1300);
-      if (s.v.outcome === "blocked") r = 7 + 14 * k;
-      s.tag.textContent = sym; s.tag.setAttribute("fill", col);
-      if (after < 80 && !s.sparked) { s.sparked = true; spark(WALL_X + 12, y); }
+      const k = ease(after / 1500); x = WALL_X - (s.group === "repelled" ? 80 * k : 0); op = 1 - k;
     }
-    s.c.setAttribute("r", r);
+    s.label.style.display = few ? "" : "none";
     s.g.setAttribute("transform", `translate(${x.toFixed(1)},${y.toFixed(1)})`);
     s.g.setAttribute("opacity", Math.max(0, op).toFixed(2));
     if (op <= 0) { s.g.remove(); return false; }
@@ -158,92 +142,75 @@ function frame(now) {
   });
   if (state.key) requestAnimationFrame(frame);
 }
-function spark(x, y) {
-  const c = document.createElementNS(SVGNS, "circle");
-  c.setAttribute("class", "spark"); c.setAttribute("cx", x); c.setAttribute("cy", y); c.setAttribute("r", 4);
-  $("sprites").append(c);
-  const t0 = performance.now();
-  (function grow(now) { const k = (now - t0) / 500; c.setAttribute("r", 4 + 16 * k); c.setAttribute("opacity", 1 - k); if (k < 1) requestAnimationFrame(grow); else c.remove(); })(t0);
-}
 
-// --- overview, settings, proposals, withdraw ---
+// --- node indicator and settings page ---
 async function refresh() {
   let st;
   try { st = await api("GET", "/api/status"); } catch { return; }
-  const o = st.counts.by_outcome || {}, g = st.gate, n = g.node;
-  kv($("ov-traffic"), [["Up for", Math.round(st.uptime_seconds / 60) + " min"], ["Requests to protected pages", fmt(st.counts.total)],
-    ...Object.keys(OUTCOME_LABEL).map((k) => [OUTCOME_LABEL[k], fmt(o[k]), "o-" + k])]);
-  kv($("ov-classes"), Object.keys(CLASS_COLOR).map((k) => [k, fmt((st.counts.by_class || {})[k])]));
-  const node = [["Backend", st.settings.lightning_backend],
-    ["Circuit breaker", n.breaker_open ? "OPEN until " + time(n.breaker_open_until) : "closed (healthy)", n.breaker_open ? "bad-text" : "ok-text"],
-    ["Invoices created", fmt(n.invoices_created)], ["Invoice failures", fmt(n.invoice_failures)],
-    ["Invoice budget now", n.invoice_budget.toFixed(1)], ["Calls in flight", n.in_flight]];
-  if (n.last_error) node.push(["Last error", n.last_error + " (" + time(n.last_error_at) + ")", "bad-text"]);
-  if (st.node) node.push(["Balance", fmt(st.node.balance_sat) + " sats"], ["Channels", st.node.channels], ["Node", st.node.node_id.slice(0, 20)]);
-  if (st.node_error) node.push(["Node status", st.node_error, "bad-text"]);
-  kv($("ov-node"), node);
-  kv($("ov-gate"), [["Open invoices", fmt(g.open_invoices)], ["Used tokens remembered", fmt(g.spent_tokens)],
-    ["Pending proposals", fmt(st.pending_proposals)]]);
-  const s = st.settings;
-  kv($("set-current"), [["Origin", s.origin], ["Protected", s.protect.join(" ")], ["Price", s.price_sats + " sats"],
-    ["Proof-of-work", `${s.current_pow.Algorithm} difficulty ${s.current_pow.Difficulty}` + (s.current_pow.MemoryMiB ? `, ${s.current_pow.MemoryMiB} MiB` : "")],
-    ["PoW seconds per sat", s.pow_seconds_per_sat], ["402 answers / client / min", s.challenges_per_minute],
-    ["Invoices / min (all)", s.max_invoices_per_minute], ["Bot identification", s.identify_bots ? "on" : "off"],
-    ["Bot policies", Object.keys(s.bot_policies).length ? JSON.stringify(s.bot_policies) : "none (everyone pays the same)"],
-    ["Visitor IPs in monitor", s.visitor_ips], ["AI may apply changes", s.ai_can_apply ? "yes" : "no (propose only)"],
-    ["Withdrawals", s.withdraw_enabled ? "enabled → " + s.withdraw_destination : "disabled"]]);
-  if (!state.settingsLoaded) fillSettings(s);
-  $("prop-badge").hidden = !st.pending_proposals; $("prop-badge").textContent = st.pending_proposals;
+  const n = st.gate.node, s = st.settings;
+  const bad = n.breaker_open || st.node_error;
+  $("node").className = "node " + (bad ? "bad" : "ok");
+  $("node-text").textContent = bad ? "Lightning: problem" : "Lightning OK";
+  $("node").title = n.breaker_open ? "Paused after failures until " + time(n.breaker_open_until)
+    : st.node_error || n.last_error || (st.node ? fmt(st.node.balance_sat) + " sats, " + st.node.channels + " channels" : s.lightning_backend);
+  state.status = st;
+  if (!$("settings").hidden) renderCurrent(st);
   if (st.node) $("wd-balance").textContent = fmt(st.node.balance_sat);
   $("wd-dest").textContent = s.withdraw_destination || "";
-  loadProposals();
-  if (!$("withdraw-tab").hidden) loadWithdrawals();
 }
 
-async function loadWithdrawals() {
-  let w;
-  try { w = await api("GET", "/api/withdraw"); } catch { return; }
-  const rows = (w.history || []).slice().reverse().map((h) => [time(h.time) + " · " + fmt(h.amount_sat) + " sats", (h.ok ? "✓ " : "✗ ") + h.result, h.ok ? "ok-text" : "bad-text"]);
-  if (w.locked_until) rows.unshift(["Locked", "until " + time(w.locked_until), "bad-text"]);
-  kv($("wd-history"), rows.length ? rows : [["none yet", ""]]);
+function renderCurrent(st) {
+  const s = st.settings, n = st.gate.node, p = s.current_pow;
+  const list = [["Origin", s.origin], ["Protected", s.protect.join(" ")], ["Price", s.price_sats + " sats"],
+    ["Proof-of-work", `${p.Algorithm} difficulty ${p.Difficulty}` + (p.MemoryMiB ? `, ${p.MemoryMiB} MiB` : "")],
+    ["Invoices / min (all)", s.max_invoices_per_minute], ["Bot identification", s.identify_bots ? "on" : "off"],
+    ["Visitor IPs in monitor", s.visitor_ips], ["AI may apply changes", s.ai_can_apply ? "yes" : "no (propose only)"],
+    ["Lightning backend", s.lightning_backend], ["Invoices created / failed", fmt(n.invoices_created) + " / " + fmt(n.invoice_failures)],
+    ["Open invoices", fmt(st.gate.open_invoices)]];
+  if (n.last_error) list.push(["Last Lightning error", n.last_error + " (" + time(n.last_error_at) + ")"]);
+  rows($("set-current"), list);
 }
 
+async function loadSettings() {
+  let s;
+  try { s = await api("GET", "/api/settings"); } catch { return; }
+  fillSettings(s);
+  if (state.status) renderCurrent(state.status);
+}
 function fillSettings(s) {
   $("f-price").value = s.price_sats; $("f-sps").value = s.pow_seconds_per_sat; $("f-cpm").value = s.challenges_per_minute;
-  $("f-pol").value = JSON.stringify(s.bot_policies, null, 2); state.settingsLoaded = true; state.current = s;
+  $("f-pol").value = JSON.stringify(s.bot_policies, null, 2); state.current = s;
 }
 
 $("set-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const msg = $("set-msg"), cur = state.current, ch = {};
+  const cur = state.current, ch = {};
   try {
     if (+$("f-price").value !== cur.price_sats) ch.price_sats = +$("f-price").value;
     if (+$("f-sps").value !== cur.pow_seconds_per_sat) ch.pow_seconds_per_sat = +$("f-sps").value;
     if (+$("f-cpm").value !== cur.challenges_per_minute) ch.challenges_per_minute = +$("f-cpm").value;
     const pol = JSON.parse($("f-pol").value || "{}");
     if (JSON.stringify(pol) !== JSON.stringify(cur.bot_policies)) ch.bot_policies = pol;
-    if (!Object.keys(ch).length) { msg.className = "msg"; msg.textContent = "Nothing changed."; return; }
-    const s = await api("PUT", "/api/settings", ch);
-    fillSettings(s); msg.className = "msg ok"; msg.textContent = "Applied (until restart).";
-    refresh();
-  } catch (err) { msg.className = "msg err"; msg.textContent = err.message; }
+    if (!Object.keys(ch).length) return msg("set-msg", "Nothing changed.");
+    fillSettings(await api("PUT", "/api/settings", ch));
+    msg("set-msg", "Applied (until restart).", "ok");
+  } catch (err) { msg("set-msg", err.message, "err"); }
 });
 
 async function loadProposals() {
   let list;
   try { list = await api("GET", "/api/proposals"); } catch { return; }
   const box = $("prop-list");
-  if (!list.length) { box.replaceChildren(el("p", "No proposals.", "note")); return; }
+  if (!list.length) return box.replaceChildren(el("p", "None. The AI admin (if you use one) can only suggest; nothing changes until you approve.", "note"));
   box.replaceChildren(...list.map((p) => {
-    const d = el("div", null, "card");
-    d.append(el("p", `${time(p.created)} · by ${p.by} · ${p.status}` + (p.result ? " · " + p.result : "")));
-    if (p.reason) d.append(el("p", "Reason: " + p.reason));
-    d.append(el("pre", JSON.stringify(p.changes, null, 2)));
+    const d = el("div", null, "proposal");
+    d.append(el("p", `${time(p.created)} · ${p.status}` + (p.reason ? " · " + p.reason : "") + (p.result ? " · " + p.result : "")));
+    d.append(el("pre", JSON.stringify(p.changes)));
     if (p.status === "pending") {
-      for (const [act, label] of [["approve", "Approve and apply"], ["reject", "Reject"]]) {
-        const b = el("button", label, act === "reject" ? "" : "danger");
+      for (const [act, label] of [["approve", "Approve"], ["reject", "Reject"]]) {
+        const b = el("button", label);
         b.addEventListener("click", async () => {
-          try { await api("POST", `/api/proposals/${encodeURIComponent(p.id)}/${act}`); state.settingsLoaded = false; refresh(); }
+          try { await api("POST", `/api/proposals/${encodeURIComponent(p.id)}/${act}`); loadSettings(); loadProposals(); }
           catch (err) { alert(err.message); }
         });
         d.append(b, " ");
@@ -253,30 +220,39 @@ async function loadProposals() {
   }));
 }
 
+async function loadWithdrawals() {
+  if ($("withdraw").hidden) return;
+  let w;
+  try { w = await api("GET", "/api/withdraw"); } catch { return; }
+  const list = (w.history || []).slice(-5).reverse().map((h) => [time(h.time), fmt(h.amount_sat) + " sats", (h.ok ? "✓ " : "✗ ") + h.result]);
+  if (w.locked_until) list.unshift(["Locked", "until " + time(w.locked_until), ""]);
+  rows($("wd-history"), list);
+}
+
 let prepared = null;
 $("wd-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const msg = $("wd-msg"); msg.className = "msg"; msg.textContent = "";
+  msg("wd-msg", "");
   try {
     prepared = await api("POST", "/api/withdraw/prepare", { amount_sat: +$("wd-amount").value, password: $("wd-pw").value });
     $("wd-pw").value = "";
     $("wd-c-amount").textContent = fmt(prepared.amount_sat); $("wd-c-dest").textContent = prepared.destination;
     $("wd-c-exp").textContent = time(prepared.expires_at);
     $("wd-form").hidden = true; $("wd-confirm").hidden = false;
-  } catch (err) { msg.className = "msg err"; msg.textContent = err.message; }
+  } catch (err) { msg("wd-msg", err.message, "err"); }
 });
 $("wd-cancel").addEventListener("click", () => { prepared = null; $("wd-confirm").hidden = true; $("wd-form").hidden = false; });
 $("wd-confirm").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const msg = $("wd-msg"), amount = +$("wd-amount2").value;
-  if (!prepared || amount !== prepared.amount_sat) { msg.className = "msg err"; msg.textContent = "The amount does not match."; return; }
+  const amount = +$("wd-amount2").value;
+  if (!prepared || amount !== prepared.amount_sat) return msg("wd-msg", "The amount does not match.", "err");
   if (!confirm(`Last check: send ${fmt(amount)} sats to ${prepared.destination}? This cannot be undone.`)) return;
   try {
     const r = await api("POST", "/api/withdraw/confirm", { confirm_id: prepared.confirm_id, amount_sat: amount, password: $("wd-pw2").value });
-    msg.className = "msg ok"; msg.textContent = "Sent: " + r.result;
-  } catch (err) { msg.className = "msg err"; msg.textContent = err.message; }
+    msg("wd-msg", "Sent: " + r.result, "ok");
+  } catch (err) { msg("wd-msg", err.message, "err"); }
   $("wd-pw2").value = ""; $("wd-amount2").value = ""; prepared = null;
-  $("wd-confirm").hidden = true; $("wd-form").hidden = false; refresh();
+  $("wd-confirm").hidden = true; $("wd-form").hidden = false; refresh(); loadWithdrawals();
 });
 
 if (state.key) login();

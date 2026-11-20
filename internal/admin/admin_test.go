@@ -98,9 +98,15 @@ func TestDashboardStatic(t *testing.T) {
 			t.Fatalf("%s: %d %v", p, rec.Code, rec.Header())
 		}
 	}
+	// One main page (the siege field) with settings behind a link, no inline script.
 	rec, _ := e.call("GET", "/", "", nil)
-	if !strings.Contains(rec.Body.String(), "Siege monitor") || strings.Contains(rec.Body.String(), "<script>") {
+	if body := rec.Body.String(); !strings.Contains(body, `id="field"`) || !strings.Contains(body, `href="#settings"`) ||
+		strings.Contains(body, "<script>") {
 		t.Fatal("unexpected index.html")
+	}
+	// Visitor-controlled text (paths, bot names) must never be parsed as HTML.
+	if rec, _ := e.call("GET", "/app.js", "", nil); strings.Contains(rec.Body.String(), "innerHTML") {
+		t.Fatal("app.js uses innerHTML")
 	}
 }
 

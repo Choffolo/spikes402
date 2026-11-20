@@ -334,39 +334,42 @@ The key is compared in constant time, kept only in the browser tab
 to steal or forge. The page is plain HTML/JS embedded in the binary, with a
 strict Content-Security-Policy and no outside resources.
 
-Tabs:
+It is **one page**: the siege monitor (below), four numbers and a small
+Lightning light (green = fine, red = a problem; hover it for details).
+Everything else sits behind the discreet **Settings** link:
 
-- **Siege monitor**: a live view of the visitors hitting the walls (below).
-- **Overview**: requests by outcome and visitor class, open invoices, and the
-  Lightning node: balance, channels, circuit breaker, invoice failures.
-- **Settings**: everything currently in force (no secrets), and a form for
-  the few **safe settings** that can change while running: `price_sats`,
+- the few **safe settings** that can change while running: `price_sats`,
   `pow_seconds_per_sat`, `challenges_per_minute` and `bot_policies`. They are
   validated like the config file, apply immediately and **last until
   restart**; edit the file to keep them. Everything else (addresses,
   secrets, the Lightning backend, withdrawal destination) is config-file only.
-- **Proposals**: changes suggested by the AI admin, to approve or reject.
-- **Withdraw**: only if enabled.
+  A collapsed list shows all current settings (no secrets) and node details;
+- **AI proposals**: changes suggested by the AI admin, to approve or reject;
+- **Withdraw**, in its own red box at the bottom, only if enabled.
 
 ### Siege monitor
 
 ![Siege monitor](docs/siege-monitor.png)
 
-Every request to a protected page appears as a dot walking from the left
-("the frontier") to the glowing wall in front of your site. Its colour is the
-visitor class: blue = signed bot (Web Bot Auth), green = verified crawler,
-red = impostor, grey = unknown; known bots carry their name. At the wall:
-⚡ paid and ⚙ did the work pass through the gate; `402` stops at the wall
-(told the price); `✗` (bad proof), `429` (too fast) and `503` bounce back;
-`403` (blocked by a policy) bursts. Counters on top, a table of who comes
-knocking (fake bots marked) and a feed of the latest arrivals below.
+Every request to a protected page is a dot walking from the left to the
+glowing wall in front of your site. Four colours, matching the four numbers:
+
+- **gold**: paid ⚡ (passes the gate into the site)
+- **cyan**: did the proof-of-work (passes too)
+- **grey**: stopped at the wall, told the price (`402`)
+- **red**: repelled (fake proof, too fast `429`, busy `503`, blocked `403`)
+
+On top: visits per minute, paid, proof-of-work and repelled. Hover a dot to
+see who it is (`GPTBot`, `Googlebot (fake)`, …); names are written next to
+the dots only when few are on screen. "Last 10 visits" opens a small table.
 
 It polls the API once a second; nothing is pushed when nobody watches. The
 server keeps only the **last 1,000 visits** in a ring buffer plus counters
-(at most 200 bot names). Visitors are **anonymised by default**: a keyed hash
-that changes on every restart (`v-3fa2c1d9e07b`), no query strings. Use
-`"admin.visitor_ips": "truncate"` for networks (`203.0.113.0/24`) or `"full"`
-for addresses. Turn the animation off with the checkbox; it also respects
+(at most 200 bot names; the full breakdown by class, outcome and bot is in
+`GET /api/status` and the MCP tools). Visitors are **anonymised by default**:
+a keyed hash that changes on every restart (`v-3fa2c1d9e07b`), no query
+strings. Use `"admin.visitor_ips": "truncate"` for networks
+(`203.0.113.0/24`) or `"full"` for addresses. The animation respects
 "reduce motion".
 
 ## AI admin (MCP)
