@@ -62,9 +62,9 @@ Expected output:
 
 ```
 bot: GET http://localhost:8402/premium/article
-bot: 402: solving proof-of-work (difficulty 20)...
-bot: 402: solved, nonce=287631
-bot: 200 OK in 127ms
+bot: 402: solving proof-of-work (difficulty 24)...
+bot: 402: solved, nonce=8717585
+bot: 200 OK in 949ms
 Premium content at /premium/article. Thank you for paying (or working)!
 ```
 
@@ -82,14 +82,87 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `origin` | The website to protect (`http://` or `https://` URL) | required |
 | `price_sats` | Price of one request, in satoshis | required, ≥ 1 |
 | `protect` | Path patterns that require payment. `"/premium/**"` = everything under `/premium`; other patterns use [glob syntax](https://pkg.go.dev/path#Match), e.g. `"/*.pdf"` | required |
-| `pow_difficulty` | Leading zero bits for the puzzle. `0` = derive from price: 16 + bits of price (10 sats → 20) | `0` |
+| `pow_seconds_per_sat` | How much work replaces one sat: seconds of one CPU core (see [Proof-of-work pricing](#proof-of-work-pricing)) | `10` |
+| `pow_difficulty` | Leading zero bits for the puzzle. `0` = derive from `price_sats` × `pow_seconds_per_sat` | `0` |
 | `challenge_ttl_seconds` | How long a 402 offer (token and invoice) stays valid | `600` |
+| `challenges_per_minute` | 402 answers per client per minute; beyond that, `429 Too Many Requests` | `30` |
+| `max_invoices_per_minute` | Invoices created per minute, all clients together; beyond that, proof-of-work only | `300` |
+| `max_pending_invoices` | Open (unpaid, unexpired) invoices at once; beyond that, proof-of-work only | `10000` |
+| `client_ip_header` | Header holding the visitor's IP when Spikes402 runs behind your own proxy, e.g. `"X-Forwarded-For"`, `"X-Real-IP"`, `"CF-Connecting-IP"` | `""` (use the connection's address) |
+| `trusted_proxies` | IPs or CIDR ranges of those proxies, e.g. `["127.0.0.1"]`. The header is ignored from anyone else. Required with `client_ip_header` | `[]` |
 | `secret_key` | Signs tokens, ≥ 32 characters. Better set via `SPIKES402_SECRET_KEY` | random with `fake`, required otherwise |
 | `lightning.backend` | `"fake"` (development) or `"phoenixd"` | required |
 | `lightning.phoenixd_url` | phoenixd HTTP API | `"http://127.0.0.1:9740"` |
 | `lightning.phoenixd_password` | phoenixd *limited-access* password. Better set via `PHOENIXD_PASSWORD` | — |
 
 Unknown keys are rejected, so typos are caught at start-up.
+
+## Proof-of-work pricing
+
+The puzzle should cost a bot something comparable to the price, so the
+difficulty is derived from it:
+
+```
+difficulty = round(log2(price_sats × pow_seconds_per_sat × 2,000,000))   clamped to 16…32 bits
+```
+
+**Assumption:** one commodity CPU core does about **2 million** puzzle
+attempts per second (we measured ~2.7 million on a recent server core;
+the figure is rounded down). A gaming GPU is roughly **1000×** faster. The
+402 answer tells bots the expected time as `expected_seconds_one_cpu_core`.
+
+With the default `pow_seconds_per_sat: 10`:
+
+| Price | Difficulty | One CPU core (average) | GPU (roughly) |
+|---|---|---|---|
+| 1 sat | 24 bits | ~8 s | ~0.01 s |
+| 10 sats | 28 bits | ~2 min | ~0.1 s |
+| 100 sats | 31 bits | ~18 min | ~1 s |
+| 1000 sats | 32 bits (max) | ~36 min | ~2 s |
+
+Why 10 seconds per sat: a rented CPU core costs about $0.02 per hour, and at
+$100,000 per bitcoin one sat is $0.001, the price of about **3 minutes** of
+that core. Exact cost parity (`pow_seconds_per_sat: 180`) would make the puzzle
+unusable for CPU-only bots, so the default is about 20× cheaper than paying,
+while still making mass scraping slow. Raise it if you want work to cost as
+much as paying. Specialised hardware will always be relatively cheaper: GPUs
+are far faster, and that is accepted. Bitcoin mining ASICs, as far as we
+know, are built for 80-byte block headers and cannot directly solve this
+puzzle. The 32-bit cap keeps prices above ~1000 sats from producing puzzles
+no CPU bot would attempt; set `pow_difficulty` explicitly to go beyond it.
+
+## Protecting your Lightning node
+
+The paywall must never become a way to flood your node with invoice
+requests. Every unpaid request gets a proof-of-work challenge, which costs
+the server almost nothing. An invoice is only added when *all* of these
+allow it; otherwise the 402 answer offers proof-of-work only and the node is
+not called:
+
+| Guard | Default | What it stops |
+|---|---|---|
+| Per-client limit: `challenges_per_minute` per IP (per /64 for IPv6) | 30 | One client hammering the paywall. Beyond it: `429 Too Many Requests` + `Retry-After`. Free pages are never limited |
+| Same offer reused for the same client and page while more than half its lifetime is left | on | Reloads creating new invoices |
+| Global rate: `max_invoices_per_minute`, spread evenly (bursts up to 5 seconds' worth) | 300 | Many clients at once (botnets) |
+| Global cap: `max_pending_invoices` open at once | 10,000 | Unpaid invoices piling up |
+| At most 8 invoice requests in flight, each with a 3-second timeout | on | A slow node tying up the proxy |
+| Circuit breaker: after 5 failures in a row, the node is left alone for 30 s; after that a single failure pauses it again | on | Hitting a node that is already struggling |
+
+A visitor hanging up mid-request does not count as a node failure, so
+nobody can trip the breaker on purpose. Failures are logged at most once a
+minute.
+
+**Real client IPs.** Behind a reverse proxy or CDN, every request seems to
+come from the proxy. Set `client_ip_header` *and* `trusted_proxies`: the
+header is only believed on connections from those addresses. It is read
+from right to left, skipping trusted proxies, so a fake address a client
+puts at the start of `X-Forwarded-For` is ignored.
+
+**Bounded memory.** Rate-limit windows, open offers and used tokens are
+evicted when they expire. Hard caps also apply: 100,000 tracked clients per
+minute (newcomers beyond that share one allowance), `max_pending_invoices`
+offers, and 1,000,000 used tokens. When the used-token list is full, new
+redemptions are refused ("server busy") rather than risking a replay.
 
 ## Using a real Lightning node: phoenixd
 
@@ -142,17 +215,22 @@ Paying needs a `client.Payer` (your wallet). Only a fake payer exists so far.
 - **Your credentials stay with you:** Spikes402 removes its own `Authorization`
   header before forwarding to the origin and rejects paths like `/a/../b`.
 - **Only receiving:** use phoenixd's limited-access password, never the full one.
-- **Proof-of-work price is a guess.** Default difficulty grows with the price
-  but is not an economic equivalent of sats; a GPU or ASIC solves it much
-  faster than a CPU. Tune `pow_difficulty` for your site.
+- **Proof-of-work is cheaper on special hardware.** The difficulty is
+  calibrated for a CPU core (see [Proof-of-work pricing](#proof-of-work-pricing));
+  a GPU solves it about 1000× faster.
+- **Client IP header:** it is only trusted from `trusted_proxies`; list only
+  proxies you control.
 
 ## Known limits / not done yet
 
 - Spent tokens are remembered in memory: run **one** proxy instance; a restart
   forgets them (tokens expire after `challenge_ttl_seconds`, so the replay
   window is limited to that).
-- Every unpaid request creates a new invoice on your node. There is no rate
-  limiting yet; put the proxy behind a normal rate limiter for public use.
+- Rate limits are per IP. A botnet with many addresses can use up the global
+  invoice budget; paying visitors then get proof-of-work only until it
+  refills. The node itself stays protected. Bots behind one shared address
+  (office, carrier NAT) share a limit.
+- The proof-of-work price is an estimate (see above), not a market price.
 - If the site itself uses the `Authorization` header on protected paths,
   it will conflict with Spikes402.
 - No real wallet in the example bot; no LND backend; no Docker image yet.

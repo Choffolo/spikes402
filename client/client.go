@@ -39,7 +39,7 @@ type Client struct {
 	HTTP          *http.Client // defaults to http.DefaultClient
 	Mode          Mode
 	Payer         Payer // needed for ModePay
-	MaxDifficulty int   // refuse harder puzzles; 0 means 24
+	MaxDifficulty int   // refuse harder puzzles; 0 means 28 (about 2 min on one CPU core)
 	Logf          func(format string, args ...any)
 }
 
@@ -108,7 +108,7 @@ func (c *Client) answer(ctx context.Context, challenges []Challenge) (string, er
 		}
 		max := c.MaxDifficulty
 		if max == 0 {
-			max = 24
+			max = 28
 		}
 		if difficulty > max {
 			return "", fmt.Errorf("puzzle too hard: difficulty %d > limit %d", difficulty, max)
