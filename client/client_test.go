@@ -2,6 +2,8 @@ package client
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,25 +11,37 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Choffolo/spikes402/internal/botid"
 	"github.com/Choffolo/spikes402/internal/gate"
 	"github.com/Choffolo/spikes402/internal/lightning"
+	"github.com/Choffolo/spikes402/pow"
+	"github.com/Choffolo/spikes402/webbotauth"
 )
 
 // newProxy starts a gate with the fake backend in front of a dummy origin.
 func newProxy(t *testing.T, difficulty int) *httptest.Server {
 	t.Helper()
+	return newProxyPoW(t, pow.Params{Algorithm: pow.SHA256d, Difficulty: difficulty}, nil)
+}
+
+func newProxyPoW(t *testing.T, p pow.Params, classifier *botid.Classifier) *httptest.Server {
+	t.Helper()
 	fake := lightning.NewFake()
 	mux := http.NewServeMux()
 	mux.Handle(FakePayPath, fake.PayHandler())
 	mux.Handle("/", gate.New(gate.Options{
-		PriceSats:     10,
-		Protect:       []string{"/premium/**"},
-		PowDifficulty: difficulty,
-		ChallengeTTL:  time.Minute,
-		SecretKey:     []byte(strings.Repeat("s", 32)),
-		Lightning:     fake,
+		PriceSats:    10,
+		Protect:      []string{"/premium/**"},
+		PoW:          func(int64) pow.Params { return p },
+		Classifier:   classifier,
+		ChallengeTTL: time.Minute,
+		SecretKey:    []byte(strings.Repeat("s", 32)),
+		Lightning:    fake,
 		Next: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			io.WriteString(w, "secret article")
+			if r.Header.Get("Signature") != "" {
+				io.WriteString(w, " (signed)")
+			}
 		}),
 		ChallengesPerMinute:  100,
 		MaxInvoicesPerMinute: 100,
@@ -88,5 +102,63 @@ func TestParseChallenges(t *testing.T) {
 	cs := ParseChallenges(h)
 	if len(cs) != 2 || cs[0].Params["invoice"] != "lnbc1" || cs[1].Params["difficulty"] != "20" {
 		t.Fatalf("got %+v", cs)
+	}
+}
+
+func TestBotSolvesArgon2id(t *testing.T) {
+	srv := newProxyPoW(t, pow.Params{Algorithm: pow.Argon2id, Difficulty: 2, MemoryMiB: 8}, nil)
+	if got := fetch(t, &Client{Mode: ModePoW}, srv.URL+"/premium/a"); got != "secret article" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestBotArgonLimits(t *testing.T) {
+	srv := newProxyPoW(t, pow.Params{Algorithm: pow.Argon2id, Difficulty: 2, MemoryMiB: 128}, nil)
+	_, err := (&Client{Mode: ModePoW}).Get(context.Background(), srv.URL+"/premium/a")
+	if err == nil || !strings.Contains(err.Error(), "memory") {
+		t.Fatalf("got %v", err)
+	}
+	if _, err := (&Client{Mode: ModePoW, MaxArgonMemoryMiB: 128, MaxArgonDifficulty: 1}).Get(context.Background(), srv.URL+"/premium/a"); err == nil {
+		t.Fatal("difficulty limit ignored")
+	}
+}
+
+func TestPuzzleParsing(t *testing.T) {
+	c := &Client{}
+	for _, params := range []map[string]string{
+		{"difficulty": "10", "algorithm": "md5"},
+		{"difficulty": "x", "algorithm": "sha256d"},
+		{"difficulty": "10", "algorithm": "argon2id"},                     // no memory
+		{"difficulty": "10", "algorithm": "argon2id", "memory-mib": "1"},  // below the minimum
+		{"difficulty": "-1", "algorithm": "argon2id", "memory-mib": "16"}, // negative
+		{"difficulty": "29", "algorithm": "sha256d"},                      // over the default limit
+		{"difficulty": "15", "algorithm": "argon2id", "memory-mib": "16"}, // over the default limit
+	} {
+		if _, err := c.puzzle(Challenge{Scheme: "PoW", Params: params}); err == nil {
+			t.Errorf("%v accepted", params)
+		}
+	}
+}
+
+func TestBotSignsRequests(t *testing.T) {
+	_, key, _ := ed25519.GenerateKey(rand.Reader)
+	dir := httptest.NewServer(webbotauth.DirectoryHandler(key))
+	defer dir.Close()
+	classifier := botid.New(nil, webbotauth.NewVerifier(webbotauth.NewDirectories(true)))
+	srv := newProxyPoW(t, pow.Params{Algorithm: pow.SHA256d, Difficulty: 8}, classifier)
+
+	agent := dir.URL + webbotauth.DirectoryPath
+	c := &Client{Mode: ModePoW, Signer: &webbotauth.Signer{Key: key, AgentURL: agent}}
+	resp, err := c.Get(context.Background(), srv.URL+"/premium/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || string(body) != "secret article (signed)" {
+		t.Fatalf("got %d %q", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get(gate.ClassHeader); got != `verified-signed; name="`+agent+`"; method=web-bot-auth` {
+		t.Fatalf("class %q", got)
 	}
 }

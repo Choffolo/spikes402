@@ -279,7 +279,7 @@ func hasSuffix(name string, suffixes []string) bool {
 // after an hour.
 func (c *Classifier) Run(ctx context.Context, logf func(string, ...any)) {
 	for {
-		failed := false
+		failed, loaded := false, 0
 		for _, b := range c.bots {
 			if b.IPRangesURL == "" {
 				continue
@@ -293,6 +293,10 @@ func (c *Classifier) Run(ctx context.Context, logf func(string, ...any)) {
 			c.mu.Lock()
 			c.ranges[b.Name] = p
 			c.mu.Unlock()
+			loaded++
+		}
+		if loaded > 0 {
+			logf("botid: published IP ranges loaded for %d bots", loaded)
 		}
 		wait := rangesRefresh
 		if failed {

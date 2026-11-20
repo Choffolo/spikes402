@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Choffolo/spikes402/pow"
 )
 
 // maxTrackedClients bounds the memory of the rate limiter. When more
@@ -68,7 +70,8 @@ type offer struct {
 	token   string
 	invoice string // "" when no invoice could be offered
 	expires time.Time
-	powBits int
+	price   int64
+	pow     pow.Params
 }
 
 // pendingOffers remembers the invoices handed out and not yet expired,
@@ -145,6 +148,18 @@ func (p *pendingOffers) sweepLocked(now time.Time) {
 // The header is read from right to left, skipping trusted proxies, so a
 // value the client wrote itself at the start of X-Forwarded-For is ignored.
 func clientKey(r *http.Request, header string, trusted []*net.IPNet) string {
+	ip := clientIP(r, header, trusted)
+	if ip == nil {
+		return r.RemoteAddr
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
+// clientIP is the client's address (see clientKey), or nil.
+func clientIP(r *http.Request, header string, trusted []*net.IPNet) net.IP {
 	ip := remoteIP(r)
 	if header != "" && ip != nil && isTrusted(ip, trusted) {
 		hops := strings.Split(strings.Join(r.Header.Values(header), ","), ",")
@@ -159,13 +174,7 @@ func clientKey(r *http.Request, header string, trusted []*net.IPNet) string {
 			}
 		}
 	}
-	if ip == nil {
-		return r.RemoteAddr
-	}
-	if v4 := ip.To4(); v4 != nil {
-		return v4.String()
-	}
-	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+	return ip
 }
 
 func remoteIP(r *http.Request) net.IP {

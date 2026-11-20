@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Choffolo/spikes402/internal/botid"
+	"github.com/Choffolo/spikes402/internal/gate"
 	"github.com/Choffolo/spikes402/pow"
 )
 
@@ -23,6 +25,8 @@ type Config struct {
 	Protect              []string  `json:"protect"`                 // path patterns that require payment
 	PowSecondsPerSat     float64   `json:"pow_seconds_per_sat"`     // CPU-core seconds of work per sat, default 10
 	PowDifficulty        int       `json:"pow_difficulty"`          // 0 = derived from price and pow_seconds_per_sat
+	PowAlgorithm         string    `json:"pow_algorithm"`           // "sha256d" (default) or "argon2id"
+	Argon2MemoryMiB      int       `json:"argon2_memory_mib"`       // argon2id memory per attempt, default 16
 	ChallengeTTLSeconds  int       `json:"challenge_ttl_seconds"`   // default 600
 	ChallengesPerMinute  int       `json:"challenges_per_minute"`   // per client, default 30
 	MaxInvoicesPerMinute int       `json:"max_invoices_per_minute"` // all clients together, default 300
@@ -31,6 +35,12 @@ type Config struct {
 	TrustedProxies       []string  `json:"trusted_proxies"`         // IPs/CIDRs allowed to set client_ip_header
 	SecretKey            string    `json:"secret_key"`              // or env SPIKES402_SECRET_KEY
 	Lightning            Lightning `json:"lightning"`
+
+	// Bot identification. Policies are off by default: everyone pays the same.
+	IdentifyBots      *bool                  `json:"identify_bots"`         // default true
+	KnownBots         []botid.Bot            `json:"known_bots"`            // default: botid.DefaultBots
+	BotPolicies       map[string]gate.Policy `json:"bot_policies"`          // default: none
+	WebBotAuthDevMode bool                   `json:"web_bot_auth_dev_mode"` // accept http/localhost key directories (fake backend only)
 }
 
 // Lightning selects and configures the Lightning backend.
@@ -109,11 +119,46 @@ func (c *Config) complete() error {
 	if c.PowSecondsPerSat < 0 {
 		return errors.New(`"pow_seconds_per_sat" must be positive`)
 	}
-	if c.PowDifficulty == 0 {
-		c.PowDifficulty = pow.DifficultyForPrice(c.PriceSats, c.PowSecondsPerSat)
+	if c.PowAlgorithm == "" {
+		c.PowAlgorithm = pow.SHA256d
 	}
-	if c.PowDifficulty < 1 || c.PowDifficulty > pow.MaxDifficulty {
-		return fmt.Errorf(`"pow_difficulty" must be between 1 and %d`, pow.MaxDifficulty)
+	if c.PowAlgorithm == pow.Argon2id && c.Argon2MemoryMiB == 0 {
+		c.Argon2MemoryMiB = 16
+	}
+	switch c.PowAlgorithm {
+	case pow.SHA256d:
+		if c.Argon2MemoryMiB != 0 {
+			return errors.New(`"argon2_memory_mib" only applies with "pow_algorithm": "argon2id"`)
+		}
+		if c.PowDifficulty < 0 || c.PowDifficulty > pow.MaxDifficulty {
+			return fmt.Errorf(`"pow_difficulty" must be between 1 and %d`, pow.MaxDifficulty)
+		}
+	case pow.Argon2id:
+		if c.Argon2MemoryMiB < pow.MinArgonMemoryMiB || c.Argon2MemoryMiB > pow.MaxArgonMemoryMiB {
+			return fmt.Errorf(`"argon2_memory_mib" must be between %d and %d`, pow.MinArgonMemoryMiB, pow.MaxArgonMemoryMiB)
+		}
+		if c.PowDifficulty < 0 || c.PowDifficulty > pow.MaxArgonDifficulty {
+			return fmt.Errorf(`"pow_difficulty" must be between 1 and %d with argon2id`, pow.MaxArgonDifficulty)
+		}
+	default:
+		return errors.New(`"pow_algorithm" must be "sha256d" or "argon2id"`)
+	}
+	for k, p := range c.BotPolicies {
+		if p.PriceMultiplier == 0 {
+			p.PriceMultiplier = 1
+			c.BotPolicies[k] = p
+		}
+		if err := p.Validate(); err != nil {
+			return fmt.Errorf("bot_policies %q: %w", k, err)
+		}
+	}
+	for _, b := range c.KnownBots {
+		if b.Name == "" || b.UserAgent == "" {
+			return errors.New(`each of "known_bots" needs a "name" and a "user_agent"`)
+		}
+		if b.IPRangesURL != "" && !strings.HasPrefix(b.IPRangesURL, "https://") {
+			return fmt.Errorf("known_bots %q: ip_ranges_url must be https", b.Name)
+		}
 	}
 	if c.ChallengeTTLSeconds < 10 {
 		return errors.New(`"challenge_ttl_seconds" must be at least 10`)
@@ -133,6 +178,9 @@ func (c *Config) complete() error {
 	switch c.Lightning.Backend {
 	case "fake":
 	case "phoenixd":
+		if c.WebBotAuthDevMode {
+			return errors.New(`"web_bot_auth_dev_mode" is for local testing only and cannot be used with a real Lightning backend`)
+		}
 		if c.SecretKey == "" {
 			return errors.New(`"secret_key" (or SPIKES402_SECRET_KEY) is required with a real Lightning backend`)
 		}
@@ -163,6 +211,28 @@ func (c *Config) TrustedProxyNets() ([]*net.IPNet, error) {
 		nets = append(nets, n)
 	}
 	return nets, nil
+}
+
+// IdentifyBotsOn reports whether bot identification is enabled.
+func (c *Config) IdentifyBotsOn() bool {
+	return c.IdentifyBots == nil || *c.IdentifyBots
+}
+
+// Bots returns the list of known bots to check.
+func (c *Config) Bots() []botid.Bot {
+	if c.KnownBots != nil {
+		return c.KnownBots
+	}
+	return botid.DefaultBots
+}
+
+// PoW returns the puzzle for a price: the fixed pow_difficulty if set,
+// otherwise derived from the price and pow_seconds_per_sat.
+func (c *Config) PoW(priceSats int64) pow.Params {
+	if c.PowDifficulty > 0 {
+		return pow.Params{Algorithm: c.PowAlgorithm, Difficulty: c.PowDifficulty, MemoryMiB: c.Argon2MemoryMiB}
+	}
+	return pow.ForPrice(c.PowAlgorithm, c.Argon2MemoryMiB, priceSats, c.PowSecondsPerSat)
 }
 
 // ChallengeTTL returns the challenge lifetime as a duration.
