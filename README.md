@@ -24,20 +24,22 @@ miniature). Everything else passes through untouched.
 
 ## How it works
 
+```mermaid
+sequenceDiagram
+    participant B as Bot or browser
+    participant S as Spikes402
+    participant W as Your website
+    B->>S: GET /premium/article
+    S-->>B: 402 Payment Required (Lightning invoice + PoW challenge)
+    Note over B: Pay the invoice (get the preimage)<br/>or solve the puzzle (get a nonce)
+    B->>S: GET /premium/article + Authorization: L402 token:preimage or PoW token:nonce
+    S->>S: Check the proof (valid once only)
+    S->>W: Forward the request
+    W-->>S: Content
+    S-->>B: 200 OK + content
 ```
- bot ── GET /premium/article ──────────────▶ Spikes402 ──(free paths)──▶ your website
-     ◀── 402 Payment Required ─────────────     │
-         WWW-Authenticate: L402 macaroon=…, invoice=…   (pay)
-         WWW-Authenticate: PoW challenge=…, difficulty=… (or work)
-                                                │
- bot pays the invoice  ─▶ gets the preimage     │
-   or solves the puzzle ─▶ gets a nonce         │
-                                                │
- bot ── GET /premium/article ──────────────▶ Spikes402 ── checks proof ──▶ your website
-        Authorization: L402 <token>:<preimage>          (once only)
-     or Authorization: PoW <token>:<nonce>
-     ◀────────────────────────── 200 OK + content ◀────────────────────────
-```
+
+Free paths are forwarded to your website directly, with no challenge.
 
 1. A request to a protected path without proof gets **HTTP 402**. The answer
    holds a signed **token**, a Lightning **invoice** for the price, and a
