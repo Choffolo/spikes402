@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/Choffolo/spikes402/pow"
+	"github.com/Choffolo/spikes402/webbotauth"
 )
 
 // Payer pays a BOLT11 invoice and returns the payment preimage in hex.
@@ -39,8 +40,20 @@ type Client struct {
 	HTTP          *http.Client // defaults to http.DefaultClient
 	Mode          Mode
 	Payer         Payer // needed for ModePay
-	MaxDifficulty int   // refuse harder puzzles; 0 means 28 (about 2 min on one CPU core)
-	Logf          func(format string, args ...any)
+	MaxDifficulty int   // refuse harder sha256d puzzles; 0 means 28 (about 2 min on one CPU core)
+
+	// Argon2id puzzles: refuse harder ones, or ones needing more memory per
+	// attempt. 0 means 14 (about 3 min at 16 MiB) and 64 MiB. The solver
+	// runs at most 4 attempts at once, so it needs up to 4 x the memory.
+	MaxArgonDifficulty int
+	MaxArgonMemoryMiB  int
+
+	// Signer, if set, signs every request with Web Bot Auth (HTTP Message
+	// Signatures) so the site can recognise this bot.
+	Signer    *webbotauth.Signer
+	UserAgent string
+
+	Logf func(format string, args ...any)
 }
 
 // Challenge is one parsed WWW-Authenticate challenge.
@@ -102,19 +115,12 @@ func (c *Client) answer(ctx context.Context, challenges []Challenge) (string, er
 		if !ok {
 			return "", errors.New("server offered no proof-of-work challenge")
 		}
-		difficulty, err := strconv.Atoi(ch.Params["difficulty"])
-		if err != nil || ch.Params["algorithm"] != "sha256d" {
-			return "", errors.New("unsupported proof-of-work challenge")
+		p, err := c.puzzle(ch)
+		if err != nil {
+			return "", err
 		}
-		max := c.MaxDifficulty
-		if max == 0 {
-			max = 28
-		}
-		if difficulty > max {
-			return "", fmt.Errorf("puzzle too hard: difficulty %d > limit %d", difficulty, max)
-		}
-		c.logf("402: solving proof-of-work (difficulty %d)...", difficulty)
-		nonce, err := pow.Solve(ctx, ch.Params["challenge"], difficulty)
+		c.logf("402: solving %s proof-of-work (difficulty %d, ~%.1f s on one CPU core)...", p.Algorithm, p.Difficulty, p.ExpectedSeconds())
+		nonce, err := p.Solve(ctx, ch.Params["challenge"])
 		if err != nil {
 			return "", err
 		}
@@ -140,6 +146,45 @@ func (c *Client) answer(ctx context.Context, challenges []Challenge) (string, er
 	return "", fmt.Errorf("unknown mode %q", c.Mode)
 }
 
+// puzzle reads the PoW challenge and checks it is within our limits.
+func (c *Client) puzzle(ch Challenge) (pow.Params, error) {
+	difficulty, err := strconv.Atoi(ch.Params["difficulty"])
+	if err != nil {
+		return pow.Params{}, errors.New("bad proof-of-work difficulty")
+	}
+	p := pow.Params{Algorithm: ch.Params["algorithm"], Difficulty: difficulty}
+	limit, memLimit := c.MaxDifficulty, 0
+	switch p.Algorithm {
+	case pow.SHA256d:
+		if limit == 0 {
+			limit = 28
+		}
+	case pow.Argon2id:
+		if p.MemoryMiB, err = strconv.Atoi(ch.Params["memory-mib"]); err != nil {
+			return pow.Params{}, errors.New("bad argon2id memory")
+		}
+		limit, memLimit = c.MaxArgonDifficulty, c.MaxArgonMemoryMiB
+		if limit == 0 {
+			limit = 14
+		}
+		if memLimit == 0 {
+			memLimit = 64
+		}
+		if p.MemoryMiB > memLimit {
+			return pow.Params{}, fmt.Errorf("puzzle needs too much memory: %d MiB > limit %d MiB", p.MemoryMiB, memLimit)
+		}
+	default:
+		return pow.Params{}, fmt.Errorf("unsupported proof-of-work algorithm %q", p.Algorithm)
+	}
+	if difficulty > limit {
+		return pow.Params{}, fmt.Errorf("puzzle too hard: difficulty %d > limit %d", difficulty, limit)
+	}
+	if err := p.Validate(); err != nil {
+		return pow.Params{}, err
+	}
+	return p, nil
+}
+
 func (c *Client) do(ctx context.Context, url, auth string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -147,6 +192,14 @@ func (c *Client) do(ctx context.Context, url, auth string) (*http.Response, erro
 	}
 	if auth != "" {
 		req.Header.Set("Authorization", auth)
+	}
+	if c.UserAgent != "" {
+		req.Header.Set("User-Agent", c.UserAgent)
+	}
+	if c.Signer != nil {
+		if err := c.Signer.Sign(req); err != nil {
+			return nil, err
+		}
 	}
 	h := c.HTTP
 	if h == nil {

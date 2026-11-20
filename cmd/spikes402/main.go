@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"flag"
 	"log"
@@ -14,10 +15,11 @@ import (
 	"time"
 
 	"github.com/Choffolo/spikes402/client"
+	"github.com/Choffolo/spikes402/internal/botid"
 	"github.com/Choffolo/spikes402/internal/config"
 	"github.com/Choffolo/spikes402/internal/gate"
 	"github.com/Choffolo/spikes402/internal/lightning"
-	"github.com/Choffolo/spikes402/pow"
+	"github.com/Choffolo/spikes402/webbotauth"
 )
 
 func main() {
@@ -60,20 +62,34 @@ func main() {
 		backend = &lightning.Phoenixd{URL: cfg.Lightning.PhoenixdURL, Password: cfg.Lightning.PhoenixdPassword}
 	}
 
+	// Bot identification: Web Bot Auth signatures first, then the IP
+	// lists and reverse DNS published by the crawler operators.
+	var classifier *botid.Classifier
+	if cfg.IdentifyBotsOn() {
+		if cfg.WebBotAuthDevMode {
+			log.Print("WARNING: web_bot_auth_dev_mode: accepting key directories on http and local addresses, for development only")
+		}
+		classifier = botid.New(cfg.Bots(), webbotauth.NewVerifier(webbotauth.NewDirectories(cfg.WebBotAuthDevMode)))
+		go classifier.Run(context.Background(), log.Printf)
+	}
+
 	mux.Handle("/", gate.New(gate.Options{
-		PriceSats:     cfg.PriceSats,
-		Protect:       cfg.Protect,
-		PowDifficulty: cfg.PowDifficulty,
-		ChallengeTTL:  cfg.ChallengeTTL(),
-		SecretKey:     secret,
-		Lightning:     backend,
-		Next:          proxy,
+		PriceSats:    cfg.PriceSats,
+		Protect:      cfg.Protect,
+		PoW:          cfg.PoW,
+		ChallengeTTL: cfg.ChallengeTTL(),
+		SecretKey:    secret,
+		Lightning:    backend,
+		Next:         proxy,
 
 		ChallengesPerMinute:  cfg.ChallengesPerMinute,
 		MaxInvoicesPerMinute: cfg.MaxInvoicesPerMinute,
 		MaxPendingInvoices:   cfg.MaxPendingInvoices,
 		ClientIPHeader:       cfg.ClientIPHeader,
 		TrustedProxies:       trusted,
+
+		Classifier: classifier,
+		Policies:   cfg.BotPolicies,
 	}))
 
 	srv := &http.Server{
@@ -82,7 +98,11 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
-	log.Printf("spikes402 listening on %s, protecting %v of %s at %d sats or PoW difficulty %d (~%.1f s on one CPU core)",
-		cfg.Listen, cfg.Protect, cfg.Origin, cfg.PriceSats, cfg.PowDifficulty, pow.ExpectedSeconds(cfg.PowDifficulty))
+	p := cfg.PoW(cfg.PriceSats)
+	log.Printf("spikes402 listening on %s, protecting %v of %s at %d sats or %s PoW difficulty %d (~%.1f s on one CPU core)",
+		cfg.Listen, cfg.Protect, cfg.Origin, cfg.PriceSats, p.Algorithm, p.Difficulty, p.ExpectedSeconds())
+	if len(cfg.BotPolicies) > 0 {
+		log.Printf("bot policies: %v", cfg.BotPolicies)
+	}
 	log.Fatal(srv.ListenAndServe())
 }

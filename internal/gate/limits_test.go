@@ -156,7 +156,7 @@ func TestExpectedSolveTime(t *testing.T) {
 	if b.PoW.ExpectedSeconds != 0.0 { // difficulty 8: 256 hashes, rounds to 0.0 s
 		t.Fatalf("got %g", b.PoW.ExpectedSeconds)
 	}
-	f.gate.opt.PowDifficulty = 24
+	f.pow.Difficulty = 24
 	if b := f.challenge(t, "/premium/b"); b.PoW.ExpectedSeconds != 8.4 { // 2^24 / 2e6
 		t.Fatalf("got %g", b.PoW.ExpectedSeconds)
 	}
