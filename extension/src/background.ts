@@ -78,12 +78,11 @@ async function snapshot(): Promise<{ info: WalletInfo; settings: Settings; histo
   const s = await loadState();
   const host = await walletCall<{ unlocked?: boolean }>("status").catch(() => ({ unlocked: false }));
   const unlocked = !!host.unlocked;
-  const hint = lightningHint(s.settings.network, s.settings.breezApiKey);
+  const hint = lightningHint(s.settings.network);
   const info: WalletInfo = {
     unlocked,
     hasVault: !!s.vault,
     network: s.settings.network,
-    hasApiKey: !!s.settings.breezApiKey.trim(),
     lightningReady: hint.ready,
     lightningHint: hint.hint,
   };
@@ -126,7 +125,6 @@ async function unlock(password: string): Promise<{ ok: true }> {
   await walletCall("connect", {
     mnemonic,
     network: s.settings.network,
-    apiKey: s.settings.breezApiKey,
   });
   return { ok: true };
 }
@@ -306,7 +304,7 @@ async function ensureWalletHost(): Promise<void> {
     await chrome.offscreen.createDocument({
       url: "offscreen.html",
       reasons: [chrome.offscreen.Reason.WORKERS],
-      justification: "Run the local Breez Spark wallet (WASM) outside the short-lived service worker.",
+      justification: "Run the local Spark wallet outside the short-lived service worker.",
     });
     return;
   }

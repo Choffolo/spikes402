@@ -1,8 +1,8 @@
-import { breezBackend, rememberNetwork } from "./breez";
+import { sparkBackend } from "./spark";
 import { WalletError } from "./backend";
 
 type WalletMsg =
-  | { target: "wallet"; type: "connect"; mnemonic: string; network: "regtest" | "mainnet"; apiKey: string }
+  | { target: "wallet"; type: "connect"; mnemonic: string; network: "regtest" | "mainnet" }
   | { target: "wallet"; type: "disconnect" }
   | { target: "wallet"; type: "getInfo" }
   | { target: "wallet"; type: "receive"; amountSats: number }
@@ -24,23 +24,22 @@ async function handle(msg: WalletMsg): Promise<unknown> {
     case "status":
       return { unlocked };
     case "connect":
-      rememberNetwork(msg.network, msg.apiKey);
-      await breezBackend.connect({ mnemonic: msg.mnemonic, network: msg.network, apiKey: msg.apiKey });
+      await sparkBackend.connect({ mnemonic: msg.mnemonic, network: msg.network });
       unlocked = true;
       return { ok: true };
     case "disconnect":
-      await breezBackend.disconnect();
+      await sparkBackend.disconnect();
       unlocked = false;
       return { ok: true };
     case "getInfo":
       if (!unlocked) throw new WalletError("The wallet is locked.");
-      return breezBackend.getInfo();
+      return sparkBackend.getInfo();
     case "receive":
       if (!unlocked) throw new WalletError("The wallet is locked.");
-      return breezBackend.receiveLightning(msg.amountSats);
+      return sparkBackend.receiveLightning(msg.amountSats);
     case "send":
       if (!unlocked) throw new WalletError("The wallet is locked.");
-      return breezBackend.send(msg.destination, msg.amountSats);
+      return sparkBackend.send(msg.destination, msg.amountSats);
     default:
       throw new WalletError("Unknown wallet message");
   }

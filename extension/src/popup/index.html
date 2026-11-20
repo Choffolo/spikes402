@@ -84,15 +84,12 @@
       <h2>Network</h2>
       <label>Network
         <select id="set-network">
-          <option value="regtest">regtest (no real money, no Lightning)</option>
           <option value="mainnet">mainnet (tiny amounts only)</option>
+          <option value="regtest">regtest (no real money; Lightning usually unavailable)</option>
         </select>
       </label>
-      <label>Breez API key (needed for Lightning on mainnet)
-        <input id="set-apikey" type="password" autocomplete="off" placeholder="paste the key, stored only on this computer" />
-      </label>
-      <button id="btn-save-network" type="button" class="secondary">Save network settings</button>
-      <p class="muted">After changing the network or the key, unlock the wallet again.</p>
+      <button id="btn-save-network" type="button" class="secondary">Save network setting</button>
+      <p class="muted">After changing the network, lock and unlock the wallet to apply it. No API key is required.</p>
 
       <h2>Recent payments</h2>
       <ul id="history" class="history"></ul>

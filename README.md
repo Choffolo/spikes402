@@ -627,8 +627,8 @@ A Manifest V3 browser extension lives in [`extension/`](extension/). It keeps
 a non-custodial Spark wallet in the browser and injects `window.webln` so the
 402 page's "Pay with one click" can work without Alby. See
 [extension/README.md](extension/README.md) for how to build it and load it
-unpacked in Chrome or Firefox. It is an early prototype: Lightning send and
-receive need a Breez API key and Bitcoin mainnet (tiny amounts only).
+unpacked in Chrome or Firefox. It uses the official Spark SDK (no API key).
+On mainnet, use only tiny amounts; this is an early prototype.
 
 ## Donations
 

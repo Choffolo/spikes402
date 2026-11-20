@@ -6,10 +6,12 @@ so a [Spikes402](https://github.com/Choffolo/spikes402) 402 page can pay
 with one click (or automatically, when the amount is within your budget).
 
 Keys never leave this machine. There is no Spikes402 server for the wallet.
-The wallet talks only to the [Breez SDK (Spark)](https://sdk-doc-spark.breez.technology/)
-network you choose.
+The wallet uses the official [Spark SDK](https://docs.spark.money/wallets/typescript)
+(`@buildonspark/spark-sdk`, Apache-2.0). No API key and no developer
+signup are required.
 
 This is an early prototype. Do not store more than you can afford to lose.
+On mainnet, use only tiny amounts.
 
 ## What works today
 
@@ -18,52 +20,56 @@ This is an early prototype. Do not store more than you can afford to lose.
 - Encrypt the phrase at rest with your password (WebCrypto: PBKDF2-SHA-256,
   600,000 iterations, AES-256-GCM). Unlock decrypts it only in memory, in
   the wallet host page, not in the service worker.
-- Popup: balance, Receive (Lightning invoice + QR), Send to an invoice or
-  address, budget settings, payment history.
+- Popup: balance, Receive (Lightning invoice + QR), Send to a Lightning
+  invoice or a Spark address, budget settings, payment history.
 - Budgets: max sats per page payment (default 10), max sats per site per
   day (default 100), global daily cap (default 500), auto-pay on/off.
 - `window.webln` on http(s) pages: `enable`, `sendPayment`, `getInfo`.
   `sendPayment` decodes the invoice amount, refuses amountless invoices and
   amounts above the per-payment cap, pays silently when auto-pay is on and
   the daily caps still fit, and otherwise asks you to confirm in the popup
-  (the page origin is shown).
-- Default network is **Spark regtest** (no real money). No Breez API key is
-  required there.
+  (the page origin is shown). After a Lightning payment the extension waits
+  for the payment preimage (needed for WebLN / L402).
+- Default network is **Bitcoin mainnet**. Spark **regtest** is available
+  for development (no real money). Creating a Lightning invoice on regtest
+  works without an API key; paying or topping up from a real wallet such
+  as Phoenix needs **mainnet**.
 
 ## What is stubbed or limited
 
-- **Lightning send and receive do not work on regtest.** Breez's Spark
-  regtest network has no Lightning. Use it to create a wallet and try the
-  UI. To pay a real invoice or to top up from Phoenix, switch to **mainnet**
-  and paste a Breez API key (see below). Use tiny amounts only.
 - There is no card on-ramp, no community-average pricing, and no time-based
   access (those ideas are parked).
-- The Breez WASM and JS are copied into the extension at build time
-  (`dist/vendor/breez-sdk`). They are not executed until you unlock a
-  wallet. Connecting to Breez on a machine without the key/network it
-  expects will surface an error in the popup, not a fake success.
+- On-chain Bitcoin addresses are not a send target in this prototype (use
+  a Lightning invoice or a Spark address).
 - Firefox has no `chrome.offscreen` API. The extension opens a small host
-  window instead, so the WASM wallet can keep running. Chrome uses a hidden
+  window instead, so the wallet can keep running. Chrome uses a hidden
   offscreen document. See [Firefox](#firefox).
 
-## Request a Breez API key (needed for Lightning on mainnet)
+The Spark SDK is bundled into the extension at build time (including its
+local WASM for Spark signing). Nothing in that package is fetched from the
+network as code. The wallet then talks to the public Spark operators and
+Lightning service provider listed below.
 
-The Breez SDK requires an API key to operate on **mainnet**. We do not sign
-up for you, and no key is bundled with this repository.
+## Network hosts
 
-1. Open the request form: [https://breez.technology/contact/apikey](https://breez.technology/contact/apikey)
-   (the same form can be posted with
-   `curl https://breez.technology/contact/apikey` and fields `fullname`,
-   `company`, `email`, and `message` — see
-   [Breez's getting started docs](https://sdk-doc-spark.breez.technology/guide/getting_started.html)).
-2. Wait for Breez to email the key.
-3. In the extension popup, set the network to **mainnet**, paste the key
-   (it is stored only in this browser, in `chrome.storage.local`), save,
-   then lock and unlock the wallet so the setting is applied.
+The extension is allowed to connect only to these HTTPS endpoints (Spark
+SDK v0.16.0 defaults). They are infrastructure, not a place we load
+JavaScript from:
 
-Until that is done, Receive and paying a Lightning invoice show a clear
-error. The rest of the extension (budgets, WebLN injection, history) still
-runs.
+| Host | Role |
+| --- | --- |
+| `https://api.lightspark.com` | Spark Service Provider (Lightning send/receive), mainnet and regtest |
+| `wss://api.lightspark.com` | SSP GraphQL subscriptions |
+| `https://0.spark.lightspark.com` | Spark operator |
+| `https://spark-operator.breez.technology` | Spark operator (not the Breez SDK) |
+| `https://2.spark.flashnet.xyz` | Spark operator |
+| `https://mempool.space` | Mainnet chain lookup (electrs) |
+| `https://regtest-mempool.us-west-2.sparkinfra.net` | Regtest chain lookup |
+
+These also appear in `manifest.json` as `host_permissions` and in the
+extension page CSP `connect-src`. If the Spark SDK changes its default
+hosts, this list and the manifest must be updated together
+(`src/spark-util.ts` holds the same list).
 
 ## Build
 
@@ -77,9 +83,9 @@ npm run lint
 npm run build
 ```
 
-`npm run build` type-checks, bundles the extension into `dist/`, and copies
-the Breez web/WASM files into `dist/vendor/breez-sdk` so they load from the
-extension package (not from the network).
+`npm run build` type-checks and bundles the extension into `dist/`. The
+Spark SDK (including its WASM) is compiled into the offscreen / wallet
+host script, not loaded from a CDN.
 
 `npm run pack` also writes `/workspace/spikes402-extension.zip` (a zip of
 `dist/`) for copying onto another machine.
@@ -126,9 +132,12 @@ Gaps compared to Chrome:
   service worker in plaintext (it is decrypted only in the wallet host).
 - **Origin in prompts.** Confirmation text includes the page origin, not
   just the invoice.
-- **No remote code.** Manifest V3 `script-src 'self' 'wasm-unsafe-eval'`
-  for extension pages. The Breez WASM is bundled locally. There is no
-  eval of page data and no remote script or WASM fetch for the SDK.
+- **No remote code.** Manifest V3 CSP for extension pages is
+  `script-src 'self' 'wasm-unsafe-eval'` (the Spark SDK instantiates
+  bundled WASM for signing; there is no `unsafe-eval` and no remote
+  script). `connect-src` is limited to the hosts above. The service worker
+  does not run the wallet; an offscreen document (or a Firefox host
+  window) does.
 - **Password.** Choose a unique password. It is not recoverable. The
   recovery phrase is; the backup screen is the only time it is shown after
   a new wallet is created.
@@ -136,10 +145,9 @@ Gaps compared to Chrome:
 
 ## Tests
 
-Unit tests cover budget decisions (silent pay, confirm, refuse, day reset)
-and BOLT11 amount parsing (multipliers, rounding up fractional sats,
-amountless invoices, testnet/regtest prefixes). Crypto tests cover mnemonic
-generation and password encryption.
+Unit tests cover budget decisions (silent pay, confirm, refuse, day reset),
+BOLT11 amount parsing, mnemonic generation and password encryption, and
+Spark helpers (network mapping, fee cap, address shape, payment status).
 
 ```sh
 npm test

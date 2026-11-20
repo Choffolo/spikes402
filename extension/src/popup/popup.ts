@@ -70,7 +70,6 @@ async function refresh() {
   ($("set-per-day") as HTMLInputElement).value = String(settings.maxSatsPerDay);
   ($("set-autopay") as HTMLInputElement).checked = settings.autoPay;
   ($("set-network") as HTMLSelectElement).value = settings.network;
-  ($("set-apikey") as HTMLInputElement).value = settings.breezApiKey;
 
   const list = $("history");
   list.replaceChildren();
@@ -215,10 +214,9 @@ $("btn-save-network").addEventListener("click", async () => {
       type: "saveSettings",
       settings: {
         network: ($("set-network") as HTMLSelectElement).value,
-        breezApiKey: ($("set-apikey") as HTMLInputElement).value.trim(),
       },
     });
-    showMsg("Network settings saved. Lock and unlock the wallet to apply them.");
+    showMsg("Network setting saved. Lock and unlock the wallet to apply it.");
     await refresh();
   } catch (e) {
     showMsg(e instanceof Error ? e.message : String(e), true);

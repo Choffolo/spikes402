@@ -5,8 +5,6 @@ export type Network = "regtest" | "mainnet";
 
 export type Settings = BudgetSettings & {
   network: Network;
-  /** Breez API key, required for Lightning on mainnet. Never committed. */
-  breezApiKey: string;
 };
 
 export const defaultSettings = (): Settings => ({
@@ -14,8 +12,7 @@ export const defaultSettings = (): Settings => ({
   maxSatsPerSitePerDay: 100,
   maxSatsPerDay: 500,
   autoPay: true,
-  network: "regtest",
-  breezApiKey: "",
+  network: "mainnet",
 });
 
 export type PaymentRecord = {
@@ -48,7 +45,6 @@ export type WalletInfo = {
   unlocked: boolean;
   hasVault: boolean;
   network: Network;
-  hasApiKey: boolean;
   balanceSats?: number;
   pubkey?: string;
   lightningReady: boolean;

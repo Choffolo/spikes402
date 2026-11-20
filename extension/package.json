@@ -2,7 +2,7 @@
   "name": "spikes402-extension",
   "version": "0.1.0",
   "private": true,
-  "description": "Minimal non-custodial WebLN wallet extension for Spikes402, built on the Breez SDK (Spark).",
+  "description": "Minimal non-custodial WebLN wallet extension for Spikes402, built on the official Spark SDK.",
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit && vite build && node scripts/copy-static.mjs",
@@ -15,7 +15,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@breeztech/breez-sdk-spark": "0.28.6",
+    "@buildonspark/spark-sdk": "0.16.0",
     "@scure/bip39": "2.4.0",
     "uqr": "^0.1.3"
   },
