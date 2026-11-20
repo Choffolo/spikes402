@@ -63,7 +63,7 @@ type Admin struct {
 // The destination can only be set here, never through the API.
 type Withdraw struct {
 	Enabled              bool   `json:"enabled"`
-	Destination          string `json:"destination"`            // Lightning address (name@domain) or Bitcoin address
+	Destination          string `json:"destination"`            // Lightning/BIP353 address (name@domain, "₿" optional) or Bitcoin address
 	Password             string `json:"password"`               // or env SPIKES402_WITHDRAW_PASSWORD
 	PhoenixdFullPassword string `json:"phoenixd_full_password"` // or env PHOENIXD_FULL_PASSWORD
 	FeerateSatByte       int64  `json:"feerate_sat_vbyte"`      // on-chain destination only
@@ -283,6 +283,7 @@ func (c *Config) checkAdmin() error {
 
 func (c *Config) checkWithdraw() error {
 	w := &c.Withdraw
+	w.Destination = lightning.NormalizeDestination(w.Destination)
 	if !w.Enabled {
 		if w.Destination != "" || w.Password != "" || w.PhoenixdFullPassword != "" {
 			return errors.New(`withdraw settings are set but "withdraw.enabled" is false`)
@@ -299,7 +300,7 @@ func (c *Config) checkWithdraw() error {
 			return errors.New(`an on-chain "withdraw.destination" needs "withdraw.feerate_sat_vbyte" (1-1000)`)
 		}
 	default:
-		return errors.New(`"withdraw.destination" must be a Lightning address (name@domain) or a Bitcoin address`)
+		return errors.New(`"withdraw.destination" must be a Lightning address or a BIP353 address (name@domain, a leading ₿ is fine; phoenixd pays both) or a Bitcoin address`)
 	}
 	if len(w.Password) < 16 {
 		return errors.New(`"withdraw.password" (or SPIKES402_WITHDRAW_PASSWORD) must be at least 16 characters`)
