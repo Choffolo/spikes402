@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -50,7 +51,7 @@ const (
 	Unknown  Kind = "unknown"         // no (checkable) claim
 	Impostor Kind = "impostor"        // claims a known bot, the check says no
 	Verified Kind = "verified"        // known bot, address checks out
-	Signed   Kind = "verified-signed" // valid Web Bot Auth signature
+	Signed   Kind = "verified-signed" // valid Web Bot Auth signature from a trusted agent
 )
 
 // Class is the result of Classify.
@@ -98,6 +99,13 @@ const (
 
 // Classifier classifies requests. Create it with New.
 type Classifier struct {
+	// TrustedAgents are the domains whose Web Bot Auth key directories are
+	// trusted (a directory on the domain or a subdomain). A valid signature
+	// from anywhere else proves nothing, since anyone can publish a key,
+	// so such requests are classified by the other checks. Empty: no
+	// request is ever "verified-signed". Set before the first Classify.
+	TrustedAgents []string
+
 	bots     []Bot
 	sig      *webbotauth.Verifier // nil: Web Bot Auth off
 	resolver Resolver
@@ -139,7 +147,10 @@ func (c *Classifier) Classify(r *http.Request, ip net.IP, scheme string) Class {
 		res := c.sig.Verify(r, scheme)
 		switch res.Outcome {
 		case webbotauth.Verified:
-			return Class{Kind: Signed, Name: res.Agent, Method: "web-bot-auth"}
+			if c.trusted(res.Agent) {
+				return Class{Kind: Signed, Name: res.Agent, Method: "web-bot-auth"}
+			}
+			note = "signature valid, but its key directory is not on a trusted domain (web_bot_auth_trusted_agents): " + res.Agent
 		case webbotauth.Invalid, webbotauth.Unverified:
 			note = "signature " + string(res.Outcome) + ": " + res.Reason
 		}
@@ -157,6 +168,21 @@ func (c *Classifier) Classify(r *http.Request, ip net.IP, scheme string) Class {
 		return Class{Kind: kind, Name: b.Name, Method: method, Note: note}
 	}
 	return Class{Kind: Unknown, Note: note}
+}
+
+// trusted reports whether a key directory URL is on a trusted domain.
+func (c *Classifier) trusted(agentURL string) bool {
+	u, err := url.Parse(agentURL)
+	if err != nil {
+		return false
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	for _, d := range c.TrustedAgents {
+		if host == d || strings.HasSuffix(host, "."+d) {
+			return true
+		}
+	}
+	return false
 }
 
 func join(a, b string) string {

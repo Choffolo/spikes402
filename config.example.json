@@ -1,5 +1,5 @@
 {
-  "listen": ":8402",
+  "listen": "127.0.0.1:8402",
   "origin": "http://localhost:8080",
   "price_sats": 1,
   "protect": ["/premium/**"],

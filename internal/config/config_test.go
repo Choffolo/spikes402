@@ -21,7 +21,7 @@ func TestExampleConfigLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Listen != ":8402" || c.PowSecondsPerSat != 10 || c.PoW(c.PriceSats).Difficulty != 24 || c.ChallengeTTLSeconds != 600 ||
+	if c.Listen != "127.0.0.1:8402" || c.PowSecondsPerSat != 10 || c.PoW(c.PriceSats).Difficulty != 24 || c.ChallengeTTLSeconds != 600 ||
 		c.ChallengesPerMinute != 30 || c.MaxInvoicesPerMinute != 300 || c.MaxPendingInvoices != 10_000 || c.ClientIPHeader != "" {
 		t.Fatalf("unexpected defaults: %+v", c)
 	}
@@ -128,5 +128,40 @@ func TestBotDefaults(t *testing.T) {
 	}
 	if c.IdentifyBotsOn() || c.Bots()[0].Name != "MyBot" || c.BotPolicies["impostor"].PriceMultiplier != 1 || c.BotPolicies["verified"].PriceMultiplier != 2 {
 		t.Fatalf("got %+v", c)
+	}
+}
+
+func TestDangerousConfigRefused(t *testing.T) {
+	const b = `"origin":"http://o","price_sats":5,"protect":["/x/**"],"lightning":{"backend":"fake"}`
+	for name, extra := range map[string]string{
+		"trust every IPv4":        `"client_ip_header":"X-Forwarded-For","trusted_proxies":["0.0.0.0/0"]`,
+		"trust every IPv6":        `"client_ip_header":"X-Forwarded-For","trusted_proxies":["10.0.0.1","::/0"]`,
+		"admin open to all":       `"admin":{"key":"` + strings.Repeat("a", 32) + `","listen":"0.0.0.0:8404","allowed_ips":["0.0.0.0/0"]}`,
+		"fake backend, public":    `"listen":":8402"`,
+		"fake backend, LAN":       `"listen":"192.168.1.5:8402"`,
+		"fake backend, all v6":    `"listen":"[::]:8402"`,
+		"trusted agents, no host": `"web_bot_auth_trusted_agents":["example.com"]`,
+		"bad trusted agent":       `"web_bot_auth_trusted_agents":["https://example.com/x"],"public_hosts":["mysite.example"]`,
+		"bad public host":         `"public_hosts":["mysite.example:443"]`,
+		"zero connections":        `"max_connections":-1`,
+	} {
+		if _, err := load(t, `{`+b+`,`+extra+`}`); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// The explicit override accepts the dangerous ones.
+	for _, extra := range []string{`"trusted_proxies":["0.0.0.0/0"],"client_ip_header":"X-Real-IP"`, `"listen":":8402"`} {
+		if _, err := load(t, `{`+b+`,"unsafe_allow_dangerous_config":true,`+extra+`}`); err != nil {
+			t.Errorf("override: %v", err)
+		}
+	}
+	// Normal settings stay accepted, and the fake backend defaults to localhost.
+	c, err := load(t, `{`+b+`,"client_ip_header":"X-Forwarded-For","trusted_proxies":["10.0.0.0/8","::1"],"public_hosts":["MySite.Example."],"web_bot_auth_trusted_agents":["Bots.Example"]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Listen != "127.0.0.1:8402" || c.PublicHosts[0] != "mysite.example" || c.WebBotAuthTrustedAgents[0] != "bots.example" ||
+		c.MaxConnections != 10_000 || c.ReadTimeoutSeconds != 60 || c.WriteTimeoutSeconds != 300 || c.ProtectCaseSensitive {
+		t.Fatalf("unexpected: %+v", c)
 	}
 }
