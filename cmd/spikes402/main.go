@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Choffolo/spikes402/client"
+	"github.com/Choffolo/spikes402/internal/admin"
 	"github.com/Choffolo/spikes402/internal/botid"
 	"github.com/Choffolo/spikes402/internal/config"
 	"github.com/Choffolo/spikes402/internal/gate"
@@ -73,7 +74,15 @@ func main() {
 		go classifier.Run(context.Background(), log.Printf)
 	}
 
-	mux.Handle("/", gate.New(gate.Options{
+	// The admin dashboard, if enabled, watches every protected request.
+	var monitor *admin.Monitor
+	var observer func(gate.Event)
+	if cfg.AdminEnabled() {
+		monitor = admin.NewMonitor(cfg.Admin.VisitorIPs, time.Now())
+		observer = monitor.Observe
+	}
+
+	g := gate.New(gate.Options{
 		PriceSats:    cfg.PriceSats,
 		Protect:      cfg.Protect,
 		PoW:          cfg.PoW,
@@ -90,7 +99,13 @@ func main() {
 
 		Classifier: classifier,
 		Policies:   cfg.BotPolicies,
-	}))
+		Observer:   observer,
+	})
+	mux.Handle("/", g)
+
+	if cfg.AdminEnabled() {
+		startAdmin(cfg, g, monitor, backend)
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -105,4 +120,37 @@ func main() {
 		log.Printf("bot policies: %v", cfg.BotPolicies)
 	}
 	log.Fatal(srv.ListenAndServe())
+}
+
+// startAdmin serves the admin API and dashboard on their own address
+// (localhost by default), separate from the public proxy.
+func startAdmin(cfg *config.Config, g *gate.Gate, monitor *admin.Monitor, backend lightning.Backend) {
+	opt := admin.Options{Config: cfg, Gate: g, Monitor: monitor}
+	if insp, ok := backend.(lightning.Inspector); ok {
+		opt.Node = insp
+	}
+	if cfg.Withdraw.Enabled {
+		switch b := backend.(type) {
+		case *lightning.Fake:
+			opt.Withdrawer = b
+		case *lightning.Phoenixd:
+			opt.Withdrawer = &lightning.PhoenixdWithdrawer{URL: b.URL, FullPassword: cfg.Withdraw.PhoenixdFullPassword, FeerateSatByte: cfg.Withdraw.FeerateSatByte}
+		}
+		log.Printf("withdrawals ENABLED to %s (admin dashboard, withdraw password, two confirmations)", cfg.Withdraw.Destination)
+	}
+	srv := &http.Server{
+		Addr:              cfg.Admin.Listen,
+		Handler:           admin.New(opt).Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
+	go func() { log.Fatal(srv.ListenAndServe()) }()
+	ai := "no AI key"
+	if cfg.Admin.AIKey != "" {
+		ai = "AI may propose changes"
+		if cfg.Admin.AICanApply {
+			ai = "AI may apply changes"
+		}
+	}
+	log.Printf("admin dashboard on http://%s (%s)", cfg.Admin.Listen, ai)
 }
