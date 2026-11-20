@@ -77,3 +77,51 @@ func (p *Phoenixd) CreateInvoice(ctx context.Context, amountSat int64, memo stri
 	copy(inv.PaymentHash[:], hash)
 	return inv, nil
 }
+
+func (p *Phoenixd) get(ctx context.Context, path string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(p.URL, "/")+path, nil)
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth("", p.Password)
+	client := p.HTTP
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("phoenixd: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("phoenixd: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("phoenixd: HTTP %d", resp.StatusCode)
+	}
+	return json.Unmarshal(body, out)
+}
+
+// NodeInfo implements Inspector with GET /getinfo and GET /getbalance,
+// which the limited-access password may call.
+func (p *Phoenixd) NodeInfo(ctx context.Context) (NodeInfo, error) {
+	var info struct {
+		NodeID   string            `json:"nodeId"`
+		Chain    string            `json:"chain"`
+		Version  string            `json:"version"`
+		Channels []json.RawMessage `json:"channels"`
+	}
+	var bal struct {
+		BalanceSat   int64 `json:"balanceSat"`
+		FeeCreditSat int64 `json:"feeCreditSat"`
+	}
+	if err := p.get(ctx, "/getinfo", &info); err != nil {
+		return NodeInfo{}, err
+	}
+	if err := p.get(ctx, "/getbalance", &bal); err != nil {
+		return NodeInfo{}, err
+	}
+	return NodeInfo{NodeID: info.NodeID, Chain: info.Chain, Version: info.Version, Channels: len(info.Channels),
+		BalanceSat: bal.BalanceSat, FeeCreditSat: bal.FeeCreditSat}, nil
+}

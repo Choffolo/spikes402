@@ -63,6 +63,30 @@ bot verificati debbano pagare meno, di più o niente è una **questione
 aperta**. Per chi vuole sperimentare c'è l'opzione `bot_policies` (per
 esempio "solo proof-of-work per gli impostori"), spenta di default.
 
+**Pannello di controllo (opzionale).** Con una chiave admin
+(`SPIKES402_ADMIN_KEY`) si apre una dashboard su `http://127.0.0.1:8404`,
+visibile solo dal server stesso (da fuori con un tunnel SSH). Mostra
+statistiche, stato del nodo Lightning e impostazioni, e permette di cambiare
+al volo prezzo, proof-of-work, limiti e regole per i bot (valgono fino al
+riavvio).
+
+**Il monitor dell'assedio.** Una vista dal vivo delle mura: ogni richiesta a
+una pagina protetta è un puntino che parte da sinistra ("la frontiera") e
+corre verso il muro di energia davanti al sito. Il colore dice chi è: blu =
+bot firmato, verde = crawler verificato, rosso = impostore, grigio =
+sconosciuto. Al muro: ⚡ ha pagato e ⚙ ha fatto il lavoro, e passano dalla
+porta; `402` si ferma (ha ricevuto il prezzo); `✗`, `429` e `403` vengono
+respinti. In alto i contatori, sotto chi bussa e l'elenco degli ultimi
+arrivi. Gli indirizzi dei visitatori sono anonimizzati.
+
+**Assistente AI (MCP).** `spikes402-mcp` permette a un assistente AI di
+leggere i dati e **proporre** modifiche, che applichi tu con un clic. Non può
+mai prelevare fondi.
+
+**Prelievi (opzionali, spenti di default).** Verso un solo indirizzo scritto
+nel file di configurazione, con una password dedicata e una doppia conferma.
+Richiedono la password *completa* di phoenixd: attivarli solo se servono.
+
 I pagamenti arrivano al **tuo** nodo Lightning (phoenixd): Spikes402 non
 custodisce mai chiavi né fondi di nessuno.
 

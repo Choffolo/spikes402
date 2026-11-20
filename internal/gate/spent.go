@@ -54,6 +54,12 @@ func (s *spentSet) use(id string, expires, now time.Time) error {
 	return nil
 }
 
+func (s *spentSet) len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.ids)
+}
+
 // has reports whether id was already spent.
 func (s *spentSet) has(id string) bool {
 	s.mu.Lock()

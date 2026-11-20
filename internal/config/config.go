@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/Choffolo/spikes402/internal/botid"
 	"github.com/Choffolo/spikes402/internal/gate"
+	"github.com/Choffolo/spikes402/internal/lightning"
 	"github.com/Choffolo/spikes402/pow"
 )
 
@@ -41,6 +44,29 @@ type Config struct {
 	KnownBots         []botid.Bot            `json:"known_bots"`            // default: botid.DefaultBots
 	BotPolicies       map[string]gate.Policy `json:"bot_policies"`          // default: none
 	WebBotAuthDevMode bool                   `json:"web_bot_auth_dev_mode"` // accept http/localhost key directories (fake backend only)
+
+	Admin    Admin    `json:"admin"`
+	Withdraw Withdraw `json:"withdraw"`
+}
+
+// Admin configures the admin API and dashboard. It is off unless a key is set.
+type Admin struct {
+	Listen     string   `json:"listen"`       // default "127.0.0.1:8404"
+	Key        string   `json:"key"`          // or env SPIKES402_ADMIN_KEY; "" = admin off
+	AIKey      string   `json:"ai_key"`       // or env SPIKES402_AI_KEY; for the MCP server
+	AICanApply bool     `json:"ai_can_apply"` // let the AI apply changes, not only propose them
+	AllowedIPs []string `json:"allowed_ips"`  // required when listening beyond localhost
+	VisitorIPs string   `json:"visitor_ips"`  // in the siege monitor: "hash" (default), "truncate" or "full"
+}
+
+// Withdraw configures withdrawals from the Lightning node. Off by default.
+// The destination can only be set here, never through the API.
+type Withdraw struct {
+	Enabled              bool   `json:"enabled"`
+	Destination          string `json:"destination"`            // Lightning address (name@domain) or Bitcoin address
+	Password             string `json:"password"`               // or env SPIKES402_WITHDRAW_PASSWORD
+	PhoenixdFullPassword string `json:"phoenixd_full_password"` // or env PHOENIXD_FULL_PASSWORD
+	FeerateSatByte       int64  `json:"feerate_sat_vbyte"`      // on-chain destination only
 }
 
 // Lightning selects and configures the Lightning backend.
@@ -68,6 +94,20 @@ func Load(file string) (*Config, error) {
 	}
 	if v := os.Getenv("PHOENIXD_PASSWORD"); v != "" {
 		c.Lightning.PhoenixdPassword = v
+	}
+	if v := os.Getenv("SPIKES402_ADMIN_KEY"); v != "" {
+		c.Admin.Key = v
+	}
+	if v := os.Getenv("SPIKES402_AI_KEY"); v != "" {
+		c.Admin.AIKey = v
+	}
+	if c.Withdraw.Enabled { // spending secrets are only read when needed
+		if v := os.Getenv("SPIKES402_WITHDRAW_PASSWORD"); v != "" {
+			c.Withdraw.Password = v
+		}
+		if v := os.Getenv("PHOENIXD_FULL_PASSWORD"); v != "" {
+			c.Withdraw.PhoenixdFullPassword = v
+		}
 	}
 	if err := c.complete(); err != nil {
 		return nil, fmt.Errorf("%s: %w", file, err)
@@ -190,13 +230,117 @@ func (c *Config) complete() error {
 	default:
 		return errors.New(`"lightning.backend" must be "fake" or "phoenixd"`)
 	}
+	if err := c.checkAdmin(); err != nil {
+		return err
+	}
+	return c.checkWithdraw()
+}
+
+func (c *Config) checkAdmin() error {
+	a := &c.Admin
+	if a.Listen == "" {
+		a.Listen = "127.0.0.1:8404"
+	}
+	if a.VisitorIPs == "" {
+		a.VisitorIPs = "hash"
+	}
+	switch a.VisitorIPs {
+	case "hash", "truncate", "full":
+	default:
+		return errors.New(`"admin.visitor_ips" must be "hash", "truncate" or "full"`)
+	}
+	if a.Key == "" {
+		if a.AIKey != "" || a.AICanApply || len(a.AllowedIPs) > 0 {
+			return errors.New(`admin settings need "admin.key" (or SPIKES402_ADMIN_KEY)`)
+		}
+		return nil
+	}
+	if len(a.Key) < 32 {
+		return errors.New(`"admin.key" must be at least 32 characters (try: openssl rand -hex 32)`)
+	}
+	if a.AIKey != "" && (len(a.AIKey) < 32 || a.AIKey == a.Key) {
+		return errors.New(`"admin.ai_key" must be at least 32 characters and differ from "admin.key"`)
+	}
+	if a.AICanApply && a.AIKey == "" {
+		return errors.New(`"admin.ai_can_apply" needs "admin.ai_key"`)
+	}
+	if a.Key == c.SecretKey || (a.AIKey != "" && a.AIKey == c.SecretKey) {
+		return errors.New(`admin keys must differ from "secret_key"`)
+	}
+	host, _, err := net.SplitHostPort(a.Listen)
+	if err != nil {
+		return fmt.Errorf(`"admin.listen": %w`, err)
+	}
+	if _, err := c.AdminAllowedNets(); err != nil {
+		return err
+	}
+	ip := net.ParseIP(host)
+	if (ip == nil || !ip.IsLoopback()) && host != "localhost" && len(a.AllowedIPs) == 0 {
+		return errors.New(`"admin.listen" beyond localhost needs "admin.allowed_ips"`)
+	}
 	return nil
+}
+
+func (c *Config) checkWithdraw() error {
+	w := &c.Withdraw
+	if !w.Enabled {
+		if w.Destination != "" || w.Password != "" || w.PhoenixdFullPassword != "" {
+			return errors.New(`withdraw settings are set but "withdraw.enabled" is false`)
+		}
+		return nil
+	}
+	if c.Admin.Key == "" {
+		return errors.New(`withdrawals need the admin dashboard ("admin.key")`)
+	}
+	switch {
+	case lightning.IsLightningAddress(w.Destination):
+	case lightning.IsBitcoinAddress(w.Destination):
+		if w.FeerateSatByte < 1 || w.FeerateSatByte > 1000 {
+			return errors.New(`an on-chain "withdraw.destination" needs "withdraw.feerate_sat_vbyte" (1-1000)`)
+		}
+	default:
+		return errors.New(`"withdraw.destination" must be a Lightning address (name@domain) or a Bitcoin address`)
+	}
+	if len(w.Password) < 16 {
+		return errors.New(`"withdraw.password" (or SPIKES402_WITHDRAW_PASSWORD) must be at least 16 characters`)
+	}
+	for _, other := range []string{c.Admin.Key, c.Admin.AIKey, c.SecretKey, c.Lightning.PhoenixdPassword} {
+		if w.Password == other {
+			return errors.New(`"withdraw.password" must differ from every other key and password`)
+		}
+	}
+	if c.Lightning.Backend == "phoenixd" {
+		if w.PhoenixdFullPassword == "" || w.PhoenixdFullPassword == c.Lightning.PhoenixdPassword {
+			return errors.New(`withdrawals need phoenixd's FULL-ACCESS password in "withdraw.phoenixd_full_password" (or PHOENIXD_FULL_PASSWORD)`)
+		}
+	}
+	return nil
+}
+
+// AdminEnabled reports whether the admin API should run.
+func (c *Config) AdminEnabled() bool { return c.Admin.Key != "" }
+
+// AdminAllowedNets parses admin.allowed_ips.
+func (c *Config) AdminAllowedNets() ([]*net.IPNet, error) {
+	nets, err := parseNets(c.Admin.AllowedIPs)
+	if err != nil {
+		return nil, fmt.Errorf("admin.allowed_ips: %w", err)
+	}
+	return nets, nil
 }
 
 // TrustedProxyNets parses trusted_proxies ("10.0.0.1", "10.0.0.0/8", "::1").
 func (c *Config) TrustedProxyNets() ([]*net.IPNet, error) {
+	nets, err := parseNets(c.TrustedProxies)
+	if err != nil {
+		return nil, fmt.Errorf("trusted_proxies: %w", err)
+	}
+	return nets, nil
+}
+
+func parseNets(list []string) ([]*net.IPNet, error) {
 	var nets []*net.IPNet
-	for _, p := range c.TrustedProxies {
+	for _, p := range list {
 		if !strings.Contains(p, "/") {
 			if ip := net.ParseIP(p); ip != nil && ip.To4() != nil {
 				p += "/32"
@@ -206,7 +350,7 @@ func (c *Config) TrustedProxyNets() ([]*net.IPNet, error) {
 		}
 		_, n, err := net.ParseCIDR(p)
 		if err != nil {
-			return nil, fmt.Errorf("trusted_proxies: %q is not an IP address or CIDR range", p)
+			return nil, fmt.Errorf("%q is not an IP address or CIDR range", p)
 		}
 		nets = append(nets, n)
 	}
@@ -238,4 +382,104 @@ func (c *Config) PoW(priceSats int64) pow.Params {
 // ChallengeTTL returns the challenge lifetime as a duration.
 func (c *Config) ChallengeTTL() time.Duration {
 	return time.Duration(c.ChallengeTTLSeconds) * time.Second
+}
+
+// Changes are the settings an admin may change at run time. Nil fields
+// stay as they are. Changes last until restart: edit the file to keep them.
+type Changes struct {
+	PriceSats           *int64                  `json:"price_sats,omitempty"`
+	PowSecondsPerSat    *float64                `json:"pow_seconds_per_sat,omitempty"`
+	ChallengesPerMinute *int                    `json:"challenges_per_minute,omitempty"`
+	BotPolicies         *map[string]gate.Policy `json:"bot_policies,omitempty"`
+}
+
+// Empty reports whether ch changes nothing.
+func (ch Changes) Empty() bool {
+	return ch.PriceSats == nil && ch.PowSecondsPerSat == nil && ch.ChallengesPerMinute == nil && ch.BotPolicies == nil
+}
+
+// Apply returns a validated copy of c with the changes; c is untouched.
+func (c *Config) Apply(ch Changes) (*Config, error) {
+	if ch.Empty() {
+		return nil, errors.New("no changes")
+	}
+	n := *c
+	n.BotPolicies = maps.Clone(c.BotPolicies)
+	if ch.PriceSats != nil {
+		n.PriceSats = *ch.PriceSats
+	}
+	if ch.PowSecondsPerSat != nil {
+		if v := *ch.PowSecondsPerSat; !(v > 0 && v <= 3600) || math.IsNaN(v) {
+			return nil, errors.New(`"pow_seconds_per_sat" must be above 0 and at most 3600`)
+		}
+		n.PowSecondsPerSat = *ch.PowSecondsPerSat
+	}
+	if ch.ChallengesPerMinute != nil {
+		n.ChallengesPerMinute = *ch.ChallengesPerMinute
+	}
+	if ch.BotPolicies != nil {
+		if len(*ch.BotPolicies) > 100 {
+			return nil, errors.New("too many bot_policies")
+		}
+		n.BotPolicies = maps.Clone(*ch.BotPolicies)
+	}
+	if n.PriceSats > 1_000_000 {
+		return nil, errors.New(`"price_sats" must be at most 1,000,000`)
+	}
+	if n.ChallengesPerMinute < 1 || n.ChallengesPerMinute > 100_000 {
+		return nil, errors.New(`"challenges_per_minute" must be between 1 and 100,000`)
+	}
+	if err := n.complete(); err != nil {
+		return nil, err
+	}
+	return &n, nil
+}
+
+// Public is the configuration without any secret, for the dashboard.
+type Public struct {
+	Origin               string                 `json:"origin"`
+	Protect              []string               `json:"protect"`
+	PriceSats            int64                  `json:"price_sats"`
+	PowAlgorithm         string                 `json:"pow_algorithm"`
+	PowSecondsPerSat     float64                `json:"pow_seconds_per_sat"`
+	PowDifficulty        int                    `json:"pow_difficulty"`
+	Argon2MemoryMiB      int                    `json:"argon2_memory_mib,omitempty"`
+	CurrentPoW           pow.Params             `json:"current_pow"`
+	ChallengeTTLSeconds  int                    `json:"challenge_ttl_seconds"`
+	ChallengesPerMinute  int                    `json:"challenges_per_minute"`
+	MaxInvoicesPerMinute int                    `json:"max_invoices_per_minute"`
+	MaxPendingInvoices   int                    `json:"max_pending_invoices"`
+	IdentifyBots         bool                   `json:"identify_bots"`
+	BotPolicies          map[string]gate.Policy `json:"bot_policies"`
+	LightningBackend     string                 `json:"lightning_backend"`
+	AICanApply           bool                   `json:"ai_can_apply"`
+	VisitorIPs           string                 `json:"visitor_ips"`
+	WithdrawEnabled      bool                   `json:"withdraw_enabled"`
+	WithdrawDestination  string                 `json:"withdraw_destination,omitempty"`
+	Editable             []string               `json:"editable"`
+}
+
+// Public returns the configuration without secrets.
+func (c *Config) Public() Public {
+	p := Public{
+		Origin: c.Origin, Protect: c.Protect, PriceSats: c.PriceSats, PowAlgorithm: c.PowAlgorithm,
+		PowSecondsPerSat: c.PowSecondsPerSat, PowDifficulty: c.PowDifficulty, Argon2MemoryMiB: c.Argon2MemoryMiB,
+		CurrentPoW: c.PoW(c.PriceSats), ChallengeTTLSeconds: c.ChallengeTTLSeconds, ChallengesPerMinute: c.ChallengesPerMinute,
+		MaxInvoicesPerMinute: c.MaxInvoicesPerMinute, MaxPendingInvoices: c.MaxPendingInvoices,
+		IdentifyBots: c.IdentifyBotsOn(), BotPolicies: c.BotPolicies, LightningBackend: c.Lightning.Backend,
+		AICanApply: c.Admin.AICanApply, VisitorIPs: c.Admin.VisitorIPs, WithdrawEnabled: c.Withdraw.Enabled,
+		Editable: []string{"price_sats", "pow_seconds_per_sat", "challenges_per_minute", "bot_policies"},
+	}
+	if p.BotPolicies == nil {
+		p.BotPolicies = map[string]gate.Policy{}
+	}
+	if c.Withdraw.Enabled {
+		p.WithdrawDestination = c.Withdraw.Destination
+	}
+	return p
+}
+
+// GateSettings converts the live-editable part of c for the gate.
+func (c *Config) GateSettings() gate.Settings {
+	return gate.Settings{PriceSats: c.PriceSats, PoW: c.PoW, Policies: c.BotPolicies, ChallengesPerMinute: c.ChallengesPerMinute}
 }

@@ -1,0 +1,404 @@
+package admin
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/Choffolo/spikes402/internal/botid"
+	"github.com/Choffolo/spikes402/internal/config"
+	"github.com/Choffolo/spikes402/internal/gate"
+	"github.com/Choffolo/spikes402/internal/lightning"
+)
+
+var (
+	adminKey = strings.Repeat("A", 40)
+	aiKey    = strings.Repeat("B", 40)
+	wdPass   = "correct horse battery"
+)
+
+type env struct {
+	srv  *Server
+	h    http.Handler
+	gate *gate.Gate
+	ln   *lightning.Fake
+	mon  *Monitor
+	now  time.Time
+}
+
+func newEnv(t *testing.T, extra string) *env {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "c.json")
+	js := `{"origin":"http://o","price_sats":10,"protect":["/premium/**"],"pow_difficulty":4,
+		"admin":{"key":"` + adminKey + `","ai_key":"` + aiKey + `"` + extra + `},"lightning":{"backend":"fake"}}`
+	if err := os.WriteFile(file, []byte(js), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &env{ln: lightning.NewFake(), now: time.Unix(1_800_000_000, 0)}
+	e.mon = NewMonitor(cfg.Admin.VisitorIPs, e.now)
+	e.gate = gate.New(gate.Options{
+		PriceSats: cfg.PriceSats, Protect: cfg.Protect, PoW: cfg.PoW, ChallengeTTL: cfg.ChallengeTTL(),
+		SecretKey: []byte(strings.Repeat("s", 32)), Lightning: e.ln, Next: http.NotFoundHandler(),
+		ChallengesPerMinute: cfg.ChallengesPerMinute, MaxInvoicesPerMinute: 1000, MaxPendingInvoices: 1000,
+		Observer: e.mon.Observe,
+	})
+	opt := Options{Config: cfg, Gate: e.gate, Monitor: e.mon, Node: e.ln}
+	if cfg.Withdraw.Enabled {
+		opt.Withdrawer = e.ln
+	}
+	e.srv = New(opt)
+	e.srv.now = func() time.Time { return e.now }
+	e.h = e.srv.Handler()
+	return e
+}
+
+// call makes an API request from localhost.
+func (e *env) call(method, path, key string, body any) (*httptest.ResponseRecorder, map[string]any) {
+	return e.callFrom("127.0.0.1:5000", method, path, key, body)
+}
+
+func (e *env) callFrom(remote, method, path, key string, body any) (*httptest.ResponseRecorder, map[string]any) {
+	var rd io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		rd = bytes.NewReader(b)
+	}
+	req := httptest.NewRequest(method, path, rd)
+	req.RemoteAddr = remote
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	rec := httptest.NewRecorder()
+	e.h.ServeHTTP(rec, req)
+	var out map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec, out
+}
+
+func TestDashboardStatic(t *testing.T) {
+	e := newEnv(t, "")
+	for _, p := range []string{"/", "/app.js", "/style.css"} {
+		rec, _ := e.call("GET", p, "", nil)
+		if rec.Code != 200 || !strings.Contains(rec.Header().Get("Content-Security-Policy"), "default-src 'self'") ||
+			rec.Header().Get("X-Frame-Options") != "DENY" {
+			t.Fatalf("%s: %d %v", p, rec.Code, rec.Header())
+		}
+	}
+	rec, _ := e.call("GET", "/", "", nil)
+	if !strings.Contains(rec.Body.String(), "Siege monitor") || strings.Contains(rec.Body.String(), "<script>") {
+		t.Fatal("unexpected index.html")
+	}
+}
+
+func TestAuth(t *testing.T) {
+	e := newEnv(t, "")
+	for _, key := range []string{"", "wrong", adminKey + "x", strings.ToLower(adminKey)} {
+		if rec, _ := e.call("GET", "/api/status", key, nil); rec.Code != http.StatusUnauthorized {
+			t.Errorf("key %q: got %d", key, rec.Code)
+		}
+	}
+	if _, out := e.call("GET", "/api/whoami", adminKey, nil); out["role"] != "admin" {
+		t.Fatalf("%v", out)
+	}
+	if _, out := e.call("GET", "/api/whoami", aiKey, nil); out["role"] != "ai" || out["can_apply"] != false || out["withdraw_enabled"] != false {
+		t.Fatalf("%v", out)
+	}
+	if rec, _ := e.call("GET", "/api/nope", adminKey, nil); rec.Code != 404 {
+		t.Fatal(rec.Code)
+	}
+}
+
+func TestIPAllowlist(t *testing.T) {
+	e := newEnv(t, `,"listen":"0.0.0.0:8404","allowed_ips":["10.0.0.0/8"]`)
+	cases := map[string]int{"127.0.0.1:1": 200, "[::1]:1": 200, "10.1.2.3:1": 200, "192.0.2.1:1": 403, "[2001:db8::1]:1": 403}
+	for remote, want := range cases {
+		if rec, _ := e.callFrom(remote, "GET", "/api/whoami", adminKey, nil); rec.Code != want {
+			t.Errorf("%s: got %d, want %d", remote, rec.Code, want)
+		}
+	}
+	// Even the dashboard page is hidden from others.
+	if rec, _ := e.callFrom("192.0.2.1:1", "GET", "/", "", nil); rec.Code != 403 {
+		t.Fatal(rec.Code)
+	}
+}
+
+func TestStatusAndSiege(t *testing.T) {
+	e := newEnv(t, "")
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest("GET", fmt.Sprintf("/premium/p%d?email=secret", i), nil)
+		req.RemoteAddr = "203.0.113.7:1234"
+		e.gate.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	rec, out := e.call("GET", "/api/status", aiKey, nil)
+	if rec.Code != 200 || strings.Contains(rec.Body.String(), adminKey) || strings.Contains(rec.Body.String(), aiKey) {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	counts := out["counts"].(map[string]any)
+	if counts["total"].(float64) != 3 || out["gate"].(map[string]any)["open_invoices"].(float64) != 3 {
+		t.Fatalf("%v", out)
+	}
+	rec, out = e.call("GET", "/api/siege?since=1", adminKey, nil)
+	visits := out["visits"].([]any)
+	if len(visits) != 2 || out["next"].(float64) != 3 {
+		t.Fatalf("%v", out)
+	}
+	v := visits[0].(map[string]any)
+	if v["outcome"] != "challenged" || v["path"] != "/premium/p1" || v["class"] != "unknown" || !strings.HasPrefix(v["visitor"].(string), "v-") {
+		t.Fatalf("%v", v)
+	}
+	if body := rec.Body.String(); strings.Contains(body, "203.0.113") || strings.Contains(body, "secret") {
+		t.Fatalf("private data in %s", body)
+	}
+}
+
+func TestSettingsRoles(t *testing.T) {
+	e := newEnv(t, "")
+	if rec, _ := e.call("PUT", "/api/settings", aiKey, map[string]any{"price_sats": 1}); rec.Code != 403 {
+		t.Fatalf("AI applied a change: %d", rec.Code)
+	}
+	if rec, _ := e.call("PUT", "/api/settings", adminKey, map[string]any{"price_sats": 0}); rec.Code != 400 {
+		t.Fatalf("invalid change: %d", rec.Code)
+	}
+	if rec, _ := e.call("PUT", "/api/settings", adminKey, map[string]any{"secret_key": "x"}); rec.Code != 400 {
+		t.Fatalf("unknown field: %d", rec.Code)
+	}
+	rec, out := e.call("PUT", "/api/settings", adminKey, map[string]any{"price_sats": 25, "bot_policies": map[string]any{"impostor": map[string]any{"action": "pow-only"}}})
+	if rec.Code != 200 || out["price_sats"].(float64) != 25 {
+		t.Fatalf("%d %v", rec.Code, out)
+	}
+	if s := e.gate.Settings(); s.PriceSats != 25 || s.Policies["impostor"].Action != gate.ActionPoWOnly {
+		t.Fatalf("gate not updated: %+v", s)
+	}
+
+	e = newEnv(t, `,"ai_can_apply":true`)
+	if rec, _ := e.call("PUT", "/api/settings", aiKey, map[string]any{"price_sats": 3}); rec.Code != 200 || e.gate.Settings().PriceSats != 3 {
+		t.Fatalf("AI with ai_can_apply: %d", rec.Code)
+	}
+}
+
+func TestProposals(t *testing.T) {
+	e := newEnv(t, "")
+	if rec, _ := e.call("POST", "/api/proposals", aiKey, map[string]any{"changes": map[string]any{"price_sats": -1}}); rec.Code != 400 {
+		t.Fatalf("invalid proposal: %d", rec.Code)
+	}
+	rec, p := e.call("POST", "/api/proposals", aiKey, map[string]any{"changes": map[string]any{"price_sats": 50}, "reason": "lots of impostors"})
+	if rec.Code != 200 || p["status"] != "pending" || p["by"] != "ai" {
+		t.Fatalf("%d %v", rec.Code, p)
+	}
+	id := p["id"].(string)
+	if e.gate.Settings().PriceSats != 10 {
+		t.Fatal("a proposal changed the settings")
+	}
+	if rec, _ := e.call("POST", "/api/proposals/"+id+"/approve", aiKey, nil); rec.Code != 403 {
+		t.Fatalf("AI approved its own proposal: %d", rec.Code)
+	}
+	if rec, out := e.call("POST", "/api/proposals/"+id+"/approve", adminKey, nil); rec.Code != 200 || out["status"] != "applied" {
+		t.Fatalf("%d %v", rec.Code, out)
+	}
+	if e.gate.Settings().PriceSats != 50 {
+		t.Fatal("approved proposal not applied")
+	}
+	if rec, _ := e.call("POST", "/api/proposals/"+id+"/approve", adminKey, nil); rec.Code != 404 {
+		t.Fatalf("approved twice: %d", rec.Code)
+	}
+	_, p = e.call("POST", "/api/proposals", aiKey, map[string]any{"changes": map[string]any{"price_sats": 1}})
+	if rec, out := e.call("POST", "/api/proposals/"+p["id"].(string)+"/reject", adminKey, nil); rec.Code != 200 || out["status"] != "rejected" {
+		t.Fatalf("%d %v", rec.Code, out)
+	}
+	// Proposals expire and are bounded.
+	_, p = e.call("POST", "/api/proposals", aiKey, map[string]any{"changes": map[string]any{"price_sats": 2}})
+	e.now = e.now.Add(25 * time.Hour)
+	if rec, _ := e.call("POST", "/api/proposals/"+p["id"].(string)+"/approve", adminKey, nil); rec.Code != 404 {
+		t.Fatalf("expired proposal approved: %d", rec.Code)
+	}
+	for i := 0; i < maxProposals; i++ {
+		e.call("POST", "/api/proposals", aiKey, map[string]any{"changes": map[string]any{"price_sats": 2}})
+	}
+	if rec, _ := e.call("POST", "/api/proposals", aiKey, map[string]any{"changes": map[string]any{"price_sats": 2}}); rec.Code != 429 {
+		t.Fatalf("unbounded proposals: %d", rec.Code)
+	}
+	if n := len(e.srv.proposals.items); n > maxProposals {
+		t.Fatalf("%d proposals stored", n)
+	}
+}
+
+const wdConfig = `},"withdraw":{"enabled":true,"destination":"me@wallet.example","password":"correct horse battery"`
+
+// newWithdrawEnv enables withdrawals; extra closes the admin object.
+func newWithdrawEnv(t *testing.T) *env {
+	e := newEnv(t, "")
+	file := filepath.Join(t.TempDir(), "c.json")
+	js := `{"origin":"http://o","price_sats":10,"protect":["/premium/**"],
+		"admin":{"key":"` + adminKey + `","ai_key":"` + aiKey + `"` + wdConfig + `},"lightning":{"backend":"fake"}}`
+	os.WriteFile(file, []byte(js), 0o600)
+	cfg, err := config.Load(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.ln = lightning.NewFake()
+	e.srv = New(Options{Config: cfg, Gate: e.gate, Monitor: e.mon, Node: e.ln, Withdrawer: e.ln})
+	e.srv.now = func() time.Time { return e.now }
+	e.h = e.srv.Handler()
+	inv, _ := e.ln.CreateInvoice(context.Background(), 1000, "", time.Hour)
+	e.ln.Pay(inv.PaymentRequest) // balance: 1000 sats
+	return e
+}
+
+func TestWithdrawDisabled(t *testing.T) {
+	e := newEnv(t, "")
+	if rec, _ := e.call("POST", "/api/withdraw/prepare", adminKey, map[string]any{"amount_sat": 1, "password": "x"}); rec.Code != 404 {
+		t.Fatal(rec.Code)
+	}
+}
+
+func TestWithdrawFlow(t *testing.T) {
+	e := newWithdrawEnv(t)
+	prep := func(amount int64, pw string) (*httptest.ResponseRecorder, map[string]any) {
+		return e.call("POST", "/api/withdraw/prepare", adminKey, map[string]any{"amount_sat": amount, "password": pw})
+	}
+	confirm := func(id string, amount int64, pw string) (*httptest.ResponseRecorder, map[string]any) {
+		return e.call("POST", "/api/withdraw/confirm", adminKey, map[string]any{"confirm_id": id, "amount_sat": amount, "password": pw})
+	}
+	// Never for the AI, whatever it sends.
+	for _, p := range []string{"/api/withdraw/prepare", "/api/withdraw/confirm", "/api/withdraw"} {
+		if rec, _ := e.call("POST", p, aiKey, map[string]any{"amount_sat": 1, "password": wdPass}); rec.Code != 403 && rec.Code != 404 {
+			t.Fatalf("%s: AI got %d", p, rec.Code)
+		}
+	}
+	if rec, _ := e.call("GET", "/api/withdraw", aiKey, nil); rec.Code != 403 {
+		t.Fatal(rec.Code)
+	}
+	// The destination cannot be chosen by the caller.
+	if rec, _ := e.call("POST", "/api/withdraw/prepare", adminKey, map[string]any{"amount_sat": 1, "password": wdPass, "destination": "thief@evil.example"}); rec.Code != 400 {
+		t.Fatalf("destination accepted: %d", rec.Code)
+	}
+	if rec, _ := prep(5000, wdPass); rec.Code != 400 {
+		t.Fatalf("more than the balance: %d", rec.Code)
+	}
+	if rec, _ := prep(100, "wrong"); rec.Code != 403 {
+		t.Fatal(rec.Code)
+	}
+	rec, p := prep(400, wdPass)
+	if rec.Code != 200 || p["destination"] != "me@wallet.example" {
+		t.Fatalf("%d %v", rec.Code, p)
+	}
+	id := p["confirm_id"].(string)
+	if rec, _ := confirm(id, 401, wdPass); rec.Code != 409 {
+		t.Fatalf("amount mismatch: %d", rec.Code)
+	}
+	if rec, _ := confirm(id, 400, wdPass); rec.Code != 409 {
+		t.Fatalf("id reused after a failed confirm: %d", rec.Code)
+	}
+	_, p = prep(400, wdPass)
+	if rec, _ := confirm(p["confirm_id"].(string), 400, "wrong"); rec.Code != 403 {
+		t.Fatal(rec.Code)
+	}
+	_, p = prep(400, wdPass)
+	e.now = e.now.Add(3 * time.Minute)
+	if rec, _ := confirm(p["confirm_id"].(string), 400, wdPass); rec.Code != 409 {
+		t.Fatalf("expired confirmation: %d", rec.Code)
+	}
+	if len(e.ln.Withdrawals()) != 0 {
+		t.Fatal("money left before a valid confirmation")
+	}
+	_, p = prep(400, wdPass)
+	rec, out := confirm(p["confirm_id"].(string), 400, wdPass)
+	if rec.Code != 200 || out["ok"] != true {
+		t.Fatalf("%d %v", rec.Code, out)
+	}
+	if w := e.ln.Withdrawals(); len(w) != 1 || w[0].Destination != "me@wallet.example" || w[0].AmountSat != 400 {
+		t.Fatalf("%+v", w)
+	}
+	if rec, _ := confirm(p["confirm_id"].(string), 400, wdPass); rec.Code != 409 {
+		t.Fatalf("confirmed twice: %d", rec.Code)
+	}
+	_, info := e.call("GET", "/api/withdraw", adminKey, nil)
+	if h := info["history"].([]any); len(h) != 1 {
+		t.Fatalf("%v", info)
+	}
+}
+
+func TestWithdrawLockout(t *testing.T) {
+	e := newWithdrawEnv(t)
+	for i := 0; i < withdrawMaxFailures; i++ {
+		e.call("POST", "/api/withdraw/prepare", adminKey, map[string]any{"amount_sat": 1, "password": "guess"})
+	}
+	if rec, _ := e.call("POST", "/api/withdraw/prepare", adminKey, map[string]any{"amount_sat": 1, "password": wdPass}); rec.Code != 429 {
+		t.Fatalf("not locked: %d", rec.Code)
+	}
+	e.now = e.now.Add(withdrawLockout + time.Second)
+	if rec, _ := e.call("POST", "/api/withdraw/prepare", adminKey, map[string]any{"amount_sat": 1, "password": wdPass}); rec.Code != 200 {
+		t.Fatalf("still locked: %d", rec.Code)
+	}
+}
+
+func TestMonitorRingAndPrivacy(t *testing.T) {
+	ev := gate.Event{Time: time.Now(), Client: "203.0.113.7", IP: net.ParseIP("203.0.113.7"), Resource: "GET /a?x=1",
+		Class: botid.Class{Kind: botid.Impostor, Name: "GPTBot"}, Outcome: gate.OutcomeChallenged}
+	for mode, want := range map[string]string{"truncate": "203.0.113.0/24", "full": "203.0.113.7"} {
+		m := NewMonitor(mode, time.Now())
+		m.Observe(ev)
+		if v, _ := m.Since(0); v[0].Visitor != want || v[0].Path != "/a" {
+			t.Errorf("%s: %+v", mode, v[0])
+		}
+	}
+	m := NewMonitor("truncate", time.Now())
+	m.Observe(gate.Event{IP: net.ParseIP("2001:db8:1:2::5"), Client: "2001:db8:1:2::/64"})
+	if v, _ := m.Since(0); v[0].Visitor != "2001:db8:1::/48" {
+		t.Errorf("%+v", v[0])
+	}
+
+	m = NewMonitor("hash", time.Now())
+	m2 := NewMonitor("hash", time.Now())
+	m.Observe(ev)
+	m2.Observe(ev)
+	a, _ := m.Since(0)
+	b, _ := m2.Since(0)
+	if a[0].Visitor == b[0].Visitor || strings.Contains(a[0].Visitor, "203") {
+		t.Fatal("hash must be salted per process and hide the address")
+	}
+	for i := 0; i < ringSize*3; i++ {
+		ev.Class.Name = fmt.Sprintf("bot%d", i) // also floods the bot counter
+		ev.Resource = "GET /" + strings.Repeat("x", 500) + "\n"
+		m.Observe(ev)
+	}
+	got, next := m.Since(0)
+	if len(got) != maxPerPoll || next != uint64(ringSize*3+1) || got[len(got)-1].Seq != next {
+		t.Fatalf("len %d next %d", len(got), next)
+	}
+	if got[0].Path != "/"+strings.Repeat("x", maxPathLen-2)+"…" {
+		t.Fatalf("path %q", got[0].Path)
+	}
+	if c := m.Counts(); len(c.ByBot) > maxBotKeys+1 || c.ByBot["other"] == 0 || c.Total != uint64(ringSize*3+1) {
+		t.Fatalf("bots %d", len(c.ByBot))
+	}
+	if v, n := m.Since(next); len(v) != 0 || n != next {
+		t.Fatal("since=next must be empty")
+	}
+	if v, _ := m.Since(next - 5); len(v) != 5 {
+		t.Fatalf("got %d", len(v))
+	}
+	if v, _ := m.Since(1 << 40); len(v) != 0 { // client from before a restart
+		t.Fatal("future seq")
+	}
+}
+
+func TestSignedBotName(t *testing.T) {
+	if got := botName(botid.Class{Kind: botid.Signed, Name: "https://bot.example/.well-known/http-message-signatures-directory"}); got != "bot.example" {
+		t.Fatal(got)
+	}
+}

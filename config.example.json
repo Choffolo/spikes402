@@ -15,6 +15,16 @@
   "secret_key": "",
   "identify_bots": true,
   "bot_policies": {},
+  "admin": {
+    "listen": "127.0.0.1:8404",
+    "key": "",
+    "ai_key": "",
+    "ai_can_apply": false,
+    "visitor_ips": "hash"
+  },
+  "withdraw": {
+    "enabled": false
+  },
   "lightning": {
     "backend": "fake"
   }

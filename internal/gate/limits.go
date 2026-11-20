@@ -33,6 +33,12 @@ func newRateLimiter(perMinute int) *rateLimiter {
 	return &rateLimiter{perMinute: perMinute, clients: make(map[string]*window)}
 }
 
+func (l *rateLimiter) setPerMinute(n int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.perMinute = n
+}
+
 // allow counts one 402 answer for client. If the client is over its limit
 // it returns false and how long to wait.
 func (l *rateLimiter) allow(client string, now time.Time) (bool, time.Duration) {
@@ -87,6 +93,12 @@ type pendingOffers struct {
 
 func newPendingOffers(max int) *pendingOffers {
 	return &pendingOffers{max: max, offers: make(map[string]offer)}
+}
+
+func (p *pendingOffers) len() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.offers)
 }
 
 // get returns the pending offer for key if it still has at least

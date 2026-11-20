@@ -40,6 +40,14 @@ func (f *fixture) do(target, ip, ua, auth string) *httptest.ResponseRecorder {
 	return rec
 }
 
+func (f *fixture) setPolicies(p map[string]Policy) {
+	s := f.gate.Settings()
+	s.Policies = p
+	if err := f.gate.UpdateSettings(s); err != nil {
+		panic(err)
+	}
+}
+
 func decode(t *testing.T, rec *httptest.ResponseRecorder) challengeBody {
 	t.Helper()
 	if rec.Code != http.StatusPaymentRequired {
@@ -83,11 +91,11 @@ func TestDefaultEveryonePaysTheSame(t *testing.T) {
 func TestPolicies(t *testing.T) {
 	f := newFixture(t)
 	withBots(f, nil)
-	f.gate.opt.Policies = map[string]Policy{
+	f.setPolicies(map[string]Policy{
 		"GPTBot":   {Action: ActionFree},
 		"impostor": {Action: ActionPoWOnly, PriceMultiplier: 3},
 		"unknown":  {Action: ActionPay, PriceMultiplier: 0.01}, // rounds up to 1 sat
-	}
+	})
 	if rec := f.do("/premium/a", "20.0.0.5", gptUA, ""); rec.Code != http.StatusOK {
 		t.Fatalf("verified GPTBot with free policy: got %d", rec.Code)
 	}
@@ -103,7 +111,7 @@ func TestPolicies(t *testing.T) {
 		t.Fatalf("unknown: got %+v", b)
 	}
 
-	f.gate.opt.Policies = map[string]Policy{"impostor": {Action: ActionBlock}}
+	f.setPolicies(map[string]Policy{"impostor": {Action: ActionBlock}})
 	if rec := f.do("/premium/a", "6.6.6.6", gptUA, ""); rec.Code != http.StatusForbidden {
 		t.Fatalf("block: got %d", rec.Code)
 	}
@@ -113,11 +121,13 @@ func TestPriceDependsOnPolicy(t *testing.T) {
 	f := newFixture(t)
 	withBots(f, nil)
 	var seen []int64
-	f.gate.opt.PoW = func(price int64) pow.Params {
+	set := f.gate.Settings()
+	set.PoW = func(price int64) pow.Params {
 		seen = append(seen, price)
 		return f.pow
 	}
-	f.gate.opt.Policies = map[string]Policy{"verified": {Action: ActionPay, PriceMultiplier: 2}}
+	f.gate.UpdateSettings(set)
+	f.setPolicies(map[string]Policy{"verified": {Action: ActionPay, PriceMultiplier: 2}})
 	b := decode(t, f.do("/premium/a", "20.0.0.5", gptUA, ""))
 	if b.PriceSats != 20 || len(seen) != 1 || seen[0] != 20 {
 		t.Fatalf("price %d, puzzle priced at %v", b.PriceSats, seen)
@@ -144,7 +154,7 @@ func TestSignedBotThroughGate(t *testing.T) {
 	defer dir.Close()
 	f := newFixture(t)
 	withBots(f, webbotauth.NewVerifier(webbotauth.NewDirectories(true)))
-	f.gate.opt.Policies = map[string]Policy{"verified-signed": {Action: ActionPoWOnly}}
+	f.setPolicies(map[string]Policy{"verified-signed": {Action: ActionPoWOnly}})
 
 	signed := func(target string) *http.Request {
 		req := httptest.NewRequest(http.MethodGet, target, nil) // https:// sets req.TLS
