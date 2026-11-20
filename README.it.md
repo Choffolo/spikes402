@@ -19,6 +19,17 @@ Bitcoin in miniatura). Il resto del sito resta libero.
 4. Ogni prova vale **una volta sola**, **per una sola pagina** e **scade**
    dopo 10 minuti.
 
+**Quanto lavoro vale un sat?** Di default 1 sat equivale a circa 10 secondi
+di lavoro di un core di CPU (impostazione `pow_seconds_per_sat`). Per esempio
+1 sat ≈ 8 secondi, 10 sat ≈ 2 minuti; una scheda grafica fa circa 1000 volte
+prima. La risposta 402 indica al bot il tempo previsto.
+
+**Protezione dagli abusi:** ogni indirizzo IP può ricevere al massimo 30
+risposte 402 al minuto (poi riceve "429, riprova più tardi"); chi richiede di
+nuovo la stessa pagina riceve la stessa fattura invece di una nuova; e oltre
+10.000 fatture aperte si offre solo la proof-of-work. Le pagine libere non
+hanno limiti.
+
 I pagamenti arrivano al **tuo** nodo Lightning (phoenixd): Spikes402 non
 custodisce mai chiavi né fondi di nessuno.
 
