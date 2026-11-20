@@ -79,6 +79,13 @@
   <div class="card withdraw" id="withdraw" hidden>
     <h2>Withdraw</h2>
     <p>To <strong id="wd-dest"></strong> (fixed in the config file). Balance: <strong id="wd-balance">?</strong> sats.</p>
+    <div id="wd-unknown" class="warn" hidden>
+      <p>The last withdrawal has an <strong>unknown outcome</strong>: check the node's outgoing payments (phoenixd), then tell Spikes402 what happened.
+        New withdrawals are blocked until then.</p>
+      <label>Withdraw password <input id="wd-pw3" type="password" autocomplete="off"></label>
+      <button type="button" id="wd-sent">It was sent</button>
+      <button type="button" id="wd-notsent">It was not sent</button>
+    </div>
     <form id="wd-form">
       <label>Amount (sats) <input id="wd-amount" type="number" min="1" required></label>
       <label>Withdraw password <input id="wd-pw" type="password" autocomplete="off" required></label>

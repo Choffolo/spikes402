@@ -2,6 +2,7 @@ package lightning
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -127,5 +128,85 @@ func TestFakeBalanceAndWithdraw(t *testing.T) {
 	}
 	if info, _ := f.NodeInfo(context.Background()); info.BalanceSat != 40 || len(f.Withdrawals()) != 1 {
 		t.Fatalf("balance %d", info.BalanceSat)
+	}
+}
+
+func TestNormalizeDestination(t *testing.T) {
+	for in, want := range map[string]string{
+		"₿me@wallet.example": "me@wallet.example", "  ₿ me@wallet.example \n": "me@wallet.example",
+		"me@wallet.example": "me@wallet.example", "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq": "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+	} {
+		if got := NormalizeDestination(in); got != want {
+			t.Errorf("%q: got %q", in, got)
+		}
+	}
+	// The "₿" form is sent to phoenixd without the symbol.
+	srv, calls := fakePhoenixd(t, `{"recipientAmountSat":10,"routingFeeSat":4,"paymentId":"uuid-2"}`)
+	if _, err := (&PhoenixdWithdrawer{URL: srv.URL, FullPassword: "full"}).Withdraw(context.Background(), " ₿me@wallet.example", 10); err != nil {
+		t.Fatal(err)
+	}
+	if got := (*calls)[0]; !strings.Contains(got, "address=me%40wallet.example&") {
+		t.Fatalf("call %q", got)
+	}
+}
+
+func TestEstimatedFee(t *testing.T) {
+	ln := "me@wallet.example"
+	for amount, want := range map[int64]int64{1: 5, 250: 5, 251: 6, 3000: 16, 100_000: 404} {
+		if got := EstimatedFeeSat(ln, amount); got != want {
+			t.Errorf("%d: fee %d, want %d", amount, got, want)
+		}
+	}
+	if f := EstimatedFeeSat("bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", 3000); f != 0 {
+		t.Errorf("on-chain fee %d", f)
+	}
+	for _, bal := range []int64{0, 4, 5, 6, 1000, 5544, 1_000_000} {
+		m := MaxWithdrawSat(ln, bal)
+		if m > 0 && m+EstimatedFeeSat(ln, m) > bal || m+1+EstimatedFeeSat(ln, m+1) <= bal {
+			t.Errorf("balance %d: max %d", bal, m)
+		}
+	}
+	if m := MaxWithdrawSat("bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", 5544); m != 5544 {
+		t.Errorf("on-chain max %d", m)
+	}
+}
+
+func TestPhoenixdWithdrawUncertain(t *testing.T) {
+	w := func(url string) error {
+		_, err := (&PhoenixdWithdrawer{URL: url, FullPassword: "full"}).Withdraw(context.Background(), "me@wallet.example", 10)
+		return err
+	}
+	// A clear "no" from phoenixd is a failure, not an unknown.
+	srv, _ := fakePhoenixd(t, `{"reason":"no route"}`)
+	if err := w(srv.URL); err == nil || errors.Is(err, ErrUncertain) {
+		t.Fatalf("got %v", err)
+	}
+	fail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "cannot resolve address", http.StatusInternalServerError)
+	}))
+	defer fail.Close()
+	if err := w(fail.URL); err == nil || errors.Is(err, ErrUncertain) {
+		t.Fatalf("got %v", err)
+	}
+	// Nothing listening: the payment never started.
+	dead := httptest.NewServer(http.NotFoundHandler())
+	dead.Close()
+	if err := w(dead.URL); err == nil || errors.Is(err, ErrUncertain) {
+		t.Fatalf("got %v", err)
+	}
+	// A broken answer or no answer in time: the money may have left.
+	srv, _ = fakePhoenixd(t, `<html>gateway</html>`)
+	if err := w(srv.URL); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("got %v", err)
+	}
+	release := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-release }))
+	defer slow.Close()
+	defer close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := (&PhoenixdWithdrawer{URL: slow.URL, FullPassword: "full"}).Withdraw(ctx, "me@wallet.example", 10)
+	if !errors.Is(err, ErrUncertain) {
+		t.Fatalf("got %v", err)
 	}
 }

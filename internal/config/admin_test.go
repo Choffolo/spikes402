@@ -84,6 +84,11 @@ func TestWithdrawConfig(t *testing.T) {
 	if err != nil || c.Withdraw.Password != pw || c.Withdraw.PhoenixdFullPassword != "fullpassword" {
 		t.Fatalf("%v %+v", err, c.Withdraw)
 	}
+	// BIP353 addresses are often written with a leading "₿".
+	c2, err := load(t, `{`+base+`,`+admin+`,"withdraw":{"enabled":true,"destination":" ₿me@x.y "},`+phx+`}`)
+	if err != nil || c2.Withdraw.Destination != "me@x.y" {
+		t.Fatalf("%v %q", err, c2.Withdraw.Destination)
+	}
 	pub := c.Public()
 	if !pub.WithdrawEnabled || pub.WithdrawDestination != "me@x.y" {
 		t.Fatalf("%+v", pub)

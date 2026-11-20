@@ -224,7 +224,8 @@ async function loadWithdrawals() {
   if ($("withdraw").hidden) return;
   let w;
   try { w = await api("GET", "/api/withdraw"); } catch { return; }
-  const list = (w.history || []).slice(-5).reverse().map((h) => [time(h.time), fmt(h.amount_sat) + " sats", (h.ok ? "✓ " : "✗ ") + h.result]);
+  const list = (w.history || []).slice(-5).reverse().map((h) => [time(h.time), fmt(h.amount_sat) + " sats", (h.unknown ? "? " : h.ok ? "✓ " : "✗ ") + h.result]);
+  $("wd-unknown").hidden = !w.unresolved;
   if (w.locked_until) list.unshift(["Locked", "until " + time(w.locked_until), ""]);
   rows($("wd-history"), list);
 }
@@ -236,7 +237,8 @@ $("wd-form").addEventListener("submit", async (e) => {
   try {
     prepared = await api("POST", "/api/withdraw/prepare", { amount_sat: +$("wd-amount").value, password: $("wd-pw").value });
     $("wd-pw").value = "";
-    $("wd-c-amount").textContent = fmt(prepared.amount_sat); $("wd-c-dest").textContent = prepared.destination;
+    $("wd-c-amount").textContent = fmt(prepared.amount_sat) + (prepared.fee_sat ? " (+ about " + fmt(prepared.fee_sat) + " sats fee)" : "");
+    $("wd-c-dest").textContent = prepared.destination;
     $("wd-c-exp").textContent = time(prepared.expires_at);
     $("wd-form").hidden = true; $("wd-confirm").hidden = false;
   } catch (err) { msg("wd-msg", err.message, "err"); }
@@ -254,5 +256,16 @@ $("wd-confirm").addEventListener("submit", async (e) => {
   $("wd-pw2").value = ""; $("wd-amount2").value = ""; prepared = null;
   $("wd-confirm").hidden = true; $("wd-form").hidden = false; refresh(); loadWithdrawals();
 });
+
+async function resolveWithdrawal(sent) {
+  if (!confirm(sent ? "You checked the node and the payment WAS sent?" : "You checked the node and the payment was NOT sent?")) return;
+  try {
+    await api("POST", "/api/withdraw/resolve", { sent, password: $("wd-pw3").value });
+    msg("wd-msg", "Recorded.", "ok");
+  } catch (err) { msg("wd-msg", err.message, "err"); }
+  $("wd-pw3").value = ""; loadWithdrawals();
+}
+$("wd-sent").addEventListener("click", () => resolveWithdrawal(true));
+$("wd-notsent").addEventListener("click", () => resolveWithdrawal(false));
 
 if (state.key) login();
