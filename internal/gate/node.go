@@ -41,6 +41,10 @@ type nodeGuard struct {
 	failures  int       // consecutive failures
 	tripped   bool      // breaker opened at least once since the last success
 	openUntil time.Time // no calls before this time
+
+	created, failed uint64 // totals, for the dashboard
+	lastErr         string
+	lastErrAt       time.Time
 }
 
 // newNodeGuard allows perMinute invoices per minute, spread evenly, with
@@ -104,13 +108,38 @@ func (n *nodeGuard) record(now time.Time, err error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if err == nil {
+		n.created++
 		n.failures, n.tripped = 0, false
 		return
 	}
+	n.failed++
+	n.lastErr, n.lastErrAt = sanitize(err.Error()), now
 	n.failures++
 	if n.tripped || n.failures >= breakerThreshold {
 		n.tripped = true
 		n.failures = 0
 		n.openUntil = now.Add(breakerCooldown)
 	}
+}
+
+func (n *nodeGuard) status(now time.Time) NodeStatus {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	st := NodeStatus{
+		BreakerOpen:         now.Before(n.openUntil),
+		ConsecutiveFailures: n.failures,
+		InFlight:            len(n.inFlight),
+		InvoiceBudget:       n.tokens,
+		InvoicesCreated:     n.created,
+		InvoiceFailures:     n.failed,
+		LastError:           n.lastErr,
+		LastErrorAt:         n.lastErrAt,
+	}
+	if !n.last.IsZero() {
+		st.InvoiceBudget = min(n.burst, n.tokens+now.Sub(n.last).Seconds()*n.rate)
+	}
+	if st.BreakerOpen {
+		st.BreakerOpenUntil = n.openUntil
+	}
+	return st
 }
