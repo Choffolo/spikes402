@@ -548,6 +548,22 @@ withdrawals), `internal/mcp`, `internal/lightning` (fake + phoenixd),
 (bot classification), `internal/sfv` (structured header parsing), `webbotauth`
 (Web Bot Auth sign/verify), `pow`, `client`.
 
+## Donations / Donazioni
+
+If Spikes402 is useful to you, you can support it with bitcoin (on-chain):
+
+<img src="docs/donate-bitcoin.png" alt="QR code for bitcoin:3KvoTk8WfVKE1Dqhh7DHUzTwNyNXeR1GgF" width="180">
+
+`3KvoTk8WfVKE1Dqhh7DHUzTwNyNXeR1GgF`
+
+Lightning (reusable BOLT12 offer; your wallet must support BOLT12/BIP353, e.g. Phoenix):
+
+<img src="docs/donate-lightning.png" alt="QR code for the BOLT12 offer" width="180">
+
+- Address: `₿chromescar71@phoenixwallet.me` (a [BIP353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki)
+  address; the ₿ only marks it as a bitcoin address, type it as `chromescar71@phoenixwallet.me`)
+- Offer: `lno1zrxq8pjw7qjlm68mtp7e3yvxee4y5xrgjhhyf2fxhlphpckrvevh50u0qfq27txqpv7e74w9r9jqytz387aafwc0qq5rduglwu0jgkglqj4kwqszf8me4efvhmywwrekdhtytml88630fxsypfxg52es0l9xrgdz0xlsqv74kqw6557fzsyrdl5wr5vxp9wpu3f4t8shr74qmzjj7ygl8sgpqhvnlkgwzcmgcmyhmctd6vzgmfnfaq07qgqrrv8d4c6ql3dtnnjyka7t47h9lmzgsv2hrnxqdv8u5787m4wfwqqs2n57l9hzh9lyaql207qtwjqe7u`
+
 ## License
 
 [GNU AGPLv3](LICENSE).
