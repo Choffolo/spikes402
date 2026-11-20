@@ -3,7 +3,6 @@
 package gate
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -13,10 +12,12 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Choffolo/spikes402/internal/lightning"
@@ -34,9 +35,11 @@ type Options struct {
 	Next          http.Handler // where paid/free requests go (the origin)
 
 	// Abuse protection for unpaid requests.
-	ChallengesPerMinute int    // 402 answers per client per minute
-	MaxPendingInvoices  int    // open invoices at once; beyond this, PoW only
-	ClientIPHeader      string // header with the real client IP behind a trusted proxy, or ""
+	ChallengesPerMinute  int          // 402 answers per client per minute
+	MaxInvoicesPerMinute int          // invoices created per minute, all clients together
+	MaxPendingInvoices   int          // open invoices at once; beyond this, PoW only
+	ClientIPHeader       string       // header with the client IP set by a trusted proxy, or ""
+	TrustedProxies       []*net.IPNet // ClientIPHeader is only believed from these addresses
 }
 
 // Gate is the pay-or-PoW http.Handler.
@@ -46,14 +49,19 @@ type Gate struct {
 	spent   *spentSet
 	limiter *rateLimiter
 	pending *pendingOffers
+	node    *nodeGuard
 	now     func() time.Time // replaceable in tests
+
+	logMu      sync.Mutex
+	lastLog    time.Time
+	suppressed int
 }
 
 // New returns a Gate. It panics on programmer errors; validate user
 // input with the config package first.
 func New(opt Options) *Gate {
 	if len(opt.SecretKey) < 32 || opt.Lightning == nil || opt.Next == nil || opt.PriceSats < 1 ||
-		opt.ChallengeTTL <= 0 || opt.ChallengesPerMinute < 1 || opt.MaxPendingInvoices < 1 {
+		opt.ChallengeTTL <= 0 || opt.ChallengesPerMinute < 1 || opt.MaxPendingInvoices < 1 || opt.MaxInvoicesPerMinute < 1 {
 		panic("gate: invalid options")
 	}
 	return &Gate{
@@ -62,6 +70,7 @@ func New(opt Options) *Gate {
 		spent:   newSpentSet(),
 		limiter: newRateLimiter(opt.ChallengesPerMinute),
 		pending: newPendingOffers(opt.MaxPendingInvoices),
+		node:    newNodeGuard(opt.Lightning, opt.MaxInvoicesPerMinute),
 		now:     time.Now,
 	}
 }
@@ -142,8 +151,8 @@ func (g *Gate) redeem(r *http.Request, auth string) (string, error) {
 		return "", err
 	}
 	// Checked last, so a bad attempt does not burn a good token.
-	if !g.spent.use(c.ID, time.Unix(c.Expires, 0), g.now()) {
-		return "", errReplay
+	if err := g.spent.use(c.ID, time.Unix(c.Expires, 0), g.now()); err != nil {
+		return "", err
 	}
 	return c.ID, nil
 }
@@ -214,14 +223,18 @@ type powOffer struct {
 }
 
 func (g *Gate) pendingKey(r *http.Request) string {
-	return clientKey(r, g.opt.ClientIPHeader) + " " + resource(r)
+	return g.client(r) + " " + resource(r)
+}
+
+func (g *Gate) client(r *http.Request) string {
+	return clientKey(r, g.opt.ClientIPHeader, g.opt.TrustedProxies)
 }
 
 // challenge answers 402 Payment Required with both ways in, or 429 Too
 // Many Requests if this client asked for too many challenges.
 func (g *Gate) challenge(w http.ResponseWriter, r *http.Request, problem string) {
 	now := g.now()
-	if ok, wait := g.limiter.allow(clientKey(r, g.opt.ClientIPHeader), now); !ok {
+	if ok, wait := g.limiter.allow(g.client(r), now); !ok {
 		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
 		http.Error(w, "too many requests", http.StatusTooManyRequests)
 		return
@@ -254,15 +267,13 @@ func (g *Gate) newOffer(r *http.Request, now time.Time, key string) (offer, erro
 		PowBits:  g.opt.PowDifficulty,
 	}
 
-	// No invoice if too many are open, or if the Lightning node fails:
-	// proof-of-work is still offered.
+	// Proof-of-work is always offered. An invoice only if the node may be
+	// called: not too many open invoices, within the global rate, node healthy.
 	var invoice string
 	if g.pending.reserve(now) {
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		defer cancel()
-		inv, err := g.opt.Lightning.CreateInvoice(ctx, g.opt.PriceSats, "Spikes402: "+c.Resource, g.opt.ChallengeTTL)
+		inv, err := g.node.createInvoice(now, g.opt.PriceSats, "Spikes402: "+c.Resource, g.opt.ChallengeTTL)
 		if err != nil {
-			log.Printf("spikes402: cannot create invoice, offering proof-of-work only: %v", err)
+			g.logNodeError(now, err)
 		} else {
 			c.PaymentHash = hex.EncodeToString(inv.PaymentHash[:])
 			invoice = inv.PaymentRequest
@@ -278,6 +289,19 @@ func (g *Gate) newOffer(r *http.Request, now time.Time, key string) (offer, erro
 		g.pending.put(key, o)
 	}
 	return o, nil
+}
+
+// logNodeError logs why no invoice was offered, at most once a minute so
+// that an attack cannot flood the logs.
+func (g *Gate) logNodeError(now time.Time, err error) {
+	g.logMu.Lock()
+	defer g.logMu.Unlock()
+	if now.Sub(g.lastLog) < time.Minute {
+		g.suppressed++
+		return
+	}
+	log.Printf("spikes402: no invoice, offering proof-of-work only: %v (%d similar messages suppressed)", err, g.suppressed)
+	g.lastLog, g.suppressed = now, 0
 }
 
 func (g *Gate) writeChallenge(w http.ResponseWriter, r *http.Request, o offer, problem string) {

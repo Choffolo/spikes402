@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"errors"
 	"sync"
 	"time"
 )
@@ -10,32 +11,47 @@ import (
 // forgets it, which is safe only because tokens expire quickly anyway
 // (see "Known limits" in the README).
 type spentSet struct {
-	mu      sync.Mutex
-	ids     map[string]time.Time // token ID -> expiry
-	inserts int
+	mu        sync.Mutex
+	ids       map[string]time.Time // token ID -> expiry
+	max       int
+	inserts   int
+	lastSweep time.Time
 }
+
+// maxSpent bounds the memory of the spent set (roughly 100 MB at most).
+const maxSpent = 1_000_000
 
 func newSpentSet() *spentSet {
-	return &spentSet{ids: make(map[string]time.Time)}
+	return &spentSet{ids: make(map[string]time.Time), max: maxSpent}
 }
 
-// use marks id as spent. It returns false if id was already spent.
-func (s *spentSet) use(id string, expires, now time.Time) bool {
+// errBusy is returned when the spent set is full of unexpired tokens.
+var errBusy = errors.New("server busy, try again later")
+
+// use marks id as spent. It returns errReplay if id was already spent,
+// or errBusy if the set is full: refusing is safer than forgetting.
+func (s *spentSet) use(id string, expires, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, seen := s.ids[id]; seen {
-		return false
+		return errReplay
 	}
-	s.ids[id] = expires
 	s.inserts++
-	if s.inserts%1024 == 0 { // forget entries that can no longer be replayed
+	// Forget entries that can no longer be replayed: every 1024 inserts,
+	// or when full (at most once a second, so a full set stays cheap).
+	if s.inserts%1024 == 0 || (len(s.ids) >= s.max && now.Sub(s.lastSweep) >= time.Second) {
 		for k, exp := range s.ids {
 			if now.After(exp) {
 				delete(s.ids, k)
 			}
 		}
+		s.lastSweep = now
 	}
-	return true
+	if len(s.ids) >= s.max {
+		return errBusy
+	}
+	s.ids[id] = expires
+	return nil
 }
 
 // has reports whether id was already spent.

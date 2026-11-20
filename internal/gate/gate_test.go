@@ -41,8 +41,9 @@ func newFixture(t *testing.T) *fixture {
 		Lightning:     f.ln,
 		Next:          origin,
 
-		ChallengesPerMinute: 1000,
-		MaxPendingInvoices:  1000,
+		ChallengesPerMinute:  1000,
+		MaxInvoicesPerMinute: 6000,
+		MaxPendingInvoices:   1000,
 	})
 	f.gate.now = func() time.Time { return f.now }
 	return f
@@ -258,7 +259,7 @@ func (brokenNode) CreateInvoice(context.Context, int64, string, time.Duration) (
 
 func TestPoWStillWorksWhenNodeIsDown(t *testing.T) {
 	f := newFixture(t)
-	f.gate.opt.Lightning = brokenNode{}
+	f.gate.node.backend = brokenNode{}
 	b := f.challenge(t, "/premium/article")
 	if b.L402 != nil {
 		t.Fatal("no invoice should be offered when the node is down")

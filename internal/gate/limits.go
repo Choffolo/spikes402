@@ -124,8 +124,8 @@ func (p *pendingOffers) drop(key, id string) {
 }
 
 func (p *pendingOffers) sweepLocked(now time.Time) {
-	// Sweeping is O(n); do it at most once a second, or when full.
-	if now.Sub(p.lastSweep) < time.Second && len(p.offers) < p.max {
+	// Sweeping is O(n): do it at most once a second.
+	if now.Sub(p.lastSweep) < time.Second {
 		return
 	}
 	for k, o := range p.offers {
@@ -138,23 +138,26 @@ func (p *pendingOffers) sweepLocked(now time.Time) {
 
 // clientKey identifies the client for rate limiting: its IP address, or
 // for IPv6 its /64 network (one home or server usually gets a whole /64).
-// If header is set (e.g. "CF-Connecting-IP" behind Cloudflare, "X-Real-IP"
-// behind nginx), the address is read from it; for a list such as
-// X-Forwarded-For the last entry, added by the nearest proxy, is used.
-func clientKey(r *http.Request, header string) string {
-	var ip net.IP
-	if header != "" {
-		if v := r.Header.Get(header); v != "" {
-			parts := strings.Split(v, ",")
-			ip = net.ParseIP(strings.TrimSpace(parts[len(parts)-1]))
+//
+// The header (e.g. "X-Forwarded-For", "X-Real-IP", "CF-Connecting-IP") is
+// only believed when the connection comes from one of the trusted
+// proxies; otherwise anyone could pick their own IP and dodge the limits.
+// The header is read from right to left, skipping trusted proxies, so a
+// value the client wrote itself at the start of X-Forwarded-For is ignored.
+func clientKey(r *http.Request, header string, trusted []*net.IPNet) string {
+	ip := remoteIP(r)
+	if header != "" && ip != nil && isTrusted(ip, trusted) {
+		hops := strings.Split(strings.Join(r.Header.Values(header), ","), ",")
+		for i := len(hops) - 1; i >= 0; i-- {
+			hop := net.ParseIP(strings.TrimSpace(hops[i]))
+			if hop == nil {
+				break // garbage: keep the last good address
+			}
+			ip = hop
+			if !isTrusted(hop, trusted) {
+				break
+			}
 		}
-	}
-	if ip == nil {
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			host = r.RemoteAddr
-		}
-		ip = net.ParseIP(host)
 	}
 	if ip == nil {
 		return r.RemoteAddr
@@ -163,4 +166,21 @@ func clientKey(r *http.Request, header string) string {
 		return v4.String()
 	}
 	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
+func remoteIP(r *http.Request) net.IP {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	return net.ParseIP(host)
+}
+
+func isTrusted(ip net.IP, trusted []*net.IPNet) bool {
+	for _, n := range trusted {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }

@@ -46,6 +46,8 @@ func main() {
 		log.Print("no secret_key set: using a random one (tokens will not survive a restart)")
 	}
 
+	trusted, _ := cfg.TrustedProxyNets() // validated by config.Load
+
 	mux := http.NewServeMux()
 	var backend lightning.Backend
 	switch cfg.Lightning.Backend {
@@ -67,9 +69,11 @@ func main() {
 		Lightning:     backend,
 		Next:          proxy,
 
-		ChallengesPerMinute: cfg.ChallengesPerMinute,
-		MaxPendingInvoices:  cfg.MaxPendingInvoices,
-		ClientIPHeader:      cfg.ClientIPHeader,
+		ChallengesPerMinute:  cfg.ChallengesPerMinute,
+		MaxInvoicesPerMinute: cfg.MaxInvoicesPerMinute,
+		MaxPendingInvoices:   cfg.MaxPendingInvoices,
+		ClientIPHeader:       cfg.ClientIPHeader,
+		TrustedProxies:       trusted,
 	}))
 
 	srv := &http.Server{

@@ -2,6 +2,7 @@ package gate
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -25,7 +26,7 @@ func (c *countingNode) CreateInvoice(ctx context.Context, amt int64, memo string
 
 func (f *fixture) countInvoices() *countingNode {
 	c := &countingNode{Backend: f.ln}
-	f.gate.opt.Lightning = c
+	f.gate.node.backend = c
 	return c
 }
 
@@ -162,30 +163,76 @@ func TestExpectedSolveTime(t *testing.T) {
 }
 
 func TestClientKey(t *testing.T) {
+	_, proxies, _ := net.ParseCIDR("10.0.0.0/8")
+	trusted := []*net.IPNet{proxies}
 	cases := []struct {
-		remote, header, value, want string
+		name, remote, header, value, want string
 	}{
-		{"192.0.2.7:5555", "", "", "192.0.2.7"},
-		{"[2001:db8::1]:5555", "", "", "2001:db8::/64"},
-		{"[::ffff:192.0.2.7]:5555", "", "", "192.0.2.7"},
-		{"10.0.0.1:5555", "X-Real-IP", "192.0.2.8", "192.0.2.8"},
-		{"10.0.0.1:5555", "X-Forwarded-For", "6.6.6.6, 192.0.2.9", "192.0.2.9"}, // last hop wins
-		{"10.0.0.1:5555", "X-Real-IP", "", "10.0.0.1"},                          // header missing
-		{"10.0.0.1:5555", "X-Real-IP", "not-an-ip", "10.0.0.1"},                 // header garbage
-		{"10.0.0.1:5555", "", "", "10.0.0.1"},
+		{"plain IPv4", "192.0.2.7:5555", "", "", "192.0.2.7"},
+		{"IPv6 grouped by /64", "[2001:db8::1]:5555", "", "", "2001:db8::/64"},
+		{"IPv4-mapped IPv6", "[::ffff:192.0.2.7]:5555", "", "", "192.0.2.7"},
+		{"header ignored unless configured", "192.0.2.7:5555", "", "6.6.6.6", "192.0.2.7"},
+		{"header from untrusted peer ignored", "192.0.2.7:5555", "X-Forwarded-For", "6.6.6.6", "192.0.2.7"},
+		{"header from trusted proxy", "10.0.0.1:5555", "X-Real-IP", "192.0.2.8", "192.0.2.8"},
+		{"spoofed first hop ignored", "10.0.0.1:5555", "X-Forwarded-For", "6.6.6.6, 192.0.2.9", "192.0.2.9"},
+		{"chain of trusted proxies skipped", "10.0.0.1:5555", "X-Forwarded-For", "6.6.6.6, 192.0.2.9, 10.0.0.2", "192.0.2.9"},
+		{"garbage stops the walk", "10.0.0.1:5555", "X-Forwarded-For", "192.0.2.9, junk, 10.0.0.2", "10.0.0.2"},
+		{"header missing", "10.0.0.1:5555", "X-Real-IP", "", "10.0.0.1"},
+		{"header garbage", "10.0.0.1:5555", "X-Real-IP", "not-an-ip", "10.0.0.1"},
 	}
 	for _, c := range cases {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
 		r.RemoteAddr = c.remote
-		r.Header.Set("X-Real-IP", "1.2.3.4") // ignored unless configured
-		if c.header != "" {
-			r.Header.Del("X-Real-IP")
-			if c.value != "" {
-				r.Header.Set(c.header, c.value)
+		h := c.header
+		if c.value != "" {
+			name := h
+			if name == "" {
+				name = "X-Forwarded-For"
 			}
+			r.Header.Set(name, c.value)
 		}
-		if got := clientKey(r, c.header); got != c.want {
-			t.Errorf("%+v: got %q", c, got)
+		if got := clientKey(r, h, trusted); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+func TestSpoofedHeaderCannotDodgeRateLimit(t *testing.T) {
+	f := newFixture(t)
+	_, proxies, _ := net.ParseCIDR("10.0.0.0/8")
+	f.gate.opt.ClientIPHeader = "X-Forwarded-For"
+	f.gate.opt.TrustedProxies = []*net.IPNet{proxies}
+	f.gate.limiter = newRateLimiter(2)
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/premium/a", nil)
+		req.RemoteAddr = "192.0.2.7:1000" // not a trusted proxy
+		req.Header.Set("X-Forwarded-For", "198.51.100."+strconv.Itoa(i))
+		rec := httptest.NewRecorder()
+		f.gate.ServeHTTP(rec, req)
+		if i == 2 && rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("spoofed X-Forwarded-For bypassed the limit: got %d", rec.Code)
+		}
+	}
+}
+
+func TestSpentSetBounded(t *testing.T) {
+	s := newSpentSet()
+	s.max = 2
+	now := time.Unix(0, 0)
+	if s.use("a", now.Add(time.Minute), now) != nil || s.use("b", now.Add(time.Minute), now) != nil {
+		t.Fatal("first uses must succeed")
+	}
+	if err := s.use("c", now.Add(time.Minute), now); err != errBusy {
+		t.Fatalf("full set: got %v, want errBusy", err)
+	}
+	if err := s.use("a", now.Add(time.Minute), now); err != errReplay {
+		t.Fatalf("replay: got %v", err)
+	}
+	later := now.Add(2 * time.Minute)
+	if err := s.use("c", later.Add(time.Minute), later); err != nil {
+		t.Fatalf("after expiry: got %v", err)
+	}
+	if len(s.ids) != 1 {
+		t.Fatalf("expired entries kept: %d", len(s.ids))
 	}
 }
