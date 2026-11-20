@@ -17,6 +17,7 @@ import (
 	"github.com/Choffolo/spikes402/internal/config"
 	"github.com/Choffolo/spikes402/internal/gate"
 	"github.com/Choffolo/spikes402/internal/lightning"
+	"github.com/Choffolo/spikes402/pow"
 )
 
 func main() {
@@ -45,6 +46,8 @@ func main() {
 		log.Print("no secret_key set: using a random one (tokens will not survive a restart)")
 	}
 
+	trusted, _ := cfg.TrustedProxyNets() // validated by config.Load
+
 	mux := http.NewServeMux()
 	var backend lightning.Backend
 	switch cfg.Lightning.Backend {
@@ -65,6 +68,12 @@ func main() {
 		SecretKey:     secret,
 		Lightning:     backend,
 		Next:          proxy,
+
+		ChallengesPerMinute:  cfg.ChallengesPerMinute,
+		MaxInvoicesPerMinute: cfg.MaxInvoicesPerMinute,
+		MaxPendingInvoices:   cfg.MaxPendingInvoices,
+		ClientIPHeader:       cfg.ClientIPHeader,
+		TrustedProxies:       trusted,
 	}))
 
 	srv := &http.Server{
@@ -73,7 +82,7 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
-	log.Printf("spikes402 listening on %s, protecting %v of %s at %d sats or PoW difficulty %d",
-		cfg.Listen, cfg.Protect, cfg.Origin, cfg.PriceSats, cfg.PowDifficulty)
+	log.Printf("spikes402 listening on %s, protecting %v of %s at %d sats or PoW difficulty %d (~%.1f s on one CPU core)",
+		cfg.Listen, cfg.Protect, cfg.Origin, cfg.PriceSats, cfg.PowDifficulty, pow.ExpectedSeconds(cfg.PowDifficulty))
 	log.Fatal(srv.ListenAndServe())
 }

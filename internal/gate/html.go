@@ -35,7 +35,7 @@ var page = template.Must(template.New("402").Parse(`<!doctype html>
 <p>Lightning payments are unavailable right now.</p>
 {{end}}
 <p><small>Bots and scripts can also solve a proof-of-work puzzle instead of paying
-(difficulty {{.PoW.Difficulty}}). Details are in the <code>WWW-Authenticate</code> headers of this response.
+(difficulty {{.PoW.Difficulty}}, about {{.PoW.ExpectedSeconds}} seconds on one CPU core). Details are in the <code>WWW-Authenticate</code> headers of this response.
 This offer expires at {{.ExpiresAt.Format "15:04 MST"}}.</small></p>
 <p><small>Protected by <a href="https://github.com/Choffolo/spikes402">Spikes402</a>.</small></p>
 </body>
