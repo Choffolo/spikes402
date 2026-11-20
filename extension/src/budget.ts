@@ -46,19 +46,35 @@ export function spendForToday(stored: SpendState | undefined, today: string): Sp
   return stored;
 }
 
+/** Invoice amount plus the fee we are willing to pay, used for daily caps. */
+export function paymentCost(amountSats: number, feeSats: number): number {
+  if (!Number.isSafeInteger(amountSats) || !Number.isSafeInteger(feeSats) || amountSats < 0 || feeSats < 0) {
+    throw new Error("Payment cost is invalid.");
+  }
+  const total = amountSats + feeSats;
+  if (!Number.isSafeInteger(total)) throw new Error("Payment cost is too large.");
+  return total;
+}
+
 export function decidePayment(input: {
   amountSats: number | null;
   origin: string;
   settings: BudgetSettings;
   spend: SpendState;
   today: string;
+  /** Max routing / SSP fee we will accept; counted against daily caps, not the per-payment cap. */
+  feeSats?: number;
 }): Decision {
   const { amountSats, origin, settings } = input;
+  const feeSats = input.feeSats ?? 0;
   if (amountSats === null) {
     return { action: "refuse", reason: "Amountless invoices are not paid automatically." };
   }
   if (!Number.isInteger(amountSats) || amountSats < 1) {
     return { action: "refuse", reason: "Invoice amount is invalid." };
+  }
+  if (!Number.isInteger(feeSats) || feeSats < 0) {
+    return { action: "refuse", reason: "Fee is invalid." };
   }
   if (amountSats > settings.maxSatsPerPayment) {
     return {
@@ -69,16 +85,17 @@ export function decidePayment(input: {
 
   const spend = spendForToday(input.spend, input.today);
   const site = spend.perSite[origin] ?? 0;
-  if (site + amountSats > settings.maxSatsPerSitePerDay) {
+  const cost = paymentCost(amountSats, feeSats);
+  if (site + cost > settings.maxSatsPerSitePerDay) {
     return {
       action: "confirm",
-      reason: `This would take today's spend on ${origin} to ${site + amountSats} sats (limit ${settings.maxSatsPerSitePerDay}).`,
+      reason: `This would take today's spend on ${origin} to ${site + cost} sats, including up to ${feeSats} sats of fees (limit ${settings.maxSatsPerSitePerDay}).`,
     };
   }
-  if (spend.globalSats + amountSats > settings.maxSatsPerDay) {
+  if (spend.globalSats + cost > settings.maxSatsPerDay) {
     return {
       action: "confirm",
-      reason: `This would take today's total spend to ${spend.globalSats + amountSats} sats (limit ${settings.maxSatsPerDay}).`,
+      reason: `This would take today's total spend to ${spend.globalSats + cost} sats, including up to ${feeSats} sats of fees (limit ${settings.maxSatsPerDay}).`,
     };
   }
   if (!settings.autoPay) {

@@ -48,6 +48,18 @@ describe("decidePayment", () => {
     expect(d.reason).toMatch(/total spend/);
   });
 
+  it("counts fees against the daily caps, not the per-payment cap", () => {
+    const spend = recordSpend(emptySpend(today), today, origin, 90);
+    // 10 sat invoice + 5 sat fee would be 15, still under the 10-sat per-payment cap
+    // check, but 90+15=105 exceeds the 100-sat site day cap.
+    const d = decidePayment({ ...base, amountSats: 10, feeSats: 5, spend });
+    expect(d.action).toBe("confirm");
+    if (d.action !== "confirm") throw new Error("expected confirm");
+    expect(d.reason).toMatch(/including up to 5 sats of fees/);
+    // Without the fee, 90+10 fits the site cap.
+    expect(decidePayment({ ...base, amountSats: 10, feeSats: 0, spend }).action).toBe("pay");
+  });
+
   it("resets spend on a new day", () => {
     const yesterday = recordSpend(emptySpend("2026-11-19"), "2026-11-19", origin, 100);
     expect(spendForToday(yesterday, today)).toEqual(emptySpend(today));

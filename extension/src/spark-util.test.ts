@@ -4,6 +4,7 @@ import {
   lightningHint,
   maxFeeSatsFor,
   sendRequestFailed,
+  feeSatsFromSendRequest,
   sendRequestHasPreimage,
   toSparkNetwork,
 } from "./spark-util";
@@ -48,5 +49,14 @@ describe("send request helpers", () => {
     expect(sendRequestHasPreimage({ paymentPreimage: "ab" })).toBe("ab");
     expect(sendRequestHasPreimage({ paymentPreimage: "  " })).toBeUndefined();
     expect(sendRequestHasPreimage(null)).toBeUndefined();
+  });
+});
+
+describe("feeSatsFromSendRequest", () => {
+  it("reads sat and millisat fees and ignores unknown units", () => {
+    expect(feeSatsFromSendRequest({ fee: { originalValue: 3, originalUnit: "SATOSHI" } })).toBe(3);
+    expect(feeSatsFromSendRequest({ fee: { originalValue: 1500, originalUnit: "MILLISATOSHI" } })).toBe(2);
+    expect(feeSatsFromSendRequest({ fee: { originalValue: 3, originalUnit: "BITCOIN" } })).toBeUndefined();
+    expect(feeSatsFromSendRequest(null)).toBeUndefined();
   });
 });

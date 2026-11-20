@@ -6,6 +6,10 @@ export class InvoiceError extends Error {
   }
 }
 
+const BECH32 = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+/** BOLT11 tagged-field type for the 32-byte payment hash. */
+const TAG_PAYMENT_HASH = 1;
+
 /**
  * Reads the amount encoded in a BOLT11 invoice, in satoshis, rounded up.
  * Returns null if the invoice is valid-looking but has no amount (amountless).
@@ -13,7 +17,7 @@ export class InvoiceError extends Error {
  * before paying. Addresses (name@domain, Spark, on-chain) are not invoices.
  */
 export function parseBolt11AmountSats(invoice: string): number | null {
-  const raw = invoice.trim().toLowerCase();
+  const raw = normalizeInvoice(invoice);
   if (raw === "") throw new InvoiceError("Invoice is empty");
   if (!raw.startsWith("ln")) {
     throw new InvoiceError("Not a Lightning invoice");
@@ -24,9 +28,95 @@ export function parseBolt11AmountSats(invoice: string): number | null {
   return unitsToSats(BigInt(m[1]), m[2]);
 }
 
+/** 32-byte payment hash as lowercase hex, from the invoice's `p` field. */
+export function parseBolt11PaymentHash(invoice: string): string {
+  const raw = normalizeInvoice(invoice);
+  if (!raw.startsWith("ln")) throw new InvoiceError("Not a Lightning invoice");
+  const sep = raw.indexOf("1", 2);
+  if (sep < 0 || sep + 7 >= raw.length) throw new InvoiceError("Invoice is malformed");
+  const data = raw.slice(sep + 1, raw.length - 6); // drop the 6-character checksum
+  const words: number[] = [];
+  for (const ch of data) {
+    const v = BECH32.indexOf(ch);
+    if (v < 0) throw new InvoiceError("Invoice is malformed");
+    words.push(v);
+  }
+  // BOLT11: 7-word timestamp, tagged fields, 104-word signature.
+  if (words.length < 7 + 104) throw new InvoiceError("Invoice is malformed");
+  const tagged = words.slice(7, words.length - 104);
+  let i = 0;
+  while (i + 3 <= tagged.length) {
+    const type = tagged[i];
+    const len = tagged[i + 1] * 32 + tagged[i + 2];
+    i += 3;
+    if (i + len > tagged.length) throw new InvoiceError("Invoice is malformed");
+    const field = tagged.slice(i, i + len);
+    i += len;
+    if (type === TAG_PAYMENT_HASH) {
+      const bytes = wordsToBytes(field);
+      if (bytes.length < 32) throw new InvoiceError("Invoice payment hash is truncated");
+      return hex(bytes.subarray(0, 32));
+    }
+  }
+  throw new InvoiceError("Invoice has no payment hash");
+}
+
+/**
+ * True if sha256(preimage) equals the invoice's payment hash.
+ * Accepts a hex preimage (with or without a 0x prefix).
+ */
+export async function preimageMatchesInvoice(invoice: string, preimage: string): Promise<boolean> {
+  const want = parseBolt11PaymentHash(invoice);
+  const bytes = parsePreimage(preimage);
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return hex(hash) === want;
+}
+
+export async function assertPreimageMatchesInvoice(invoice: string, preimage: string): Promise<void> {
+  if (!(await preimageMatchesInvoice(invoice, preimage))) {
+    throw new InvoiceError("The payment preimage does not match this invoice's payment hash.");
+  }
+}
+
 /** True if s looks like a BOLT11 invoice (lnbc…, lntb…, lnbcrt…). */
 export function isBolt11(s: string): boolean {
-  return /^ln[a-z]+(?:\d+[munp]?)?1[0-9a-z]+$/i.test(s.trim());
+  return /^ln[a-z]+(?:\d+[munp]?)?1[0-9a-z]+$/i.test(normalizeInvoice(s));
+}
+
+function normalizeInvoice(invoice: string): string {
+  let raw = invoice.trim().toLowerCase();
+  if (raw.startsWith("lightning:")) raw = raw.slice("lightning:".length);
+  return raw;
+}
+
+function parsePreimage(preimage: string): Uint8Array<ArrayBuffer> {
+  let h = preimage.trim().toLowerCase();
+  if (h.startsWith("0x")) h = h.slice(2);
+  if (!/^[0-9a-f]{64}$/.test(h)) {
+    throw new InvoiceError("Payment preimage must be 32 bytes of hex.");
+  }
+  const out = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+function wordsToBytes(words: number[]): Uint8Array {
+  let acc = 0;
+  let bits = 0;
+  const out: number[] = [];
+  for (const w of words) {
+    acc = (acc << 5) | w;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      out.push((acc >> bits) & 0xff);
+    }
+  }
+  return new Uint8Array(out);
+}
+
+function hex(bytes: Uint8Array): string {
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function unitsToSats(amount: bigint, multiplier: string | undefined): number {

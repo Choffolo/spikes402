@@ -11,7 +11,7 @@ export type WalletBackend = {
    * Pay a BOLT11 invoice or a Spark address.
    * amountSats is required when the destination has no amount of its own.
    */
-  send(destination: string, amountSats?: number): Promise<{ preimage?: string; detail: string }>;
+  send(destination: string, amountSats?: number): Promise<{ preimage?: string; detail: string; feeSats?: number }>;
 };
 
 export class WalletError extends Error {

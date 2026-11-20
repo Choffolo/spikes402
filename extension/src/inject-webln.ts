@@ -12,7 +12,8 @@
 
   window.addEventListener("message", (ev: MessageEvent) => {
     const d = ev.data;
-    if (ev.source !== window || !d || d.source !== REPLY || typeof d.id !== "number") return;
+    if (ev.source !== window || ev.origin !== location.origin) return;
+    if (!d || d.source !== REPLY || typeof d.id !== "number") return;
     const w = pending.get(d.id);
     if (!w) return;
     pending.delete(d.id);
@@ -24,7 +25,7 @@
     const id = ++seq;
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
-      window.postMessage({ source: SOURCE, id, method, origin: location.origin, ...extra }, "*");
+      window.postMessage({ source: SOURCE, id, method, ...extra }, location.origin);
       setTimeout(() => {
         if (pending.has(id)) {
           pending.delete(id);

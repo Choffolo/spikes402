@@ -18,8 +18,9 @@ On mainnet, use only tiny amounts.
 - Create a 12-word recovery phrase locally, or restore one. Confirm you have
   written the words down (they are shown once).
 - Encrypt the phrase at rest with your password (WebCrypto: PBKDF2-SHA-256,
-  600,000 iterations, AES-256-GCM). Unlock decrypts it only in memory, in
-  the wallet host page, not in the service worker.
+  600,000 iterations, AES-256-GCM). Unlock sends the vault and password to
+  the wallet host, which decrypts the phrase only there (not in the service
+  worker). The host locks itself after 15 minutes of inactivity.
 - Popup: balance, Receive (Lightning invoice + QR), Send to a Lightning
   invoice or a Spark address, budget settings, payment history.
 - Budgets: max sats per page payment (default 10), max sats per site per
@@ -29,7 +30,9 @@ On mainnet, use only tiny amounts.
   amounts above the per-payment cap, pays silently when auto-pay is on and
   the daily caps still fit, and otherwise asks you to confirm in the popup
   (the page origin is shown). After a Lightning payment the extension waits
-  for the payment preimage (needed for WebLN / L402).
+  for the payment preimage, then checks locally that `sha256(preimage)`
+  equals the invoice's payment hash (needed for WebLN / L402). Daily budget
+  caps include the Lightning fee, not only the invoice amount.
 - Default network is **Bitcoin mainnet**. Spark **regtest** is available
   for development (no real money). Creating a Lightning invoice on regtest
   works without an API key; paying or topping up from a real wallet such
@@ -127,17 +130,20 @@ Gaps compared to Chrome:
 ## Security notes
 
 - **Content-script isolation.** The page only sees `window.webln`. The
-  isolated content script forwards requests and adds the **real page
-  origin**. The mnemonic never enters the page, the content script, or the
-  service worker in plaintext (it is decrypted only in the wallet host).
-- **Origin in prompts.** Confirmation text includes the page origin, not
-  just the invoice.
+  isolated content script forwards requests. The background takes the
+  **real page origin** from the content-script sender (`sender.origin` /
+  the tab URL), not from a value the page can invent. Privileged actions
+  (unlock, send, confirm, settings) are accepted only from extension
+  pages. The mnemonic is decrypted only in the wallet host.
+- **Origin in prompts.** Confirmation text and the desktop notification
+  include the page origin and the amount, not just the invoice.
 - **No remote code.** Manifest V3 CSP for extension pages is
   `script-src 'self' 'wasm-unsafe-eval'` (the Spark SDK instantiates
   bundled WASM for signing; there is no `unsafe-eval` and no remote
-  script). `connect-src` is limited to the hosts above. The service worker
-  does not run the wallet; an offscreen document (or a Firefox host
-  window) does.
+  script), plus `frame-ancestors 'none'`. `connect-src` is limited to the
+  hosts above. The service worker does not run the wallet; an offscreen
+  document (or a Firefox host window) does. The wallet host auto-locks
+  after 15 minutes of inactivity.
 - **Password.** Choose a unique password. It is not recoverable. The
   recovery phrase is; the backup screen is the only time it is shown after
   a new wallet is created.
@@ -145,9 +151,11 @@ Gaps compared to Chrome:
 
 ## Tests
 
-Unit tests cover budget decisions (silent pay, confirm, refuse, day reset),
-BOLT11 amount parsing, mnemonic generation and password encryption, and
-Spark helpers (network mapping, fee cap, address shape, payment status).
+Unit tests cover budget decisions (silent pay, confirm, refuse, day reset,
+fees on daily caps), BOLT11 amount and payment-hash parsing, local preimage
+checks, mnemonic generation and password encryption, sender/origin and
+settings checks, and Spark helpers (network mapping, fee cap, address
+shape, payment status).
 
 ```sh
 npm test

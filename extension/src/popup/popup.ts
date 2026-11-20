@@ -100,6 +100,8 @@ $("btn-create").addEventListener("click", async () => {
     showMsg("");
     const password = passwordPair();
     const { mnemonic } = await call<{ mnemonic: string }>({ type: "createWallet", password });
+    ($("setup-pass") as HTMLInputElement).value = "";
+    ($("setup-pass2") as HTMLInputElement).value = "";
     const list = $("mnemonic-list");
     list.replaceChildren();
     for (const word of mnemonic.split(" ")) {
@@ -125,6 +127,9 @@ $("btn-restore").addEventListener("click", async () => {
     const password = passwordPair();
     const mnemonic = ($("restore-words") as HTMLTextAreaElement).value;
     await call({ type: "restoreWallet", mnemonic, password });
+    ($("setup-pass") as HTMLInputElement).value = "";
+    ($("setup-pass2") as HTMLInputElement).value = "";
+    ($("restore-words") as HTMLTextAreaElement).value = "";
     await refresh();
   } catch (e) {
     showMsg(e instanceof Error ? e.message : String(e), true);

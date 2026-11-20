@@ -1,8 +1,9 @@
 import { SparkWallet } from "@buildonspark/spark-sdk";
 import type { WalletBackend } from "./backend";
 import { WalletError } from "./backend";
-import { isBolt11 } from "./invoice";
+import { assertPreimageMatchesInvoice, isBolt11 } from "./invoice";
 import {
+  feeSatsFromSendRequest,
   lightningHint,
   looksLikeSparkAddress,
   maxFeeSatsFor,
@@ -89,8 +90,13 @@ export const sparkBackend: WalletBackend = {
       if (!payment || !("id" in payment) || !payment.id) {
         throw new WalletError("The payment did not return a Lightning send request (no preimage).");
       }
-      const preimage = await waitForPreimage(w, payment.id);
-      return { preimage, detail: `preimage ${preimage}` };
+      const settled = await waitForPreimage(w, payment.id);
+      await assertPreimageMatchesInvoice(dest, settled.preimage);
+      return {
+        preimage: settled.preimage,
+        detail: `preimage ${settled.preimage}`,
+        feeSats: settled.feeSats ?? maxFeeSatsFor(amount ?? 10),
+      };
     }
 
     if (looksLikeSparkAddress(dest)) {
@@ -114,11 +120,14 @@ function need(): SparkWallet {
   return wallet;
 }
 
-async function waitForPreimage(w: SparkWallet, id: string): Promise<string> {
+async function waitForPreimage(
+  w: SparkWallet,
+  id: string,
+): Promise<{ preimage: string; feeSats?: number }> {
   for (let i = 0; i < PREIMAGE_POLL_ATTEMPTS; i++) {
     const req = await w.getLightningSendRequest(id);
     const preimage = sendRequestHasPreimage(req);
-    if (preimage) return preimage;
+    if (preimage) return { preimage, feeSats: feeSatsFromSendRequest(req) };
     if (sendRequestFailed(req?.status)) {
       throw new WalletError(`Lightning payment failed (${req?.status ?? "unknown"}).`);
     }

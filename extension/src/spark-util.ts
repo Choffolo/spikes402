@@ -58,3 +58,19 @@ export function sendRequestHasPreimage(req: { paymentPreimage?: string } | null 
   const p = req?.paymentPreimage?.trim();
   return p ? p : undefined;
 }
+
+/** Actual fee reported on a Lightning send request, in sats, if it can be read. */
+export function feeSatsFromSendRequest(req: { fee?: { originalValue?: number; originalUnit?: string } } | null | undefined): number | undefined {
+  const fee = req?.fee;
+  if (!fee || typeof fee.originalValue !== "number" || !Number.isFinite(fee.originalValue) || fee.originalValue < 0) {
+    return undefined;
+  }
+  switch (fee.originalUnit) {
+    case "SATOSHI":
+      return Math.ceil(fee.originalValue);
+    case "MILLISATOSHI":
+      return Math.ceil(fee.originalValue / 1000);
+    default:
+      return undefined;
+  }
+}

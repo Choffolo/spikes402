@@ -1,7 +1,9 @@
-import { decidePayment, recordSpend, spendForToday, todayLocal } from "./budget";
-import { decryptMnemonic, encryptMnemonic, generateMnemonic, isValidMnemonic, normalizeMnemonic } from "./crypto";
+import { decidePayment, paymentCost, recordSpend, spendForToday, todayLocal } from "./budget";
+import { encryptMnemonic, generateMnemonic, isValidMnemonic, normalizeMnemonic } from "./crypto";
 import { InvoiceError, isBolt11, parseBolt11AmountSats } from "./invoice";
 import { lightningHint } from "./backend";
+import { isExtensionPage, pageOrigin, sanitizeSettings } from "./sender";
+import { maxFeeSatsFor } from "./spark-util";
 import {
   appendHistory,
   loadState,
@@ -15,6 +17,17 @@ import type { PaymentRecord, PendingPayment, Settings, WalletInfo } from "./type
 
 const CONFIRM_TTL_MS = 5 * 60 * 1000;
 const waiters = new Map<string, { resolve: (ok: boolean) => void }>();
+
+/** Serializes budget checks and payments so two pages cannot double-spend a cap. */
+let budgetTail: Promise<void> = Promise.resolve();
+function withBudgetLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = budgetTail.then(fn, fn);
+  budgetTail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
 
 type PopupMsg =
   | { type: "getState" }
@@ -47,6 +60,9 @@ chrome.runtime.onMessage.addListener((msg: PopupMsg | PageMsg, sender, sendRespo
 });
 
 async function handle(msg: PopupMsg | PageMsg, sender: chrome.runtime.MessageSender): Promise<unknown> {
+  if (msg.type !== "webln" && !isExtensionPage(sender, chrome.runtime.getURL(""))) {
+    throw new Error("This action is only available from the extension popup.");
+  }
   switch (msg.type) {
     case "getState":
       return snapshot();
@@ -59,7 +75,7 @@ async function handle(msg: PopupMsg | PageMsg, sender: chrome.runtime.MessageSen
     case "lock":
       return lock();
     case "saveSettings":
-      await saveSettings(msg.settings);
+      await saveSettings(sanitizeSettings(msg.settings as unknown as Record<string, unknown>));
       return snapshot();
     case "receive":
       return receiveInvoice(msg.amountSats);
@@ -120,10 +136,11 @@ async function restoreWallet(mnemonic: string, password: string): Promise<{ ok: 
 async function unlock(password: string): Promise<{ ok: true }> {
   const s = await loadState();
   if (!s.vault) throw new Error("No wallet is stored yet.");
-  const mnemonic = await decryptMnemonic(s.vault, password);
   await ensureWalletHost();
+  // Decrypt only in the wallet host, so the service worker never holds the phrase.
   await walletCall("connect", {
-    mnemonic,
+    vault: s.vault,
+    password,
     network: s.settings.network,
   });
   return { ok: true };
@@ -159,9 +176,10 @@ async function sendFromPopup(destination: string, amountSats?: number): Promise<
   return res;
 }
 
-async function handleWebln(msg: PageMsg, _sender: chrome.runtime.MessageSender): Promise<unknown> {
-  const origin = msg.origin || "unknown";
-  const s = await loadState();
+async function handleWebln(msg: PageMsg, sender: chrome.runtime.MessageSender): Promise<unknown> {
+  const origin = pageOrigin(sender);
+  if (!origin) throw new Error("This payment request has no page origin.");
+
   const host = await walletCall<{ unlocked?: boolean }>("status").catch(() => ({ unlocked: false }));
   if (!host.unlocked) throw new Error("The Spikes402 wallet is locked. Open the extension and unlock it.");
 
@@ -171,49 +189,84 @@ async function handleWebln(msg: PageMsg, _sender: chrome.runtime.MessageSender):
     return { node: { alias: "Spikes402", pubkey: w.pubkey }, methods: ["sendPayment", "getInfo"] };
   }
   if (msg.method !== "sendPayment" || !msg.invoice) throw new Error("sendPayment needs an invoice.");
+  const invoice = msg.invoice;
 
   let amountSats: number | null;
   try {
-    amountSats = parseBolt11AmountSats(msg.invoice);
+    amountSats = parseBolt11AmountSats(invoice);
   } catch (e) {
     const reason = e instanceof InvoiceError ? e.message : "Invoice could not be read.";
-    await log(origin, 0, msg.invoice, "refused", reason);
+    await log(origin, 0, invoice, "refused", reason);
     throw new Error(reason);
   }
+  const feeSats = amountSats === null ? 0 : maxFeeSatsFor(amountSats);
 
-  const today = todayLocal();
-  const spend = spendForToday(s.spend, today);
-  const decision = decidePayment({ amountSats, origin, settings: s.settings, spend, today });
-  if (decision.action === "refuse") {
-    await log(origin, amountSats ?? 0, msg.invoice, "refused", decision.reason);
-    throw new Error(decision.reason);
+  let confirmReason: string | undefined;
+  const first = await withBudgetLock(async () => decideWebln(origin, amountSats, feeSats));
+  if (first.action === "refuse") {
+    await log(origin, amountSats ?? 0, invoice, "refused", first.reason);
+    throw new Error(first.reason);
   }
-  if (decision.action === "confirm") {
+  if (first.action === "confirm") {
+    confirmReason = first.reason;
     const accepted = await askUser({
       origin,
-      invoice: msg.invoice,
+      invoice: invoice,
       amountSats: amountSats ?? 0,
-      reason: decision.reason,
+      reason: first.reason,
     });
     if (!accepted) {
-      await log(origin, amountSats ?? 0, msg.invoice, "refused", "You declined the payment.");
+      await log(origin, amountSats ?? 0, invoice, "refused", "You declined the payment.");
       throw new Error("Payment declined.");
     }
   }
 
-  try {
-    const res = await walletCall<{ preimage?: string; detail: string }>("send", {
-      destination: msg.invoice,
-    });
-    await saveSpend(recordSpend(spend, today, origin, amountSats ?? 0));
-    await log(origin, amountSats ?? 0, msg.invoice, "sent", res.detail);
-    if (!res.preimage) throw new Error("The wallet paid, but did not return a preimage.");
-    return { preimage: res.preimage };
-  } catch (e) {
-    const detail = e instanceof Error ? e.message : String(e);
-    await log(origin, amountSats ?? 0, msg.invoice, "failed", detail);
-    throw e;
-  }
+  return withBudgetLock(async () => {
+    if (!confirmReason) {
+      const again = await decideWebln(origin, amountSats, feeSats);
+      if (again.action !== "pay") {
+        await log(origin, amountSats ?? 0, invoice, "refused", again.reason);
+        throw new Error(again.reason);
+      }
+    } else if (amountSats !== null) {
+      const s = await loadState();
+      if (amountSats > s.settings.maxSatsPerPayment) {
+        const reason = `This invoice is ${amountSats} sats, above the per-payment cap of ${s.settings.maxSatsPerPayment} sats.`;
+        await log(origin, amountSats, invoice, "refused", reason);
+        throw new Error(reason);
+      }
+    }
+    const s = await loadState();
+    const today = todayLocal();
+    const spend = spendForToday(s.spend, today);
+    try {
+      const res = await walletCall<{ preimage?: string; detail: string; feeSats?: number }>("send", {
+        destination: invoice,
+      });
+      if (!res.preimage) throw new Error("The wallet paid, but did not return a preimage.");
+      const recorded = paymentCost(amountSats ?? 0, res.feeSats ?? feeSats);
+      await saveSpend(recordSpend(spend, today, origin, recorded));
+      await log(origin, recorded, invoice, "sent", res.detail);
+      return { preimage: res.preimage };
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      await log(origin, amountSats ?? 0, invoice, "failed", detail);
+      throw e;
+    }
+  });
+}
+
+async function decideWebln(origin: string, amountSats: number | null, feeSats: number) {
+  const s = await loadState();
+  const today = todayLocal();
+  return decidePayment({
+    amountSats,
+    origin,
+    settings: s.settings,
+    spend: spendForToday(s.spend, today),
+    today,
+    feeSats,
+  });
 }
 
 function askUser(p: { origin: string; invoice: string; amountSats: number; reason: string }): Promise<boolean> {
@@ -231,7 +284,7 @@ function askUser(p: { origin: string; invoice: string; amountSats: number; reaso
         resolve(ok);
       },
     });
-    void setPending(pending).then(() => openPopup());
+    void setPending(pending).then(() => openPopup(pending));
   });
 }
 
@@ -261,18 +314,21 @@ async function log(
   });
 }
 
-async function openPopup() {
+async function openPopup(pending?: { origin: string; amountSats: number }) {
   try {
     if (chrome.action.openPopup) await chrome.action.openPopup();
   } catch {
     /* some Chrome views refuse this; the badge still marks a pending payment */
   }
+  const summary = pending
+    ? `Pay ${pending.amountSats} sats to ${pending.origin}? Open the extension to confirm or decline.`
+    : "Open the extension to confirm or decline.";
   try {
     await chrome.notifications.create("spikes402-confirm", {
       type: "basic",
       iconUrl: "icons/icon-128.png",
       title: "Spikes402: confirm a payment",
-      message: "Open the extension to confirm or decline.",
+      message: summary,
       priority: 2,
     });
   } catch {
