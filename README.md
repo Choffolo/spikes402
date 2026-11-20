@@ -18,6 +18,9 @@ miniature). Everything else passes through untouched.
   ([Web Bot Auth](#bot-identification)) and well-known crawlers checked
   against their published IP lists. Impostors are flagged. By default
   everyone still pays the same price.
+- Optional [admin dashboard](#admin-dashboard) with a live **siege monitor**,
+  an [MCP server](#ai-admin-mcp) for an AI assistant, and optional
+  [withdrawals](#withdrawals-optional-off-by-default) to one fixed address.
 
 ## How it works
 
@@ -103,6 +106,13 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `known_bots` | Replace the built-in list of crawlers: `[{"name", "user_agent", "ip_ranges_url", "reverse_dns": [...]}]` | built-in list |
 | `bot_policies` | Optional per-class treatment (see [Policies](#policies-off-by-default-open-for-discussion)) | `{}` = everyone pays the same |
 | `web_bot_auth_dev_mode` | Accept key directories on `http://`, localhost and any port, and signatures over plain http. **Testing only**; refused with a real Lightning backend | `false` |
+| `admin.key` | Turns on the [admin dashboard](#admin-dashboard), ≥ 32 characters. Better set via `SPIKES402_ADMIN_KEY` | `""` = off |
+| `admin.listen` | Address of the dashboard/API, separate from the proxy | `"127.0.0.1:8404"` |
+| `admin.allowed_ips` | IPs/CIDRs allowed to reach the dashboard besides localhost. Required if `admin.listen` is not localhost | `[]` |
+| `admin.ai_key` | Separate key for the [AI admin (MCP)](#ai-admin-mcp). Better set via `SPIKES402_AI_KEY` | `""` = no AI |
+| `admin.ai_can_apply` | Let the AI apply changes itself instead of only proposing them | `false` |
+| `admin.visitor_ips` | How visitors appear in the siege monitor: `"hash"`, `"truncate"` (/24, /48) or `"full"` | `"hash"` |
+| `withdraw.*` | See [Withdrawals](#withdrawals-optional-off-by-default) | off |
 | `lightning.backend` | `"fake"` (development) or `"phoenixd"` | required |
 | `lightning.phoenixd_url` | phoenixd HTTP API | `"http://127.0.0.1:9740"` |
 | `lightning.phoenixd_password` | phoenixd *limited-access* password. Better set via `PHOENIXD_PASSWORD` | — |
@@ -305,6 +315,115 @@ minute (newcomers beyond that share one allowance), `max_pending_invoices`
 offers, and 1,000,000 used tokens. When the used-token list is full, new
 redemptions are refused ("server busy") rather than risking a replay.
 
+## Admin dashboard
+
+Off by default. Set an admin key and restart:
+
+```sh
+export SPIKES402_ADMIN_KEY=$(openssl rand -hex 32)
+bin/spikes402 -config config.json
+# then open http://127.0.0.1:8404 and paste the key
+```
+
+The dashboard listens on its **own address, localhost only by default**,
+never on the public proxy port. From another computer use an SSH tunnel
+(`ssh -L 8404:127.0.0.1:8404 your-server`), or set `admin.listen` plus
+`admin.allowed_ips` (only the TCP address counts, never forwarded headers).
+The key is compared in constant time, kept only in the browser tab
+(`sessionStorage`) and sent as `Authorization: Bearer`, so there are no cookies
+to steal or forge. The page is plain HTML/JS embedded in the binary, with a
+strict Content-Security-Policy and no outside resources.
+
+Tabs:
+
+- **Siege monitor**: a live view of the visitors hitting the walls (below).
+- **Overview**: requests by outcome and visitor class, open invoices, and the
+  Lightning node: balance, channels, circuit breaker, invoice failures.
+- **Settings**: everything currently in force (no secrets), and a form for
+  the few **safe settings** that can change while running: `price_sats`,
+  `pow_seconds_per_sat`, `challenges_per_minute` and `bot_policies`. They are
+  validated like the config file, apply immediately and **last until
+  restart**; edit the file to keep them. Everything else (addresses,
+  secrets, the Lightning backend, withdrawal destination) is config-file only.
+- **Proposals**: changes suggested by the AI admin, to approve or reject.
+- **Withdraw**: only if enabled.
+
+### Siege monitor
+
+![Siege monitor](docs/siege-monitor.png)
+
+Every request to a protected page appears as a dot walking from the left
+("the frontier") to the glowing wall in front of your site. Its colour is the
+visitor class: blue = signed bot (Web Bot Auth), green = verified crawler,
+red = impostor, grey = unknown; known bots carry their name. At the wall:
+⚡ paid and ⚙ did the work pass through the gate; `402` stops at the wall
+(told the price); `✗` (bad proof), `429` (too fast) and `503` bounce back;
+`403` (blocked by a policy) bursts. Counters on top, a table of who comes
+knocking (fake bots marked) and a feed of the latest arrivals below.
+
+It polls the API once a second; nothing is pushed when nobody watches. The
+server keeps only the **last 1,000 visits** in a ring buffer plus counters
+(at most 200 bot names). Visitors are **anonymised by default**: a keyed hash
+that changes on every restart (`v-3fa2c1d9e07b`), no query strings. Use
+`"admin.visitor_ips": "truncate"` for networks (`203.0.113.0/24`) or `"full"`
+for addresses. Turn the animation off with the checkbox; it also respects
+"reduce motion".
+
+## AI admin (MCP)
+
+`bin/spikes402-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
+server (stdio) that lets an AI assistant (Claude Desktop, Cursor, …) watch the
+proxy and suggest changes. Give it its **own key**, `admin.ai_key`:
+
+```json
+{"mcpServers": {"spikes402": {"command": "/path/to/bin/spikes402-mcp",
+  "env": {"SPIKES402_AI_KEY": "<admin.ai_key>", "SPIKES402_ADMIN_URL": "http://127.0.0.1:8404"}}}}
+```
+
+Tools: `get_status`, `get_recent_visits`, `get_settings`, `list_proposals`,
+`propose_settings_change` and `apply_settings_change`. With the AI key the API
+allows reading and **proposing** only; a proposal changes nothing until you
+approve it in the dashboard. Applying directly needs `"admin.ai_can_apply":
+true` in the config file. The AI key can **never** approve proposals or
+withdraw; there is no withdraw tool; and `spikes402-mcp` refuses to run with
+the human admin key.
+
+## Withdrawals (optional, off by default)
+
+The dashboard can send money from the node to **one fixed destination**
+written in the config file. It cannot be changed through the dashboard, the
+API or the AI.
+
+```json
+"withdraw": {
+  "enabled": true,
+  "destination": "you@your-wallet.example",
+  "feerate_sat_vbyte": 0
+}
+```
+
+```sh
+export SPIKES402_WITHDRAW_PASSWORD='a long passphrase, not the admin key'
+export PHOENIXD_FULL_PASSWORD=<http-password from phoenix.conf>
+```
+
+- **Destination**: a Lightning address (`name@domain`, via phoenixd
+  `/paylnaddress`) or a Bitcoin address (on-chain via `/sendtoaddress`, which
+  needs `feerate_sat_vbyte`).
+- **⚠ phoenixd full-access password.** Withdrawing needs phoenixd's *full*
+  `http-password`, which can spend everything on the node. It is only read
+  when withdrawals are enabled and is used only by the withdrawal code; the
+  paywall itself keeps using the limited, receive-only password. If you do not
+  need withdrawals, leave them off and use phoenixd's own tools instead.
+- **Two confirmations**: step 1 sends the amount and the withdraw password
+  and returns a one-time confirmation valid for 2 minutes, showing the
+  destination; step 2 needs the same amount and the password again (plus a
+  browser confirm). Each confirmation works once.
+- The **withdraw password** is separate from the admin key (≥ 16 characters,
+  must differ from every other secret). After 5 wrong passwords withdrawals
+  lock for 15 minutes. The admin key alone cannot withdraw.
+- Only the human admin key can withdraw; the AI key never can.
+
 ## Using a real Lightning node: phoenixd
 
 [phoenixd](https://phoenix.acinq.co/server) is a minimal, self-hosted,
@@ -377,6 +496,11 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
   a GPU solves it about 1000× faster.
 - **Client IP header:** it is only trusted from `trusted_proxies`; list only
   proxies you control.
+- **Admin dashboard:** keep it on localhost (default) and reach it through an
+  SSH tunnel. Over plain http on a network the key could be sniffed; use
+  `admin.allowed_ips` only on a network you trust, or put TLS in front.
+- **Keys are separate:** admin key, AI key, withdraw password and phoenixd's
+  two passwords must all differ; the config check refuses reused ones.
 
 ## Known limits / not done yet
 
@@ -398,6 +522,13 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
   Directory response signatures are produced by the example bot but not
   required by the gate (the draft allows that).
 - Argon2id speed figures for GPUs are not measured by us.
+- Dashboard: one admin key (no user accounts, no audit log beyond the
+  process log); settings changed live are lost on restart; the siege
+  monitor shows this process only and resets on restart.
+- Withdrawals: tested against the fake backend and a mock of phoenixd's API,
+  not yet against a real phoenixd node. Fee estimation is up to you
+  (`feerate_sat_vbyte`); Lightning-address payments may fail if no route is
+  found.
 - Not yet reviewed by Lightning security experts.
 
 ## Development
@@ -408,7 +539,9 @@ go test -race ./...
 
 Layout: `cmd/spikes402` (proxy), `cmd/spikes-bot` (example bot),
 `cmd/demo-origin` (test website), `internal/gate` (402 logic),
-`internal/lightning` (fake + phoenixd), `internal/config`, `internal/botid`
+`cmd/spikes402-mcp` (AI admin), `internal/admin` (dashboard, siege monitor,
+withdrawals), `internal/mcp`, `internal/lightning` (fake + phoenixd),
+`internal/config`, `internal/botid`
 (bot classification), `internal/sfv` (structured header parsing), `webbotauth`
 (Web Bot Auth sign/verify), `pow`, `client`.
 

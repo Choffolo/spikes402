@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Choffolo/spikes402/internal/botid"
@@ -45,6 +46,10 @@ type Options struct {
 	// Policies empty (the default): everyone pays the same.
 	Classifier *botid.Classifier
 	Policies   map[string]Policy
+
+	// Observer, if set, is told about every request to a protected path.
+	// It is called synchronously and must be fast.
+	Observer func(Event)
 }
 
 // ClassHeader is the response header that tells the client how it was
@@ -60,6 +65,7 @@ type Gate struct {
 	pending *pendingOffers
 	node    *nodeGuard
 	now     func() time.Time // replaceable in tests
+	live    atomic.Pointer[Settings]
 
 	// argonSlots caps how many Argon2id solutions are checked at once:
 	// each check takes tens of MiB and milliseconds of CPU.
@@ -76,7 +82,7 @@ func New(opt Options) *Gate {
 		opt.ChallengeTTL <= 0 || opt.PoW == nil || opt.ChallengesPerMinute < 1 || opt.MaxPendingInvoices < 1 || opt.MaxInvoicesPerMinute < 1 {
 		panic("gate: invalid options")
 	}
-	return &Gate{
+	g := &Gate{
 		opt:     opt,
 		sign:    signer{opt.SecretKey},
 		spent:   newSpentSet(),
@@ -89,6 +95,8 @@ func New(opt Options) *Gate {
 		nodeLog:    rateLog{perMinute: 1},
 		classLog:   rateLog{perMinute: 60},
 	}
+	g.live.Store(&Settings{PriceSats: opt.PriceSats, PoW: opt.PoW, Policies: opt.Policies, ChallengesPerMinute: opt.ChallengesPerMinute})
+	return g
 }
 
 // ServeHTTP implements http.Handler.
@@ -104,25 +112,33 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	set := g.live.Load() // one consistent snapshot for this request
 	class := g.classify(r)
 	w.Header().Set(ClassHeader, class.String())
-	pol := g.policyFor(class)
+	pol := g.policyFor(set, class)
 	switch pol.Action {
 	case ActionBlock:
+		g.observe(r, class, OutcomeBlocked)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	case ActionFree:
+		g.observe(r, class, OutcomeFree)
 		r.Header.Del("Authorization")
 		g.opt.Next.ServeHTTP(w, r)
 		return
 	}
-	price := pol.price(g.opt.PriceSats)
+	price := pol.price(set.PriceSats)
 	key := g.pendingKey(r, price, pol.Action)
 
 	var problem string
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		id, err := g.redeem(r, auth)
 		if err == nil {
+			outcome := OutcomePaid
+			if scheme, _, _ := strings.Cut(auth, " "); strings.EqualFold(scheme, "PoW") {
+				outcome = OutcomePoW
+			}
+			g.observe(r, class, outcome)
 			g.pending.drop(key, id)
 			r.Header.Del("Authorization") // our credential, not the origin's business
 			g.opt.Next.ServeHTTP(w, r)
@@ -130,13 +146,18 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		var busy *busyError
 		if errors.As(err, &busy) {
+			if busy.status == http.StatusTooManyRequests {
+				g.observe(r, class, OutcomeRateLimited)
+			} else {
+				g.observe(r, class, OutcomeBusy)
+			}
 			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(busy.wait.Seconds()))))
 			http.Error(w, busy.msg, busy.status)
 			return
 		}
 		problem = err.Error()
 	}
-	g.challenge(w, r, problem, key, price, pol.Action == ActionPoWOnly)
+	g.challenge(w, r, set, class, problem, key, price, pol.Action == ActionPoWOnly)
 }
 
 // classify identifies the client and logs anything noteworthy.
@@ -344,9 +365,10 @@ func (g *Gate) clientIP(r *http.Request) net.IP {
 
 // challenge answers 402 Payment Required with both ways in, or 429 Too
 // Many Requests if this client asked for too many challenges.
-func (g *Gate) challenge(w http.ResponseWriter, r *http.Request, problem, key string, price int64, powOnly bool) {
+func (g *Gate) challenge(w http.ResponseWriter, r *http.Request, set *Settings, class botid.Class, problem, key string, price int64, powOnly bool) {
 	now := g.now()
 	if ok, wait := g.limiter.allow(g.client(r), now); !ok {
+		g.observe(r, class, OutcomeRateLimited)
 		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
 		http.Error(w, "too many requests", http.StatusTooManyRequests)
 		return
@@ -357,16 +379,21 @@ func (g *Gate) challenge(w http.ResponseWriter, r *http.Request, problem, key st
 	o, ok := g.pending.get(key, now, g.opt.ChallengeTTL/2)
 	if !ok || g.spent.has(o.id) {
 		var err error
-		if o, err = g.newOffer(r, now, key, price, powOnly); err != nil {
+		if o, err = g.newOffer(r, now, key, set.PoW(price), price, powOnly); err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
+	}
+	if problem != "" {
+		g.observe(r, class, OutcomeRejected)
+	} else {
+		g.observe(r, class, OutcomeChallenged)
 	}
 	g.writeChallenge(w, r, o, problem)
 }
 
 // newOffer creates a token and, if there is room, an invoice.
-func (g *Gate) newOffer(r *http.Request, now time.Time, key string, price int64, powOnly bool) (offer, error) {
+func (g *Gate) newOffer(r *http.Request, now time.Time, key string, p pow.Params, price int64, powOnly bool) (offer, error) {
 	id := make([]byte, 16)
 	if _, err := rand.Read(id); err != nil {
 		return offer{}, err
@@ -376,7 +403,6 @@ func (g *Gate) newOffer(r *http.Request, now time.Time, key string, price int64,
 		Resource: resource(r),
 		Expires:  now.Add(g.opt.ChallengeTTL).Unix(),
 	}
-	p := g.opt.PoW(price)
 	c.PowBits = p.Difficulty
 	if p.Algorithm == pow.Argon2id {
 		c.PowAlg, c.PowMem = p.Algorithm, p.MemoryMiB

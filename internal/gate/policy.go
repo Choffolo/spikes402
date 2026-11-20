@@ -49,13 +49,13 @@ var defaultPolicy = Policy{Action: ActionPay, PriceMultiplier: 1}
 // Auth agent URL (only once the claim is verified, so an impostor never
 // gets a named bot's treatment), then by kind ("unknown", "impostor",
 // "verified", "verified-signed"), else the default.
-func (g *Gate) policyFor(c botid.Class) Policy {
+func (g *Gate) policyFor(set *Settings, c botid.Class) Policy {
 	if c.Name != "" && (c.Kind == botid.Verified || c.Kind == botid.Signed) {
-		if p, ok := g.opt.Policies[c.Name]; ok {
+		if p, ok := set.Policies[c.Name]; ok {
 			return p
 		}
 	}
-	if p, ok := g.opt.Policies[string(c.Kind)]; ok {
+	if p, ok := set.Policies[string(c.Kind)]; ok {
 		return p
 	}
 	return defaultPolicy
