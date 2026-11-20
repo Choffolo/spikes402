@@ -54,7 +54,8 @@ miniature). Everything else passes through untouched.
 
 ## Quick start (fake Lightning, no real money)
 
-You need [Go](https://go.dev/dl/) 1.26 or newer.
+You need [Go](https://go.dev/dl/) 1.26 or newer (builds use Go 1.27.4 or
+later, which has the latest security fixes; `go` downloads it if needed).
 
 ```sh
 git clone https://github.com/Choffolo/spikes402 && cd spikes402
@@ -87,10 +88,11 @@ A JSON file (see [`config.example.json`](config.example.json)):
 
 | Key | Meaning | Default |
 |---|---|---|
-| `listen` | Address the proxy listens on | `":8402"` |
+| `listen` | Address the proxy listens on | `":8402"` (`"127.0.0.1:8402"` with the fake backend) |
 | `origin` | The website to protect (`http://` or `https://` URL) | required |
 | `price_sats` | Price of one request, in satoshis | required, ≥ 1 |
-| `protect` | Path patterns that require payment. `"/premium/**"` = everything under `/premium`; other patterns use [glob syntax](https://pkg.go.dev/path#Match), e.g. `"/*.pdf"` | required |
+| `protect` | Path patterns that require payment. `"/premium/**"` = everything under `/premium`; other patterns use [glob syntax](https://pkg.go.dev/path#Match), e.g. `"/*.pdf"`. See [Path matching](#path-matching) | required |
+| `protect_case_sensitive` | Match `protect` patterns with exact letter case. Off by default, because many websites serve `/Premium` like `/premium` | `false` |
 | `pow_seconds_per_sat` | How much work replaces one sat: seconds of one CPU core (see [Proof-of-work pricing](#proof-of-work-pricing)) | `10` |
 | `pow_difficulty` | Leading zero bits for the puzzle. `0` = derive from the price and `pow_seconds_per_sat` | `0` |
 | `pow_algorithm` | `"sha256d"` or `"argon2id"` (memory-hard, see [Argon2id](#argon2id-memory-hard-proof-of-work)) | `"sha256d"` |
@@ -101,10 +103,15 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `max_pending_invoices` | Open (unpaid, unexpired) invoices at once; beyond that, proof-of-work only | `10000` |
 | `client_ip_header` | Header holding the visitor's IP when Spikes402 runs behind your own proxy, e.g. `"X-Forwarded-For"`, `"X-Real-IP"`, `"CF-Connecting-IP"` | `""` (use the connection's address) |
 | `trusted_proxies` | IPs or CIDR ranges of those proxies, e.g. `["127.0.0.1"]`. The header is ignored from anyone else. Required with `client_ip_header` | `[]` |
+| `max_connections` | Client connections open at once; more wait in the queue | `10000` |
+| `read_timeout_seconds` / `write_timeout_seconds` | Longest time to receive a whole request / send a whole response (raise the second for very large downloads or streaming) | `60` / `300` |
+| `unsafe_allow_dangerous_config` | Accept settings refused by default: `trusted_proxies` or `admin.allowed_ips` covering the whole internet (`0.0.0.0/0`, `::/0`), or the fake backend on a non-localhost address | `false` |
 | `secret_key` | Signs tokens, ≥ 32 characters. Better set via `SPIKES402_SECRET_KEY` | random with `fake`, required otherwise |
 | `identify_bots` | Classify clients (Web Bot Auth, published IP lists, reverse DNS); see [Bot identification](#bot-identification) | `true` |
 | `known_bots` | Replace the built-in list of crawlers: `[{"name", "user_agent", "ip_ranges_url", "reverse_dns": [...]}]` | built-in list |
 | `bot_policies` | Optional per-class treatment (see [Policies](#policies-off-by-default-open-for-discussion)) | `{}` = everyone pays the same |
+| `web_bot_auth_trusted_agents` | Domains whose Web Bot Auth key directories you trust, e.g. `["chatgpt.com"]` (subdomains included). Only those signatures make a request `verified-signed`; see [Web Bot Auth](#web-bot-auth) | `[]` = none |
+| `public_hosts` | Your site's host names, e.g. `["example.com", "www.example.com"]`. Signatures made for any other host are refused. Required with `web_bot_auth_trusted_agents` | `[]` |
 | `web_bot_auth_dev_mode` | Accept key directories on `http://`, localhost and any port, and signatures over plain http. **Testing only**; refused with a real Lightning backend | `false` |
 | `admin.key` | Turns on the [admin dashboard](#admin-dashboard), ≥ 32 characters. Better set via `SPIKES402_ADMIN_KEY` | `""` = off |
 | `admin.listen` | Address of the dashboard/API, separate from the proxy | `"127.0.0.1:8404"` |
@@ -118,6 +125,22 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `lightning.phoenixd_password` | phoenixd *limited-access* password. Better set via `PHOENIXD_PASSWORD` | — |
 
 Unknown keys are rejected, so typos are caught at start-up.
+
+### Path matching
+
+A protected page must not be reachable under another spelling, whatever
+web server sits behind Spikes402. So:
+
+- Request targets longer than 8 KiB get `414 URI Too Long`, and request
+  headers are capped at 32 KiB.
+- Paths that servers read differently are refused with `400 Bad Request`:
+  dot segments and double slashes (`/a/../b`, `//b`), encoded slashes,
+  backslashes and percent signs (`%2F`, `%5C`, `\`, `%25`, so no double
+  encoding), and control characters (`%00`, tabs, line breaks).
+- Patterns are matched ignoring letter case (unless `protect_case_sensitive`),
+  `;parameters` in a segment (`/premium;x/a`, `/x/..;/premium`), trailing dots
+  and spaces in a segment (`/premium./a`) and a trailing slash. All of these
+  are asked to pay; the request is forwarded unchanged.
 
 ## Proof-of-work pricing
 
@@ -257,6 +280,15 @@ Where the drafts leave room, Spikes402 takes the **strict** reading:
   if it is not there in time the request counts as "unverified".
 - A bad or unverifiable signature does not block anything: the request is
   classified by the other checks, with a note.
+- **Anyone can publish a key**, so a valid signature alone proves nothing
+  about *who* signed. A request is only `verified-signed` if the key
+  directory is on a domain listed in `web_bot_auth_trusted_agents` (or a
+  subdomain of one). Other valid signatures are noted and the request is
+  classified by the other checks. With the default empty list, nobody is
+  `verified-signed`.
+- **No relaying:** with `public_hosts` set, a signature only counts if the
+  request's host is one of your host names, so a signature a bot made for
+  another site cannot be replayed against yours.
 
 ### Policies: off by default, open for discussion
 
@@ -279,7 +311,8 @@ Bot Auth directory URL to an action:
 Actions are `pay` (normal), `pow-only` (no invoice), `free` and `block`
 (403). `price_multiplier` scales the price and the puzzle (minimum 1 sat).
 Bot names and URLs only match once verified, so an impostor never gets a
-named bot's treatment. Note that a bot can always drop its claim and be
+named bot's treatment, and `verified-signed` only covers agents on your
+`web_bot_auth_trusted_agents` domains. Note that a bot can always drop its claim and be
 `unknown`, so a policy for `unknown` is the effective floor.
 
 ## Protecting your Lightning node
@@ -293,7 +326,7 @@ not called:
 | Guard | Default | What it stops |
 |---|---|---|
 | Per-client limit: `challenges_per_minute` per IP (per /64 for IPv6) | 30 | One client hammering the paywall. Beyond it: `429 Too Many Requests` + `Retry-After`. Free pages are never limited |
-| Same offer reused for the same client and page while more than half its lifetime is left | on | Reloads creating new invoices |
+| Same offer reused for the same client and page while more than half its lifetime is left. "Same client" means same IP **and** same `spikes402_session` cookie (see below) | on | Reloads creating new invoices |
 | Global rate: `max_invoices_per_minute`, spread evenly (bursts up to 5 seconds' worth) | 300 | Many clients at once (botnets) |
 | Global cap: `max_pending_invoices` open at once | 10,000 | Unpaid invoices piling up |
 | At most 8 invoice requests in flight, each with a 3-second timeout | on | A slow node tying up the proxy |
@@ -302,6 +335,17 @@ not called:
 A visitor hanging up mid-request does not count as a node failure, so
 nobody can trip the breaker on purpose. Failures are logged at most once a
 minute.
+
+**Session cookie.** 402 answers set an optional cookie, `spikes402_session`
+(random value, `HttpOnly`, `SameSite=Lax`, `Secure` over https, 24 h). A
+client that sends it back gets its open offer again instead of a new
+invoice. A client without it (most bots) gets a fresh offer on each
+request, still counted by every guard above, so the node is not called more.
+Two clients behind the same IP (office, carrier NAT) therefore never share
+an offer, and nobody can use up an invoice someone else is paying. The cookie
+is removed before the request goes to your website. Even so, a paid invoice
+can always be used once by whoever paid it: if the offer's puzzle was solved
+first, the payment still unlocks the page once (work after a payment is refused).
 
 **Real client IPs.** Behind a reverse proxy or CDN, every request seems to
 come from the proxy. Set `client_ip_header` *and* `trusted_proxies`: the
@@ -438,6 +482,10 @@ export PHOENIXD_FULL_PASSWORD=<http-password from phoenix.conf>
 - The **withdraw password** is separate from the admin key (≥ 16 characters,
   must differ from every other secret). After 5 wrong passwords withdrawals
   lock for 15 minutes. The admin key alone cannot withdraw.
+- **Keep withdrawals off when you are not withdrawing.** While they are on,
+  the internet-facing proxy holds a password that can spend everything, and
+  it logs a warning at start-up. Safest: withdraw with phoenixd's own tools
+  (`phoenix-cli`) and never enable this. See [SECURITY.md](SECURITY.md).
 - Only the human admin key can withdraw; the AI key never can.
 
 ## Using a real Lightning node: phoenixd
@@ -493,7 +541,7 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
 ## Security notes
 
 - **Single use, per resource, short-lived.** Tokens are HMAC-SHA256 signed and
-  carry the payment hash, the resource, the expiry and the puzzle difficulty.
+  carry the payment hash, a hash of the resource, the expiry and the puzzle difficulty.
   A token cannot be reused, moved to another page, or forged without the
   secret key. Wrong attempts do not burn a valid token, except with Argon2id
   (see above).
@@ -505,7 +553,11 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
 - **The secret key** must stay secret and stable: anyone who has it can mint
   tokens. Never commit it; use the environment variable.
 - **Your credentials stay with you:** Spikes402 removes its own `Authorization`
-  header before forwarding to the origin and rejects paths like `/a/../b`.
+  header and session cookie before forwarding to the origin and refuses
+  ambiguous paths (see [Path matching](#path-matching)).
+- **Dangerous settings are refused** unless `unsafe_allow_dangerous_config`
+  is set: trusting every address as a proxy, opening the dashboard to the
+  whole internet, or exposing the fake backend (with it, anyone can "pay").
 - **Only receiving:** use phoenixd's limited-access password, never the full one.
 - **Proof-of-work is cheaper on special hardware.** The difficulty is
   calibrated for a CPU core (see [Proof-of-work pricing](#proof-of-work-pricing));
@@ -526,7 +578,8 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
 - Rate limits are per IP. A botnet with many addresses can use up the global
   invoice budget; paying visitors then get proof-of-work only until it
   refills. The node itself stays protected. Bots behind one shared address
-  (office, carrier NAT) share a limit.
+  (office, carrier NAT) share a limit (but never an offer).
+- More security limits are listed in [SECURITY.md](SECURITY.md).
 - The proof-of-work price is an estimate (see above), not a market price.
 - If the site itself uses the `Authorization` header on protected paths,
   it will conflict with Spikes402.

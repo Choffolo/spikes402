@@ -179,15 +179,38 @@ func TestSignedBeatsUserAgent(t *testing.T) {
 	_, key, _ := ed25519.GenerateKey(rand.Reader)
 	dir := httptest.NewServer(webbotauth.DirectoryHandler(key))
 	defer dir.Close()
-	c := New(bots, webbotauth.NewVerifier(webbotauth.NewDirectories(true)))
-	r := httptest.NewRequest(http.MethodGet, "https://origin.test/premium/a", nil)
-	r.Header.Set("User-Agent", googleUA)
-	(&webbotauth.Signer{Key: key, AgentURL: dir.URL + webbotauth.DirectoryPath}).Sign(r)
-	if got := c.Classify(r, net.ParseIP("6.6.6.6"), "https"); got.Kind != Signed || got.Method != "web-bot-auth" {
+	v := webbotauth.NewVerifier(webbotauth.NewDirectories(true))
+	v.Hosts = []string{"origin.test"}
+	c := New(bots, v)
+	c.TrustedAgents = []string{"127.0.0.1"} // where the test directory is served
+	signed := func(target string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, target, nil)
+		r.Header.Set("User-Agent", googleUA)
+		(&webbotauth.Signer{Key: key, AgentURL: dir.URL + webbotauth.DirectoryPath}).Sign(r)
+		return r
+	}
+	if got := c.Classify(signed("https://origin.test/premium/a"), net.ParseIP("6.6.6.6"), "https"); got.Kind != Signed || got.Method != "web-bot-auth" {
 		t.Fatalf("got %v", got)
 	}
+	// A signature made for another site (relayed here) does not count.
+	if got := c.Classify(signed("https://other.test/premium/a"), net.ParseIP("6.6.6.6"), "https"); got.Kind == Signed || !strings.Contains(got.Note, "not this site") {
+		t.Fatalf("relayed: got %v", got)
+	}
+	// A valid signature from an untrusted directory falls back to the other checks.
+	c.TrustedAgents = []string{"bots.example"}
+	if got := c.Classify(signed("https://origin.test/premium/b"), net.ParseIP("6.6.6.6"), "https"); got.Kind != Impostor || !strings.Contains(got.Note, "not on a trusted domain") {
+		t.Fatalf("untrusted: got %v", got)
+	}
+	for agent, want := range map[string]bool{
+		"https://bots.example/.well-known/x": true, "https://crawler.bots.example/x": true,
+		"https://evilbots.example/x": false, "https://bots.example.evil.test/x": false,
+	} {
+		if c.trusted(agent) != want {
+			t.Errorf("trusted(%s) != %v", agent, want)
+		}
+	}
 	// A broken signature falls back to the other checks, with a note.
-	r = httptest.NewRequest(http.MethodGet, "https://origin.test/premium/a", nil)
+	r := httptest.NewRequest(http.MethodGet, "https://origin.test/premium/a", nil)
 	r.Header.Set("User-Agent", "curl")
 	r.Header.Set("Signature-Input", `sig1=("@authority");created=1;expires=2;keyid="k";tag="web-bot-auth"`)
 	r.Header.Set("Signature", "sig1=:AAAA:")

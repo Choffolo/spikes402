@@ -145,6 +145,7 @@ func TestBotSignsRequests(t *testing.T) {
 	dir := httptest.NewServer(webbotauth.DirectoryHandler(key))
 	defer dir.Close()
 	classifier := botid.New(nil, webbotauth.NewVerifier(webbotauth.NewDirectories(true)))
+	classifier.TrustedAgents = []string{"127.0.0.1"} // where the test directory is served
 	srv := newProxyPoW(t, pow.Params{Algorithm: pow.SHA256d, Difficulty: 8}, classifier)
 
 	agent := dir.URL + webbotauth.DirectoryPath

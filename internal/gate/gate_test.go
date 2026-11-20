@@ -203,6 +203,23 @@ func TestReplay(t *testing.T) {
 	}
 }
 
+// A paid invoice stays usable once even if the offer's puzzle was used
+// first (by the same client, or anyone who saw the token).
+func TestPaidInvoiceRedeemableAfterWork(t *testing.T) {
+	f := newFixture(t)
+	b := f.challenge(t, "/premium/article")
+	pay, work := f.pay(t, b), solve(t, b)
+	for i, want := range []int{http.StatusOK, http.StatusPaymentRequired, http.StatusOK, http.StatusPaymentRequired} {
+		auth := work
+		if i >= 2 {
+			auth = pay
+		}
+		if rec := f.get("/premium/article", auth, ""); rec.Code != want {
+			t.Fatalf("step %d: got %d, want %d", i, rec.Code, want)
+		}
+	}
+}
+
 func TestExpiredChallenge(t *testing.T) {
 	f := newFixture(t)
 	b := f.challenge(t, "/premium/article")

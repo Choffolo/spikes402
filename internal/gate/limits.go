@@ -87,12 +87,13 @@ type offer struct {
 type pendingOffers struct {
 	mu        sync.Mutex
 	max       int
-	offers    map[string]offer // key: client + " " + resource
+	offers    map[string]offer  // key: see Gate.pendingKey
+	ids       map[string]string // token ID -> key
 	lastSweep time.Time
 }
 
 func newPendingOffers(max int) *pendingOffers {
-	return &pendingOffers{max: max, offers: make(map[string]offer)}
+	return &pendingOffers{max: max, offers: make(map[string]offer), ids: make(map[string]string)}
 }
 
 func (p *pendingOffers) len() int {
@@ -126,15 +127,20 @@ func (p *pendingOffers) reserve(now time.Time) bool {
 func (p *pendingOffers) put(key string, o offer) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if old, ok := p.offers[key]; ok {
+		delete(p.ids, old.id)
+	}
 	p.offers[key] = o
+	p.ids[o.id] = key
 }
 
-// drop forgets the offer for key if it is the one with this token ID.
-func (p *pendingOffers) drop(key, id string) {
+// drop forgets the offer with this token ID, if any.
+func (p *pendingOffers) drop(id string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if o, ok := p.offers[key]; ok && o.id == id {
+	if key, ok := p.ids[id]; ok {
 		delete(p.offers, key)
+		delete(p.ids, id)
 	}
 }
 
@@ -146,6 +152,7 @@ func (p *pendingOffers) sweepLocked(now time.Time) {
 	for k, o := range p.offers {
 		if !now.Before(o.expires) {
 			delete(p.offers, k)
+			delete(p.ids, o.id)
 		}
 	}
 	p.lastSweep = now

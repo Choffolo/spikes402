@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -43,7 +44,13 @@ const (
 // Verifier checks Web Bot Auth signatures.
 type Verifier struct {
 	Dirs *Directories
-	now  func() time.Time
+
+	// Hosts are the site's own host names (lower case, no port). If set,
+	// a signature only counts if the request's host is one of them, so a
+	// signature a bot made for another site cannot be relayed here.
+	Hosts []string
+
+	now func() time.Time
 
 	mu     sync.Mutex
 	seen   map[[32]byte]time.Time // replay protection: key -> expires
@@ -132,6 +139,9 @@ func (v *Verifier) verifyOne(ri requestInfo, label string, l sfv.InnerList, sigs
 	if !hasTarget || !hasAgent {
 		return invalid("must cover @authority (or @target-uri) and its Signature-Agent member")
 	}
+	if len(v.Hosts) > 0 && !hostIn(ri.r.Host, v.Hosts) {
+		return invalid("signature is for host %q, not this site", ri.r.Host)
+	}
 	agentURL, ok := ri.agent.agentURL(label)
 	if !ok {
 		return invalid("no usable Signature-Agent for %q", label)
@@ -203,4 +213,18 @@ func (v *Verifier) remember(key [32]byte, expires time.Time) error {
 	}
 	v.seen[key] = expires
 	return nil
+}
+
+// hostIn reports whether host (maybe with a port) is one of hosts.
+func hostIn(host string, hosts []string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	for _, h := range hosts {
+		if host == h {
+			return true
+		}
+	}
+	return false
 }

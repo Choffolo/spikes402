@@ -24,6 +24,7 @@ const gptUA = "Mozilla/5.0; compatible; GPTBot/1.2; +https://openai.com/gptbot"
 func withBots(f *fixture, sig *webbotauth.Verifier) {
 	c := botid.New([]botid.Bot{{Name: "GPTBot", UserAgent: "GPTBot", IPRangesURL: "x"}}, sig)
 	c.SetRanges("GPTBot", []netip.Prefix{netip.MustParsePrefix("20.0.0.0/24")})
+	c.TrustedAgents = []string{"127.0.0.1"} // the test directory servers
 	f.gate.opt.Classifier = c
 }
 
@@ -170,6 +171,17 @@ func TestSignedBotThroughGate(t *testing.T) {
 	}
 	if b := decode(t, rec); b.L402 != nil {
 		t.Fatal("pow-only policy ignored")
+	}
+	// A valid signature whose directory is not on a trusted domain gets no
+	// "verified-signed" treatment: anyone can publish a key.
+	f.gate.opt.Classifier.TrustedAgents = []string{"bots.example"}
+	rec = httptest.NewRecorder()
+	f.gate.ServeHTTP(rec, signed("https://site.test/premium/b"))
+	if got := rec.Header().Get(ClassHeader); !strings.HasPrefix(got, "unknown") || !strings.Contains(got, "not on a trusted domain") {
+		t.Fatalf("untrusted agent: got %q", got)
+	}
+	if b := decode(t, rec); b.L402 == nil {
+		t.Fatal("untrusted agent must pay like everyone")
 	}
 	// Over plain http the signature is not trusted.
 	f.gate.opt.Classifier = nil

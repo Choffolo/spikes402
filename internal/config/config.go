@@ -22,7 +22,7 @@ import (
 
 // Config is the content of the configuration file. See config.example.json.
 type Config struct {
-	Listen               string    `json:"listen"`                  // address to listen on, default ":8402"
+	Listen               string    `json:"listen"`                  // address to listen on, default ":8402" ("127.0.0.1:8402" with the fake backend)
 	Origin               string    `json:"origin"`                  // website to protect, e.g. "http://localhost:8080"
 	PriceSats            int64     `json:"price_sats"`              // price per request in sats
 	Protect              []string  `json:"protect"`                 // path patterns that require payment
@@ -39,11 +39,28 @@ type Config struct {
 	SecretKey            string    `json:"secret_key"`              // or env SPIKES402_SECRET_KEY
 	Lightning            Lightning `json:"lightning"`
 
+	ProtectCaseSensitive bool `json:"protect_case_sensitive"` // match "protect" patterns case-sensitively (default: case-insensitive)
+	MaxConnections       int  `json:"max_connections"`        // open client connections at once, default 10000
+	ReadTimeoutSeconds   int  `json:"read_timeout_seconds"`   // to read a whole request, default 60
+	WriteTimeoutSeconds  int  `json:"write_timeout_seconds"`  // to send a whole response, default 300
+
+	// UnsafeAllowDangerousConfig accepts settings that are refused by
+	// default because they disable protections (see checkDangerous).
+	UnsafeAllowDangerousConfig bool `json:"unsafe_allow_dangerous_config"`
+
 	// Bot identification. Policies are off by default: everyone pays the same.
 	IdentifyBots      *bool                  `json:"identify_bots"`         // default true
 	KnownBots         []botid.Bot            `json:"known_bots"`            // default: botid.DefaultBots
 	BotPolicies       map[string]gate.Policy `json:"bot_policies"`          // default: none
 	WebBotAuthDevMode bool                   `json:"web_bot_auth_dev_mode"` // accept http/localhost key directories (fake backend only)
+
+	// Web Bot Auth trust. A valid signature only makes a request
+	// "verified-signed" if its key directory is hosted on one of these
+	// domains (or a subdomain); otherwise the request counts as unknown.
+	WebBotAuthTrustedAgents []string `json:"web_bot_auth_trusted_agents"`
+	// PublicHosts are this site's host names. Signatures made for any
+	// other host are refused, so they cannot be relayed from another site.
+	PublicHosts []string `json:"public_hosts"`
 
 	Admin    Admin    `json:"admin"`
 	Withdraw Withdraw `json:"withdraw"`
@@ -118,6 +135,9 @@ func Load(file string) (*Config, error) {
 func (c *Config) complete() error {
 	if c.Listen == "" {
 		c.Listen = ":8402"
+		if c.Lightning.Backend == "fake" {
+			c.Listen = "127.0.0.1:8402" // the fake backend must not be reachable from outside
+		}
 	}
 	if c.ChallengeTTLSeconds == 0 {
 		c.ChallengeTTLSeconds = 600
@@ -133,6 +153,27 @@ func (c *Config) complete() error {
 	}
 	if c.MaxPendingInvoices == 0 {
 		c.MaxPendingInvoices = 10_000
+	}
+	if c.MaxConnections == 0 {
+		c.MaxConnections = 10_000
+	}
+	if c.ReadTimeoutSeconds == 0 {
+		c.ReadTimeoutSeconds = 60
+	}
+	if c.WriteTimeoutSeconds == 0 {
+		c.WriteTimeoutSeconds = 300
+	}
+	if c.MaxConnections < 1 || c.ReadTimeoutSeconds < 1 || c.WriteTimeoutSeconds < 1 {
+		return errors.New(`"max_connections", "read_timeout_seconds" and "write_timeout_seconds" must be positive`)
+	}
+	if err := checkHosts("web_bot_auth_trusted_agents", c.WebBotAuthTrustedAgents); err != nil {
+		return err
+	}
+	if err := checkHosts("public_hosts", c.PublicHosts); err != nil {
+		return err
+	}
+	if len(c.WebBotAuthTrustedAgents) > 0 && len(c.PublicHosts) == 0 {
+		return errors.New(`"web_bot_auth_trusted_agents" needs "public_hosts" (your site's host names), so signatures made for other sites are refused`)
 	}
 	if c.Lightning.Backend == "phoenixd" && c.Lightning.PhoenixdURL == "" {
 		c.Lightning.PhoenixdURL = "http://127.0.0.1:9740"
@@ -233,7 +274,60 @@ func (c *Config) complete() error {
 	if err := c.checkAdmin(); err != nil {
 		return err
 	}
-	return c.checkWithdraw()
+	if err := c.checkWithdraw(); err != nil {
+		return err
+	}
+	return c.checkDangerous()
+}
+
+// checkDangerous refuses settings that switch protections off, unless
+// "unsafe_allow_dangerous_config" is set.
+func (c *Config) checkDangerous() error {
+	if c.UnsafeAllowDangerousConfig {
+		return nil
+	}
+	const hint = ` (set "unsafe_allow_dangerous_config": true only if you really mean it)`
+	for _, l := range []struct {
+		name string
+		list []string
+	}{{"trusted_proxies", c.TrustedProxies}, {"admin.allowed_ips", c.Admin.AllowedIPs}} {
+		nets, _ := parseNets(l.list) // validated above
+		for _, n := range nets {
+			if ones, _ := n.Mask.Size(); ones == 0 {
+				return fmt.Errorf("%q contains %s, i.e. every address on the internet%s", l.name, n, hint)
+			}
+		}
+	}
+	if c.Lightning.Backend == "fake" && !IsLoopback(c.Listen) {
+		return fmt.Errorf(`the fake Lightning backend lets anyone "pay" for free: "listen" must be a localhost address (e.g. "127.0.0.1:8402"), not %q%s`, c.Listen, hint)
+	}
+	return nil
+}
+
+// IsLoopback reports whether a listen address only accepts connections
+// from the same machine.
+func IsLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// checkHosts validates a list of bare host names ("example.com").
+func checkHosts(name string, list []string) error {
+	for i, h := range list {
+		h = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(h)), ".")
+		if h == "" || strings.ContainsAny(h, "/:@ *") || !strings.Contains(h, ".") && h != "localhost" {
+			return fmt.Errorf("%s: %q is not a host name (write e.g. \"example.com\", without https:// or a port)", name, list[i])
+		}
+		list[i] = h
+	}
+	return nil
 }
 
 func (c *Config) checkAdmin() error {
@@ -267,15 +361,13 @@ func (c *Config) checkAdmin() error {
 	if a.Key == c.SecretKey || (a.AIKey != "" && a.AIKey == c.SecretKey) {
 		return errors.New(`admin keys must differ from "secret_key"`)
 	}
-	host, _, err := net.SplitHostPort(a.Listen)
-	if err != nil {
+	if _, _, err := net.SplitHostPort(a.Listen); err != nil {
 		return fmt.Errorf(`"admin.listen": %w`, err)
 	}
 	if _, err := c.AdminAllowedNets(); err != nil {
 		return err
 	}
-	ip := net.ParseIP(host)
-	if (ip == nil || !ip.IsLoopback()) && host != "localhost" && len(a.AllowedIPs) == 0 {
+	if !IsLoopback(a.Listen) && len(a.AllowedIPs) == 0 {
 		return errors.New(`"admin.listen" beyond localhost needs "admin.allowed_ips"`)
 	}
 	return nil

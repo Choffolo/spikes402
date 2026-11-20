@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -20,6 +21,7 @@ import (
 	"github.com/Choffolo/spikes402/internal/config"
 	"github.com/Choffolo/spikes402/internal/gate"
 	"github.com/Choffolo/spikes402/internal/lightning"
+	"github.com/Choffolo/spikes402/internal/netlimit"
 	"github.com/Choffolo/spikes402/webbotauth"
 )
 
@@ -70,7 +72,10 @@ func main() {
 		if cfg.WebBotAuthDevMode {
 			log.Print("WARNING: web_bot_auth_dev_mode: accepting key directories on http and local addresses, for development only")
 		}
-		classifier = botid.New(cfg.Bots(), webbotauth.NewVerifier(webbotauth.NewDirectories(cfg.WebBotAuthDevMode)))
+		verifier := webbotauth.NewVerifier(webbotauth.NewDirectories(cfg.WebBotAuthDevMode))
+		verifier.Hosts = cfg.PublicHosts
+		classifier = botid.New(cfg.Bots(), verifier)
+		classifier.TrustedAgents = cfg.WebBotAuthTrustedAgents
 		go classifier.Run(context.Background(), log.Printf)
 	}
 
@@ -96,6 +101,7 @@ func main() {
 		MaxPendingInvoices:   cfg.MaxPendingInvoices,
 		ClientIPHeader:       cfg.ClientIPHeader,
 		TrustedProxies:       trusted,
+		CaseSensitive:        cfg.ProtectCaseSensitive,
 
 		Classifier: classifier,
 		Policies:   cfg.BotPolicies,
@@ -111,7 +117,10 @@ func main() {
 		Addr:              cfg.Listen,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       time.Duration(cfg.ReadTimeoutSeconds) * time.Second,
+		WriteTimeout:      time.Duration(cfg.WriteTimeoutSeconds) * time.Second,
 		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    maxHeaderBytes,
 	}
 	p := cfg.PoW(cfg.PriceSats)
 	log.Printf("spikes402 listening on %s, protecting %v of %s at %d sats or %s PoW difficulty %d (~%.1f s on one CPU core)",
@@ -119,8 +128,16 @@ func main() {
 	if len(cfg.BotPolicies) > 0 {
 		log.Printf("bot policies: %v", cfg.BotPolicies)
 	}
-	log.Fatal(srv.ListenAndServe())
+	ln, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Fatal(srv.Serve(netlimit.Listener(ln, cfg.MaxConnections)))
 }
+
+// maxHeaderBytes bounds the request line plus headers (Go's default is
+// 1 MiB). URIs beyond gate.MaxURIBytes are refused anyway.
+const maxHeaderBytes = 32 << 10
 
 // startAdmin serves the admin API and dashboard on their own address
 // (localhost by default), separate from the public proxy.
@@ -137,10 +154,17 @@ func startAdmin(cfg *config.Config, g *gate.Gate, monitor *admin.Monitor, backen
 			opt.Withdrawer = &lightning.PhoenixdWithdrawer{URL: b.URL, FullPassword: cfg.Withdraw.PhoenixdFullPassword, FeerateSatByte: cfg.Withdraw.FeerateSatByte}
 		}
 		log.Printf("withdrawals ENABLED to %s (admin dashboard, withdraw password, two confirmations)", cfg.Withdraw.Destination)
+		if cfg.Lightning.Backend == "phoenixd" && !config.IsLoopback(cfg.Listen) {
+			log.Print("WARNING: withdrawals are enabled, so phoenixd's FULL-ACCESS password (it can spend everything) is loaded in this internet-facing process. Turn withdrawals off when you are not withdrawing (see SECURITY.md)")
+		}
+		if !config.IsLoopback(cfg.Admin.Listen) {
+			log.Printf("WARNING: withdrawals are enabled and the admin dashboard listens beyond localhost (%s): anyone who gets the admin key and the withdraw password on that network can move your sats", cfg.Admin.Listen)
+		}
 	}
 	srv := &http.Server{
 		Addr:              cfg.Admin.Listen,
 		Handler:           admin.New(opt).Handler(),
+		MaxHeaderBytes:    maxHeaderBytes,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
