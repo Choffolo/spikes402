@@ -505,6 +505,7 @@ func (g *Gate) writeChallenge(w http.ResponseWriter, r *http.Request, o offer, p
 
 	if strings.Contains(r.Header.Get("Accept"), "text/html") {
 		h.Set("Content-Type", "text/html; charset=utf-8")
+		h.Set("Content-Security-Policy", "default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'sha256-"+weblnHash+"'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 		w.WriteHeader(http.StatusPaymentRequired)
 		writeHTML(w, body)
 		return

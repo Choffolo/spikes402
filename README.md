@@ -42,7 +42,12 @@ miniature). Everything else passes through untouched.
 1. A request to a protected path without proof gets **HTTP 402**. The answer
    holds a signed **token**, a Lightning **invoice** for the price, and a
    **proof-of-work challenge** (the same token). A JSON body explains both
-   options; browsers get a small page with a QR code instead.
+   options; browsers get a small page with a QR code instead. If a
+   [WebLN](https://www.webln.guide/) wallet such as Alby is in the browser,
+   a "Pay with one click" button also appears, and the page tries to pay
+   once on load with the invoice already shown (no second invoice). With a
+   per-site budget (Alby allowances), that attempt can succeed without a
+   further click. Without WebLN the page is unchanged.
 2. **Pay:** paying the invoice reveals its *preimage*. The bot repeats the
    request with `Authorization: L402 <token>:<preimage>`. Spikes402 checks
    that `sha256(preimage)` equals the payment hash inside the token.
