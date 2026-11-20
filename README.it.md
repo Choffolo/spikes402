@@ -118,5 +118,10 @@ Se Spikes402 ti è utile, puoi sostenerlo in bitcoin (on-chain):
 
 `3KvoTk8WfVKE1Dqhh7DHUzTwNyNXeR1GgF`
 
-<!-- TODO(lightning): aggiungere qui un indirizzo Lightning / offerta BOLT12 quando esisterà. Non inventarlo. -->
-Lightning: *in arrivo.*
+Lightning (offerta BOLT12 riutilizzabile; il tuo wallet deve supportare BOLT12/BIP353, per esempio Phoenix):
+
+<img src="docs/donate-lightning.png" alt="Codice QR dell'offerta BOLT12" width="180">
+
+- Indirizzo: `₿chromescar71@phoenixwallet.me` (indirizzo [BIP353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki);
+  il ₿ indica solo che è un indirizzo bitcoin, si scrive `chromescar71@phoenixwallet.me`)
+- Offerta: `lno1zrxq8pjw7qjlm68mtp7e3yvxee4y5xrgjhhyf2fxhlphpckrvevh50u0qfq27txqpv7e74w9r9jqytz387aafwc0qq5rduglwu0jgkglqj4kwqszf8me4efvhmywwrekdhtytml88630fxsypfxg52es0l9xrgdz0xlsqv74kqw6557fzsyrdl5wr5vxp9wpu3f4t8shr74qmzjj7ygl8sgpqhvnlkgwzcmgcmyhmctd6vzgmfnfaq07qgqrrv8d4c6ql3dtnnjyka7t47h9lmzgsv2hrnxqdv8u5787m4wfwqqs2n57l9hzh9lyaql207qtwjqe7u`
