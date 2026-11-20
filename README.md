@@ -12,7 +12,12 @@ miniature). Everything else passes through untouched.
 - One request = one payment. No accounts, no subscriptions, no time passes.
 - Non-custodial: payments go to *your own* Lightning node. Spikes402 never
   holds anyone's keys or funds.
-- A single Go binary, one small dependency (QR codes), AGPLv3.
+- A single Go binary, two small dependencies (QR codes and `golang.org/x/crypto`
+  for Argon2id), AGPLv3.
+- Knows who is asking: bots that sign their requests
+  ([Web Bot Auth](#bot-identification)) and well-known crawlers checked
+  against their published IP lists. Impostors are flagged. By default
+  everyone still pays the same price.
 
 ## How it works
 
@@ -46,7 +51,7 @@ miniature). Everything else passes through untouched.
 
 ## Quick start (fake Lightning, no real money)
 
-You need [Go](https://go.dev/dl/) 1.22 or newer.
+You need [Go](https://go.dev/dl/) 1.26 or newer.
 
 ```sh
 git clone https://github.com/Choffolo/spikes402 && cd spikes402
@@ -62,9 +67,10 @@ Expected output:
 
 ```
 bot: GET http://localhost:8402/premium/article
-bot: 402: solving proof-of-work (difficulty 24)...
+bot: 402: solving sha256d proof-of-work (difficulty 24, ~8.4 s on one CPU core)...
 bot: 402: solved, nonce=8717585
 bot: 200 OK in 949ms
+bot: the site classified us as: unknown
 Premium content at /premium/article. Thank you for paying (or working)!
 ```
 
@@ -83,7 +89,9 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `price_sats` | Price of one request, in satoshis | required, ≥ 1 |
 | `protect` | Path patterns that require payment. `"/premium/**"` = everything under `/premium`; other patterns use [glob syntax](https://pkg.go.dev/path#Match), e.g. `"/*.pdf"` | required |
 | `pow_seconds_per_sat` | How much work replaces one sat: seconds of one CPU core (see [Proof-of-work pricing](#proof-of-work-pricing)) | `10` |
-| `pow_difficulty` | Leading zero bits for the puzzle. `0` = derive from `price_sats` × `pow_seconds_per_sat` | `0` |
+| `pow_difficulty` | Leading zero bits for the puzzle. `0` = derive from the price and `pow_seconds_per_sat` | `0` |
+| `pow_algorithm` | `"sha256d"` or `"argon2id"` (memory-hard, see [Argon2id](#argon2id-memory-hard-proof-of-work)) | `"sha256d"` |
+| `argon2_memory_mib` | Memory per Argon2id attempt, 8–256 MiB | `16` |
 | `challenge_ttl_seconds` | How long a 402 offer (token and invoice) stays valid | `600` |
 | `challenges_per_minute` | 402 answers per client per minute; beyond that, `429 Too Many Requests` | `30` |
 | `max_invoices_per_minute` | Invoices created per minute, all clients together; beyond that, proof-of-work only | `300` |
@@ -91,6 +99,10 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `client_ip_header` | Header holding the visitor's IP when Spikes402 runs behind your own proxy, e.g. `"X-Forwarded-For"`, `"X-Real-IP"`, `"CF-Connecting-IP"` | `""` (use the connection's address) |
 | `trusted_proxies` | IPs or CIDR ranges of those proxies, e.g. `["127.0.0.1"]`. The header is ignored from anyone else. Required with `client_ip_header` | `[]` |
 | `secret_key` | Signs tokens, ≥ 32 characters. Better set via `SPIKES402_SECRET_KEY` | random with `fake`, required otherwise |
+| `identify_bots` | Classify clients (Web Bot Auth, published IP lists, reverse DNS); see [Bot identification](#bot-identification) | `true` |
+| `known_bots` | Replace the built-in list of crawlers: `[{"name", "user_agent", "ip_ranges_url", "reverse_dns": [...]}]` | built-in list |
+| `bot_policies` | Optional per-class treatment (see [Policies](#policies-off-by-default-open-for-discussion)) | `{}` = everyone pays the same |
+| `web_bot_auth_dev_mode` | Accept key directories on `http://`, localhost and any port, and signatures over plain http. **Testing only**; refused with a real Lightning backend | `false` |
 | `lightning.backend` | `"fake"` (development) or `"phoenixd"` | required |
 | `lightning.phoenixd_url` | phoenixd HTTP API | `"http://127.0.0.1:9740"` |
 | `lightning.phoenixd_password` | phoenixd *limited-access* password. Better set via `PHOENIXD_PASSWORD` | — |
@@ -130,6 +142,135 @@ are far faster, and that is accepted. Bitcoin mining ASICs, as far as we
 know, are built for 80-byte block headers and cannot directly solve this
 puzzle. The 32-bit cap keeps prices above ~1000 sats from producing puzzles
 no CPU bot would attempt; set `pow_difficulty` explicitly to go beyond it.
+
+### Argon2id (memory-hard proof-of-work)
+
+With `"pow_algorithm": "argon2id"` the puzzle is
+`Argon2id(token + ":" + nonce, salt "spikes402-pow-v1", 1 pass, argon2_memory_mib MiB, 1 lane, 32 bytes)`
+with `difficulty` leading zero bits. Each attempt has to fill and read that
+much memory, so a GPU or ASIC gains much less over an ordinary CPU than with
+sha256d (commonly a single-digit factor per dollar instead of ~1000×; we
+have not measured it ourselves). The default stays sha256d because each
+check is cheap for the server.
+
+**Pricing.** Same idea as above, with a different speed: one CPU core
+processes about **1,500 MiB of Argon2id per second** (we measured ~1,900
+MiB/s at 16–64 MiB, rounded down), so one 16 MiB attempt takes ~11 ms:
+
+```
+difficulty = round(log2(price_sats × pow_seconds_per_sat ÷ (argon2_memory_mib ÷ 1500)))   clamped to 1…20 bits
+```
+
+| Price (`pow_seconds_per_sat: 10`) | 16 MiB | 64 MiB | One CPU core (average) |
+|---|---|---|---|
+| 1 sat | 10 bits | 8 bits | ~11 s |
+| 10 sats | 13 bits | 11 bits | ~1.5 min |
+| 100 sats | 17 bits | 15 bits | ~23 min |
+
+More memory means fewer, slower attempts for the same price: it favours
+machines with lots of RAM per core less than a smaller setting does, but
+costs the server more per check.
+
+**Protecting the server.** Checking a solution costs the server one attempt
+(16 MiB and ~10 ms by default), so Spikes402 only runs Argon2id for a
+token it signed itself, for this page, not expired and not used yet (all
+cheap checks done first). Each check also counts against the client's
+`challenges_per_minute`. At most 4 checks run at once (fewer on small
+machines); beyond that the answer is `503` + `Retry-After: 1` and the token
+stays valid. A wrong answer **burns the token** (one check per token, ever).
+The parameters are inside the signed token, so a client cannot pick cheaper
+ones.
+
+**Future option:** [RandomX](https://github.com/tevador/RandomX) (Monero's
+CPU-oriented PoW) narrows the gap to specialised hardware even further, but
+it needs ~256 MiB per verifier and a C library. Not implemented.
+
+## Bot identification
+
+On protected paths Spikes402 tries to tell who is asking, logs it (at most
+60 lines a minute) and tells the client in a response header:
+
+```
+Spikes402-Class: verified-signed; name="https://bot.example/.well-known/http-message-signatures-directory"; method=web-bot-auth
+Spikes402-Class: verified; name="Googlebot"; method=ip-list
+Spikes402-Class: impostor; name="GPTBot"; method=ip-list
+Spikes402-Class: unknown
+```
+
+| Class | Meaning |
+|---|---|
+| `verified-signed` | The request carries a valid **Web Bot Auth** signature (below). Checked first |
+| `verified` | The User-Agent claims a known crawler and the address checks out against the operator's published IP list (or, where no list is loaded yet, forward-confirmed reverse DNS) |
+| `impostor` | The User-Agent claims a known crawler but the address definitely does not belong to it |
+| `unknown` | Everything else, including claims that could not be checked (DNS timeout, list not loaded); a `note` says why |
+
+Built-in crawlers (IP lists refreshed daily, kept on failure): Googlebot,
+Bingbot, GPTBot, OAI-SearchBot, ChatGPT-User, ClaudeBot, PerplexityBot,
+Perplexity-User, Applebot, DuckDuckBot, CCBot. Replace the list with
+`known_bots`. Reverse DNS has a 1.5 s timeout, at most 16 lookups at once
+and a cache of 10,000 addresses.
+
+### Web Bot Auth
+
+[Web Bot Auth](https://datatracker.ietf.org/wg/webbotauth/about/) lets a
+bot sign each request with [HTTP Message Signatures (RFC 9421)](https://www.rfc-editor.org/rfc/rfc9421)
+and publish its public keys at
+`https://<its domain>/.well-known/http-message-signatures-directory`. The
+request names that URL in a `Signature-Agent` header. Spikes402 follows
+[draft-ietf-webbotauth-httpsig-protocol](https://datatracker.ietf.org/doc/draft-ietf-webbotauth-httpsig-protocol/)
+and checks the draft's own test vectors. Ed25519 only, using Go's standard
+`crypto/ed25519`.
+
+Where the drafts leave room, Spikes402 takes the **strict** reading:
+
+- The signature must cover `@authority` (or `@target-uri`) and the
+  `signature-agent` header member, carry `created`, `expires`, `keyid` (the
+  key's JWK thumbprint) and `tag="web-bot-auth"`, and be valid for at most
+  **1 hour** (the draft allows 24 h); 1 minute of clock skew is tolerated.
+- Only these components can be signed: `@method`, `@authority`, `@scheme`,
+  `@target-uri`, `@request-target`, `@path`, `@query`, plain headers and
+  `signature-agent`. Anything else makes the signature "unverified".
+- **Replay protection:** a signature (its nonce, or the signature itself) is
+  accepted once. The memory for this is capped at 100,000 entries; when full,
+  signatures count as unverified rather than risk a replay.
+- Signatures only count over **https** (directly or via a trusted proxy that
+  sets `X-Forwarded-Proto: https`).
+- **Key directories** are fetched only from `https://` on port 443, never
+  from private, loopback or link-local addresses (no SSRF), without
+  redirects, in at most 5 s and 64 KiB, with at most 32 keys, and the media
+  type must be `application/http-message-signatures-directory+json`. They are
+  cached per `Cache-Control` (5 min – 24 h; failures for 1 min). If a refresh
+  fails, the keys already known stay valid for up to 24 h. At most 1,000
+  directories are cached and 30 new fetches a minute are made.
+- The draft's **published test key is refused**, as the draft asks.
+- The first request from a new bot may wait up to 1.5 s for its directory;
+  if it is not there in time the request counts as "unverified".
+- A bad or unverifiable signature does not block anything: the request is
+  classified by the other checks, with a note.
+
+### Policies: off by default, open for discussion
+
+Should verified or signed bots pay less, more, or nothing at all? We do
+not know yet. So **by default every client pays the same price, verified or
+not** (no free pass, multiplier 1); identification is used for logs,
+transparency and spotting impostors.
+
+For those who want to experiment, `bot_policies` maps a class (`unknown`,
+`impostor`, `verified`, `verified-signed`), a bot name (`"GPTBot"`) or a Web
+Bot Auth directory URL to an action:
+
+```json
+"bot_policies": {
+  "impostor": {"action": "pow-only"},
+  "verified": {"action": "pay", "price_multiplier": 2}
+}
+```
+
+Actions are `pay` (normal), `pow-only` (no invoice), `free` and `block`
+(403). `price_multiplier` scales the price and the puzzle (minimum 1 sat).
+Bot names and URLs only match once verified, so an impostor never gets a
+named bot's treatment. Note that a bot can always drop its claim and be
+`unknown`, so a policy for `unknown` is the effective floor.
 
 ## Protecting your Lightning node
 
@@ -198,13 +339,29 @@ resp, err := c.Get(ctx, "https://example.com/premium/article")
 ```
 
 Paying needs a `client.Payer` (your wallet). Only a fake payer exists so far.
+The client solves both `sha256d` and `argon2id` puzzles and refuses ones
+that are too hard (`MaxDifficulty`, `MaxArgonDifficulty`, `MaxArgonMemoryMiB`).
+
+**Signing your requests (Web Bot Auth).** Set `client.Signer` to a
+`webbotauth.Signer` with your Ed25519 key and the https URL where you
+publish your key directory (`webbotauth.DirectoryHandler` serves it). The
+example bot can do it all:
+
+```sh
+bin/spikes-bot -sign -key-file bot.key -agent-url https://bot.example/.well-known/http-message-signatures-directory URL
+# prints the key directory (JWKS) to publish at that URL
+
+# local test: serve the directory from the bot itself (gate needs "web_bot_auth_dev_mode": true)
+bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premium/article
+```
 
 ## Security notes
 
 - **Single use, per resource, short-lived.** Tokens are HMAC-SHA256 signed and
   carry the payment hash, the resource, the expiry and the puzzle difficulty.
   A token cannot be reused, moved to another page, or forged without the
-  secret key. Wrong attempts do not burn a valid token.
+  secret key. Wrong attempts do not burn a valid token, except with Argon2id
+  (see above).
 - **Not real macaroons.** The `macaroon="…"` field holds this simpler signed
   token. The header layout follows L402, so clients that treat the token as
   an opaque string work; clients that decode macaroons (such as Lightning
@@ -234,6 +391,13 @@ Paying needs a `client.Payer` (your wallet). Only a fake payer exists so far.
 - If the site itself uses the `Authorization` header on protected paths,
   it will conflict with Spikes402.
 - No real wallet in the example bot; no LND backend; no Docker image yet.
+- Bot identification is best effort: IP lists and reverse DNS only show that
+  a request came from the operator's network, and anyone can stay
+  `unknown`. Web Bot Auth is still an IETF draft; the format may change.
+- The Web Bot Auth replay memory is per process and capped (see above).
+  Directory response signatures are produced by the example bot but not
+  required by the gate (the draft allows that).
+- Argon2id speed figures for GPUs are not measured by us.
 - Not yet reviewed by Lightning security experts.
 
 ## Development
@@ -244,7 +408,9 @@ go test -race ./...
 
 Layout: `cmd/spikes402` (proxy), `cmd/spikes-bot` (example bot),
 `cmd/demo-origin` (test website), `internal/gate` (402 logic),
-`internal/lightning` (fake + phoenixd), `internal/config`, `pow`, `client`.
+`internal/lightning` (fake + phoenixd), `internal/config`, `internal/botid`
+(bot classification), `internal/sfv` (structured header parsing), `webbotauth`
+(Web Bot Auth sign/verify), `pow`, `client`.
 
 ## License
 
