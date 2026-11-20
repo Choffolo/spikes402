@@ -5,6 +5,7 @@
   "protect": ["/premium/**"],
   "pow_seconds_per_sat": 10,
   "pow_difficulty": 0,
+  "pow_algorithm": "sha256d",
   "challenge_ttl_seconds": 600,
   "challenges_per_minute": 30,
   "max_invoices_per_minute": 300,
@@ -12,6 +13,8 @@
   "client_ip_header": "",
   "trusted_proxies": [],
   "secret_key": "",
+  "identify_bots": true,
+  "bot_policies": {},
   "lightning": {
     "backend": "fake"
   }

@@ -35,12 +35,40 @@ limiti si offre solo la proof-of-work. L'IP reale si legge da un header solo
 se arriva da un proxy fidato (`trusted_proxies`). Le pagine libere non hanno
 limiti.
 
+**Proof-of-work Argon2id (opzionale):** con `"pow_algorithm": "argon2id"`
+l'indovinello usa molta memoria (16 MiB di default) a ogni tentativo, così
+schede grafiche e hardware specializzato hanno meno vantaggio rispetto a una
+normale CPU. Il default resta il doppio SHA-256. Anche il server spende
+memoria per controllare una soluzione, quindi controlla solo gettoni validi,
+non scaduti e non usati, entro i limiti per IP e al massimo 4 alla volta. Una
+risposta sbagliata brucia il gettone. RandomX è un'idea per il futuro.
+
+**Chi è il bot?** Sulle pagine protette Spikes402 prova a riconoscere chi
+chiede e lo scrive nei log e nell'header `Spikes402-Class`:
+
+- `verified-signed`: il bot firma le richieste con **Web Bot Auth**
+  (standard IETF in bozza: firme HTTP Ed25519 con le chiavi pubblicate dal
+  bot sul suo sito);
+- `verified`: un crawler noto (Googlebot, GPTBot, ClaudeBot…) confermato
+  dalle liste di IP pubblicate dal gestore o dal DNS inverso;
+- `impostor`: dice di essere un crawler noto ma l'indirizzo non è suo;
+- `unknown`: tutti gli altri.
+
+Dove la bozza lascia margini abbiamo scelto l'interpretazione più prudente:
+firme valide al massimo 1 ora, ogni firma usabile una volta sola, solo https
+e directory di chiavi scaricate con limiti di tempo e di dimensione.
+
+**Di default tutti pagano lo stesso prezzo**, anche i bot verificati: se i
+bot verificati debbano pagare meno, di più o niente è una **questione
+aperta**. Per chi vuole sperimentare c'è l'opzione `bot_policies` (per
+esempio "solo proof-of-work per gli impostori"), spenta di default.
+
 I pagamenti arrivano al **tuo** nodo Lightning (phoenixd): Spikes402 non
 custodisce mai chiavi né fondi di nessuno.
 
 ## Prova in 4 comandi (soldi finti)
 
-Serve [Go](https://go.dev/dl/) 1.22 o successivo.
+Serve [Go](https://go.dev/dl/) 1.26 o successivo.
 
 ```sh
 git clone https://github.com/Choffolo/spikes402 && cd spikes402
@@ -49,6 +77,7 @@ bin/demo-origin & bin/spikes402 -config config.example.json & sleep 1
 bin/spikes-bot -mode pow http://localhost:8402/premium/article
 ```
 
-Con `-mode pay` il bot paga con un portafoglio finto invece di lavorare.
+Con `-mode pay` il bot paga con un portafoglio finto invece di lavorare. Con
+`-sign` firma le richieste con Web Bot Auth e stampa la sua directory di chiavi.
 
 Licenza: [GNU AGPLv3](LICENSE).

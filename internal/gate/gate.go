@@ -10,29 +10,29 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"math"
 	"net"
 	"net/http"
 	"path"
+	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/Choffolo/spikes402/internal/botid"
 	"github.com/Choffolo/spikes402/internal/lightning"
 	"github.com/Choffolo/spikes402/pow"
 )
 
 // Options configure a Gate.
 type Options struct {
-	PriceSats     int64         // price of one request, in satoshis
-	Protect       []string      // path patterns that require payment
-	PowDifficulty int           // leading zero bits required by the PoW puzzle
-	ChallengeTTL  time.Duration // how long a 402 challenge stays valid
-	SecretKey     []byte        // signs tokens; keep it secret
-	Lightning     lightning.Backend
-	Next          http.Handler // where paid/free requests go (the origin)
+	PriceSats    int64                            // price of one request, in satoshis
+	Protect      []string                         // path patterns that require payment
+	PoW          func(priceSats int64) pow.Params // the puzzle for a price
+	ChallengeTTL time.Duration                    // how long a 402 challenge stays valid
+	SecretKey    []byte                           // signs tokens; keep it secret
+	Lightning    lightning.Backend
+	Next         http.Handler // where paid/free requests go (the origin)
 
 	// Abuse protection for unpaid requests.
 	ChallengesPerMinute  int          // 402 answers per client per minute
@@ -40,7 +40,16 @@ type Options struct {
 	MaxPendingInvoices   int          // open invoices at once; beyond this, PoW only
 	ClientIPHeader       string       // header with the client IP set by a trusted proxy, or ""
 	TrustedProxies       []*net.IPNet // ClientIPHeader is only believed from these addresses
+
+	// Bot identification (optional). Classifier nil: everyone is "unknown".
+	// Policies empty (the default): everyone pays the same.
+	Classifier *botid.Classifier
+	Policies   map[string]Policy
 }
+
+// ClassHeader is the response header that tells the client how it was
+// classified, e.g. `verified; name="Googlebot"; method=ip-list`.
+const ClassHeader = "Spikes402-Class"
 
 // Gate is the pay-or-PoW http.Handler.
 type Gate struct {
@@ -52,16 +61,19 @@ type Gate struct {
 	node    *nodeGuard
 	now     func() time.Time // replaceable in tests
 
-	logMu      sync.Mutex
-	lastLog    time.Time
-	suppressed int
+	// argonSlots caps how many Argon2id solutions are checked at once:
+	// each check takes tens of MiB and milliseconds of CPU.
+	argonSlots chan struct{}
+
+	nodeLog  rateLog // why no invoice was offered
+	classLog rateLog // bot classifications
 }
 
 // New returns a Gate. It panics on programmer errors; validate user
 // input with the config package first.
 func New(opt Options) *Gate {
 	if len(opt.SecretKey) < 32 || opt.Lightning == nil || opt.Next == nil || opt.PriceSats < 1 ||
-		opt.ChallengeTTL <= 0 || opt.ChallengesPerMinute < 1 || opt.MaxPendingInvoices < 1 || opt.MaxInvoicesPerMinute < 1 {
+		opt.ChallengeTTL <= 0 || opt.PoW == nil || opt.ChallengesPerMinute < 1 || opt.MaxPendingInvoices < 1 || opt.MaxInvoicesPerMinute < 1 {
 		panic("gate: invalid options")
 	}
 	return &Gate{
@@ -72,6 +84,10 @@ func New(opt Options) *Gate {
 		pending: newPendingOffers(opt.MaxPendingInvoices),
 		node:    newNodeGuard(opt.Lightning, opt.MaxInvoicesPerMinute),
 		now:     time.Now,
+
+		argonSlots: make(chan struct{}, min(4, max(1, runtime.NumCPU()/2))),
+		nodeLog:    rateLog{perMinute: 1},
+		classLog:   rateLog{perMinute: 60},
 	}
 }
 
@@ -88,18 +104,67 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	class := g.classify(r)
+	w.Header().Set(ClassHeader, class.String())
+	pol := g.policyFor(class)
+	switch pol.Action {
+	case ActionBlock:
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	case ActionFree:
+		r.Header.Del("Authorization")
+		g.opt.Next.ServeHTTP(w, r)
+		return
+	}
+	price := pol.price(g.opt.PriceSats)
+	key := g.pendingKey(r, price, pol.Action)
+
 	var problem string
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		id, err := g.redeem(r, auth)
 		if err == nil {
-			g.pending.drop(g.pendingKey(r), id)
+			g.pending.drop(key, id)
 			r.Header.Del("Authorization") // our credential, not the origin's business
 			g.opt.Next.ServeHTTP(w, r)
 			return
 		}
+		var busy *busyError
+		if errors.As(err, &busy) {
+			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(busy.wait.Seconds()))))
+			http.Error(w, busy.msg, busy.status)
+			return
+		}
 		problem = err.Error()
 	}
-	g.challenge(w, r, problem)
+	g.challenge(w, r, problem, key, price, pol.Action == ActionPoWOnly)
+}
+
+// classify identifies the client and logs anything noteworthy.
+func (g *Gate) classify(r *http.Request) botid.Class {
+	if g.opt.Classifier == nil {
+		return botid.Class{Kind: botid.Unknown}
+	}
+	c := g.opt.Classifier.Classify(r, g.clientIP(r), g.scheme(r))
+	if c.Kind != botid.Unknown || c.Note != "" {
+		g.classLog.printf(g.now(), "spikes402: %s; client=%s; resource=%q; user-agent=%q",
+			sanitize(c.String()), g.client(r), sanitize(resource(r)), sanitize(r.UserAgent()))
+	}
+	return c
+}
+
+// scheme is "https" if the client reached us over TLS: directly, or via a
+// trusted proxy that says so in X-Forwarded-Proto.
+func (g *Gate) scheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if ip := remoteIP(r); ip != nil && isTrusted(ip, g.opt.TrustedProxies) {
+		first, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Proto"), ",")
+		if strings.EqualFold(strings.TrimSpace(first), "https") {
+			return "https"
+		}
+	}
+	return "http"
 }
 
 func isCleanPath(p string) bool {
@@ -141,6 +206,15 @@ var (
 	errReplay      = errors.New("token already used")
 	errScheme      = errors.New("unsupported Authorization scheme (use L402 or PoW)")
 )
+
+// busyError asks the client to retry later instead of getting a new 402.
+type busyError struct {
+	status int
+	wait   time.Duration
+	msg    string
+}
+
+func (e *busyError) Error() string { return e.msg }
 
 // redeem checks an "L402 <token>:<preimage>" or "PoW <token>:<nonce>"
 // credential and marks the token as spent if it is valid. It returns the
@@ -188,13 +262,46 @@ func (g *Gate) check(r *http.Request, auth string) (claims, error) {
 		}
 	case "POW":
 		nonce, err := strconv.ParseUint(proof, 10, 64)
-		if err != nil || !pow.Check(token, nonce, c.PowBits) {
+		p := c.powParams()
+		if err != nil || p.Validate() != nil {
+			return claims{}, errBadProof
+		}
+		if p.Algorithm == pow.Argon2id {
+			return c, g.checkArgon(r, p, token, nonce, c)
+		}
+		if !p.Check(token, nonce) {
 			return claims{}, errBadProof
 		}
 	default:
 		return claims{}, errScheme
 	}
 	return c, nil
+}
+
+// checkArgon verifies an Argon2id solution. A check costs the server tens
+// of MiB and milliseconds, so it is only done for a genuine, unexpired,
+// unused token of ours (checked above and here), counts against the
+// client's rate limit, runs at most len(argonSlots) at a time, and a
+// wrong answer burns the token: one check per token, ever.
+func (g *Gate) checkArgon(r *http.Request, p pow.Params, token string, nonce uint64, c claims) error {
+	now := g.now()
+	if g.spent.has(c.ID) {
+		return errReplay
+	}
+	if ok, wait := g.limiter.allow(g.client(r), now); !ok {
+		return &busyError{http.StatusTooManyRequests, wait, "too many requests"}
+	}
+	select {
+	case g.argonSlots <- struct{}{}:
+		defer func() { <-g.argonSlots }()
+	default:
+		return &busyError{http.StatusServiceUnavailable, time.Second, "busy checking proofs of work, retry shortly"}
+	}
+	if !p.Check(token, nonce) {
+		g.spent.use(c.ID, time.Unix(c.Expires, 0), now)
+		return errBadProof
+	}
+	return nil
 }
 
 // challengeBody is the JSON answer to an unpaid request.
@@ -218,21 +325,26 @@ type powOffer struct {
 	Challenge       string  `json:"challenge"`
 	Difficulty      int     `json:"difficulty"`
 	Algorithm       string  `json:"algorithm"`
+	MemoryMiB       int     `json:"memory_mib,omitempty"`
 	ExpectedSeconds float64 `json:"expected_seconds_one_cpu_core"`
 	Usage           string  `json:"usage"`
 }
 
-func (g *Gate) pendingKey(r *http.Request) string {
-	return g.client(r) + " " + resource(r)
+func (g *Gate) pendingKey(r *http.Request, price int64, a Action) string {
+	return g.client(r) + " " + strconv.FormatInt(price, 10) + " " + string(a) + " " + resource(r)
 }
 
 func (g *Gate) client(r *http.Request) string {
 	return clientKey(r, g.opt.ClientIPHeader, g.opt.TrustedProxies)
 }
 
+func (g *Gate) clientIP(r *http.Request) net.IP {
+	return clientIP(r, g.opt.ClientIPHeader, g.opt.TrustedProxies)
+}
+
 // challenge answers 402 Payment Required with both ways in, or 429 Too
 // Many Requests if this client asked for too many challenges.
-func (g *Gate) challenge(w http.ResponseWriter, r *http.Request, problem string) {
+func (g *Gate) challenge(w http.ResponseWriter, r *http.Request, problem, key string, price int64, powOnly bool) {
 	now := g.now()
 	if ok, wait := g.limiter.allow(g.client(r), now); !ok {
 		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
@@ -242,11 +354,10 @@ func (g *Gate) challenge(w http.ResponseWriter, r *http.Request, problem string)
 
 	// Same client, same page, offer still fresh: hand it out again rather
 	// than creating another invoice.
-	key := g.pendingKey(r)
 	o, ok := g.pending.get(key, now, g.opt.ChallengeTTL/2)
 	if !ok || g.spent.has(o.id) {
 		var err error
-		if o, err = g.newOffer(r, now, key); err != nil {
+		if o, err = g.newOffer(r, now, key, price, powOnly); err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -255,7 +366,7 @@ func (g *Gate) challenge(w http.ResponseWriter, r *http.Request, problem string)
 }
 
 // newOffer creates a token and, if there is room, an invoice.
-func (g *Gate) newOffer(r *http.Request, now time.Time, key string) (offer, error) {
+func (g *Gate) newOffer(r *http.Request, now time.Time, key string, price int64, powOnly bool) (offer, error) {
 	id := make([]byte, 16)
 	if _, err := rand.Read(id); err != nil {
 		return offer{}, err
@@ -264,16 +375,21 @@ func (g *Gate) newOffer(r *http.Request, now time.Time, key string) (offer, erro
 		ID:       hex.EncodeToString(id),
 		Resource: resource(r),
 		Expires:  now.Add(g.opt.ChallengeTTL).Unix(),
-		PowBits:  g.opt.PowDifficulty,
+	}
+	p := g.opt.PoW(price)
+	c.PowBits = p.Difficulty
+	if p.Algorithm == pow.Argon2id {
+		c.PowAlg, c.PowMem = p.Algorithm, p.MemoryMiB
 	}
 
 	// Proof-of-work is always offered. An invoice only if the node may be
-	// called: not too many open invoices, within the global rate, node healthy.
+	// called: not too many open invoices, within the global rate, node
+	// healthy, and the policy for this client allows it.
 	var invoice string
-	if g.pending.reserve(now) {
-		inv, err := g.node.createInvoice(now, g.opt.PriceSats, "Spikes402: "+c.Resource, g.opt.ChallengeTTL)
+	if !powOnly && g.pending.reserve(now) {
+		inv, err := g.node.createInvoice(now, price, "Spikes402: "+c.Resource, g.opt.ChallengeTTL)
 		if err != nil {
-			g.logNodeError(now, err)
+			g.nodeLog.printf(now, "spikes402: no invoice, offering proof-of-work only: %v", err)
 		} else {
 			c.PaymentHash = hex.EncodeToString(inv.PaymentHash[:])
 			invoice = inv.PaymentRequest
@@ -284,24 +400,11 @@ func (g *Gate) newOffer(r *http.Request, now time.Time, key string) (offer, erro
 	if err != nil {
 		return offer{}, err
 	}
-	o := offer{id: c.ID, token: token, invoice: invoice, expires: time.Unix(c.Expires, 0), powBits: c.PowBits}
+	o := offer{id: c.ID, token: token, invoice: invoice, expires: time.Unix(c.Expires, 0), price: price, pow: p}
 	if invoice != "" {
 		g.pending.put(key, o)
 	}
 	return o, nil
-}
-
-// logNodeError logs why no invoice was offered, at most once a minute so
-// that an attack cannot flood the logs.
-func (g *Gate) logNodeError(now time.Time, err error) {
-	g.logMu.Lock()
-	defer g.logMu.Unlock()
-	if now.Sub(g.lastLog) < time.Minute {
-		g.suppressed++
-		return
-	}
-	log.Printf("spikes402: no invoice, offering proof-of-work only: %v (%d similar messages suppressed)", err, g.suppressed)
-	g.lastLog, g.suppressed = now, 0
 }
 
 func (g *Gate) writeChallenge(w http.ResponseWriter, r *http.Request, o offer, problem string) {
@@ -309,15 +412,21 @@ func (g *Gate) writeChallenge(w http.ResponseWriter, r *http.Request, o offer, p
 		Error:     "payment required",
 		Problem:   problem,
 		Resource:  resource(r),
-		PriceSats: g.opt.PriceSats,
+		PriceSats: o.price,
 		ExpiresAt: o.expires.UTC(),
 		PoW: powOffer{
 			Challenge:       o.token,
-			Difficulty:      o.powBits,
-			Algorithm:       "sha256d",
-			ExpectedSeconds: math.Round(pow.ExpectedSeconds(o.powBits)*10) / 10,
+			Difficulty:      o.pow.Difficulty,
+			Algorithm:       o.pow.Algorithm,
+			ExpectedSeconds: math.Round(o.pow.ExpectedSeconds()*10) / 10,
 			Usage:           `find nonce so that SHA256(SHA256(challenge + ":" + nonce)) has "difficulty" leading zero bits, then send "Authorization: PoW <challenge>:<nonce>"`,
 		},
+	}
+	powHeader := fmt.Sprintf(`PoW challenge=%q, difficulty="%d", algorithm="sha256d"`, o.token, o.pow.Difficulty)
+	if o.pow.Algorithm == pow.Argon2id {
+		body.PoW.MemoryMiB = o.pow.MemoryMiB
+		body.PoW.Usage = `find nonce so that Argon2id(password = challenge + ":" + nonce, salt = "spikes402-pow-v1", time = 1, memory = memory_mib MiB, threads = 1, 32 bytes) has "difficulty" leading zero bits, then send "Authorization: PoW <challenge>:<nonce>"`
+		powHeader = fmt.Sprintf(`PoW challenge=%q, difficulty="%d", algorithm="argon2id", memory-mib="%d"`, o.token, o.pow.Difficulty, o.pow.MemoryMiB)
 	}
 
 	h := w.Header()
@@ -329,7 +438,7 @@ func (g *Gate) writeChallenge(w http.ResponseWriter, r *http.Request, o offer, p
 			Usage:   `pay the invoice, then send "Authorization: L402 <token>:<preimage hex>"`,
 		}
 	}
-	h.Add("WWW-Authenticate", fmt.Sprintf(`PoW challenge=%q, difficulty="%d", algorithm="sha256d"`, o.token, o.powBits))
+	h.Add("WWW-Authenticate", powHeader)
 	h.Set("Cache-Control", "no-store")
 
 	if strings.Contains(r.Header.Get("Accept"), "text/html") {

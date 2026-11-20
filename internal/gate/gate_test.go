@@ -21,11 +21,13 @@ type fixture struct {
 	gate *Gate
 	ln   *lightning.Fake
 	now  time.Time
+	pow  pow.Params // puzzle handed out, whatever the price
 }
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	f := &fixture{ln: lightning.NewFake(), now: time.Unix(1_800_000_000, 0)}
+	f := &fixture{ln: lightning.NewFake(), now: time.Unix(1_800_000_000, 0),
+		pow: pow.Params{Algorithm: pow.SHA256d, Difficulty: testDifficulty}}
 	origin := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "" {
 			t.Error("Authorization header leaked to the origin")
@@ -33,13 +35,13 @@ func newFixture(t *testing.T) *fixture {
 		w.Write([]byte("content of " + r.URL.Path))
 	})
 	f.gate = New(Options{
-		PriceSats:     10,
-		Protect:       []string{"/premium/**", "/*.pdf"},
-		PowDifficulty: testDifficulty,
-		ChallengeTTL:  time.Minute,
-		SecretKey:     []byte(strings.Repeat("s", 32)),
-		Lightning:     f.ln,
-		Next:          origin,
+		PriceSats:    10,
+		Protect:      []string{"/premium/**", "/*.pdf"},
+		PoW:          func(int64) pow.Params { return f.pow },
+		ChallengeTTL: time.Minute,
+		SecretKey:    []byte(strings.Repeat("s", 32)),
+		Lightning:    f.ln,
+		Next:         origin,
 
 		ChallengesPerMinute:  1000,
 		MaxInvoicesPerMinute: 6000,
@@ -88,11 +90,15 @@ func (f *fixture) pay(t *testing.T, b challengeBody) string {
 
 func solve(t *testing.T, b challengeBody) string {
 	t.Helper()
-	nonce, err := pow.Solve(context.Background(), b.PoW.Challenge, b.PoW.Difficulty)
+	nonce, err := params(b).Solve(context.Background(), b.PoW.Challenge)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return "PoW " + b.PoW.Challenge + ":" + strconv.FormatUint(nonce, 10)
+}
+
+func params(b challengeBody) pow.Params {
+	return pow.Params{Algorithm: b.PoW.Algorithm, Difficulty: b.PoW.Difficulty, MemoryMiB: b.PoW.MemoryMiB}
 }
 
 func TestUnprotectedPassthrough(t *testing.T) {
@@ -172,7 +178,7 @@ func TestWrongPoW(t *testing.T) {
 	f := newFixture(t)
 	b := f.challenge(t, "/premium/article")
 	var bad uint64
-	for pow.Check(b.PoW.Challenge, bad, b.PoW.Difficulty) {
+	for params(b).Check(b.PoW.Challenge, bad) {
 		bad++
 	}
 	rec := f.get("/premium/article", "PoW "+b.PoW.Challenge+":"+strconv.FormatUint(bad, 10), "")

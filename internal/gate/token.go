@@ -7,17 +7,28 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+
+	"github.com/Choffolo/spikes402/pow"
 )
 
 // claims is what a Spikes402 token says. One token is issued per 402
 // answer and can be redeemed exactly once, either with the preimage of
 // its invoice (L402) or with a proof-of-work solution.
 type claims struct {
-	ID          string `json:"id"`  // random, used to stop replays
-	PaymentHash string `json:"ph"`  // hex sha256 of the invoice preimage ("" if no invoice)
-	Resource    string `json:"res"` // "METHOD /path?query" the token unlocks
-	Expires     int64  `json:"exp"` // unix seconds
-	PowBits     int    `json:"pow"` // proof-of-work difficulty
+	ID          string `json:"id"`            // random, used to stop replays
+	PaymentHash string `json:"ph"`            // hex sha256 of the invoice preimage ("" if no invoice)
+	Resource    string `json:"res"`           // "METHOD /path?query" the token unlocks
+	Expires     int64  `json:"exp"`           // unix seconds
+	PowBits     int    `json:"pow"`           // proof-of-work difficulty
+	PowAlg      string `json:"alg,omitempty"` // "" (sha256d) or "argon2id"
+	PowMem      int    `json:"mem,omitempty"` // Argon2id memory in MiB
+}
+
+func (c claims) powParams() pow.Params {
+	if c.PowAlg == "" {
+		return pow.Params{Algorithm: pow.SHA256d, Difficulty: c.PowBits}
+	}
+	return pow.Params{Algorithm: c.PowAlg, Difficulty: c.PowBits, MemoryMiB: c.PowMem}
 }
 
 // Token format: base64url(JSON claims) "." base64url(HMAC-SHA256(secret, first part)).

@@ -21,7 +21,7 @@ func TestExampleConfigLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Listen != ":8402" || c.PowSecondsPerSat != 10 || c.PowDifficulty != 24 || c.ChallengeTTLSeconds != 600 ||
+	if c.Listen != ":8402" || c.PowSecondsPerSat != 10 || c.PoW(c.PriceSats).Difficulty != 24 || c.ChallengeTTLSeconds != 600 ||
 		c.ChallengesPerMinute != 30 || c.MaxInvoicesPerMinute != 300 || c.MaxPendingInvoices != 10_000 || c.ClientIPHeader != "" {
 		t.Fatalf("unexpected defaults: %+v", c)
 	}
@@ -41,18 +41,29 @@ func TestEnvSecrets(t *testing.T) {
 
 func TestInvalid(t *testing.T) {
 	cases := map[string]string{
-		"no origin":         `{"price_sats":5,"protect":["/x"],"lightning":{"backend":"fake"}}`,
-		"zero price":        `{"origin":"http://o","price_sats":0,"protect":["/x"],"lightning":{"backend":"fake"}}`,
-		"no patterns":       `{"origin":"http://o","price_sats":5,"lightning":{"backend":"fake"}}`,
-		"bad pattern":       `{"origin":"http://o","price_sats":5,"protect":["x"],"lightning":{"backend":"fake"}}`,
-		"short secret":      `{"origin":"http://o","price_sats":5,"protect":["/x"],"secret_key":"short","lightning":{"backend":"fake"}}`,
-		"typo":              `{"origin":"http://o","price_sat":5,"protect":["/x"],"lightning":{"backend":"fake"}}`,
-		"no backend":        `{"origin":"http://o","price_sats":5,"protect":["/x"]}`,
-		"negative pow":      `{"origin":"http://o","price_sats":5,"protect":["/x"],"pow_seconds_per_sat":-1,"lightning":{"backend":"fake"}}`,
-		"bad rate limit":    `{"origin":"http://o","price_sats":5,"protect":["/x"],"challenges_per_minute":-1,"lightning":{"backend":"fake"}}`,
-		"header no proxies": `{"origin":"http://o","price_sats":5,"protect":["/x"],"client_ip_header":"X-Forwarded-For","lightning":{"backend":"fake"}}`,
-		"bad proxy":         `{"origin":"http://o","price_sats":5,"protect":["/x"],"trusted_proxies":["nope"],"lightning":{"backend":"fake"}}`,
-		"phoenixd no pw":    `{"origin":"http://o","price_sats":5,"protect":["/x"],"secret_key":"` + strings.Repeat("k", 32) + `","lightning":{"backend":"phoenixd"}}`,
+		"no origin":          `{"price_sats":5,"protect":["/x"],"lightning":{"backend":"fake"}}`,
+		"zero price":         `{"origin":"http://o","price_sats":0,"protect":["/x"],"lightning":{"backend":"fake"}}`,
+		"no patterns":        `{"origin":"http://o","price_sats":5,"lightning":{"backend":"fake"}}`,
+		"bad pattern":        `{"origin":"http://o","price_sats":5,"protect":["x"],"lightning":{"backend":"fake"}}`,
+		"short secret":       `{"origin":"http://o","price_sats":5,"protect":["/x"],"secret_key":"short","lightning":{"backend":"fake"}}`,
+		"typo":               `{"origin":"http://o","price_sat":5,"protect":["/x"],"lightning":{"backend":"fake"}}`,
+		"no backend":         `{"origin":"http://o","price_sats":5,"protect":["/x"]}`,
+		"negative pow":       `{"origin":"http://o","price_sats":5,"protect":["/x"],"pow_seconds_per_sat":-1,"lightning":{"backend":"fake"}}`,
+		"bad rate limit":     `{"origin":"http://o","price_sats":5,"protect":["/x"],"challenges_per_minute":-1,"lightning":{"backend":"fake"}}`,
+		"header no proxies":  `{"origin":"http://o","price_sats":5,"protect":["/x"],"client_ip_header":"X-Forwarded-For","lightning":{"backend":"fake"}}`,
+		"bad proxy":          `{"origin":"http://o","price_sats":5,"protect":["/x"],"trusted_proxies":["nope"],"lightning":{"backend":"fake"}}`,
+		"phoenixd no pw":     `{"origin":"http://o","price_sats":5,"protect":["/x"],"secret_key":"` + strings.Repeat("k", 32) + `","lightning":{"backend":"phoenixd"}}`,
+		"bad algorithm":      `{"origin":"http://o","price_sats":5,"protect":["/x"],"pow_algorithm":"scrypt","lightning":{"backend":"fake"}}`,
+		"argon memory bomb":  `{"origin":"http://o","price_sats":5,"protect":["/x"],"pow_algorithm":"argon2id","argon2_memory_mib":4096,"lightning":{"backend":"fake"}}`,
+		"argon too little":   `{"origin":"http://o","price_sats":5,"protect":["/x"],"pow_algorithm":"argon2id","argon2_memory_mib":1,"lightning":{"backend":"fake"}}`,
+		"argon too hard":     `{"origin":"http://o","price_sats":5,"protect":["/x"],"pow_algorithm":"argon2id","pow_difficulty":30,"lightning":{"backend":"fake"}}`,
+		"memory w/o argon":   `{"origin":"http://o","price_sats":5,"protect":["/x"],"argon2_memory_mib":16,"lightning":{"backend":"fake"}}`,
+		"negative pow diff":  `{"origin":"http://o","price_sats":5,"protect":["/x"],"pow_difficulty":-1,"lightning":{"backend":"fake"}}`,
+		"bad policy":         `{"origin":"http://o","price_sats":5,"protect":["/x"],"bot_policies":{"impostor":{"action":"ban"}},"lightning":{"backend":"fake"}}`,
+		"bad multiplier":     `{"origin":"http://o","price_sats":5,"protect":["/x"],"bot_policies":{"impostor":{"action":"pay","price_multiplier":-2}},"lightning":{"backend":"fake"}}`,
+		"bot without name":   `{"origin":"http://o","price_sats":5,"protect":["/x"],"known_bots":[{"user_agent":"x"}],"lightning":{"backend":"fake"}}`,
+		"bot list over http": `{"origin":"http://o","price_sats":5,"protect":["/x"],"known_bots":[{"name":"x","user_agent":"x","ip_ranges_url":"http://x"}],"lightning":{"backend":"fake"}}`,
+		"dev mode in prod":   `{"origin":"http://o","price_sats":5,"protect":["/x"],"web_bot_auth_dev_mode":true,"secret_key":"` + strings.Repeat("k", 32) + `","lightning":{"backend":"phoenixd","phoenixd_password":"p"}}`,
 	}
 	for name, json := range cases {
 		if _, err := load(t, json); err == nil {
@@ -66,11 +77,11 @@ func TestPowFromPrice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.PowDifficulty != 24 { // 10 sats x 1 s x 2e6 hashes/s = 2^24.25
-		t.Fatalf("got %d", c.PowDifficulty)
+	if d := c.PoW(c.PriceSats).Difficulty; d != 24 { // 10 sats x 1 s x 2e6 hashes/s = 2^24.25
+		t.Fatalf("got %d", d)
 	}
 	c, err = load(t, `{"origin":"http://o","price_sats":10,"protect":["/x"],"pow_difficulty":12,"lightning":{"backend":"fake"}}`)
-	if err != nil || c.PowDifficulty != 12 {
+	if err != nil || c.PoW(c.PriceSats).Difficulty != 12 {
 		t.Fatalf("explicit difficulty: %v %+v", err, c)
 	}
 }
@@ -84,5 +95,38 @@ func TestTrustedProxies(t *testing.T) {
 	nets, _ := c.TrustedProxyNets()
 	if len(nets) != 3 || nets[0].String() != "127.0.0.1/32" || nets[1].String() != "::1/128" || nets[2].String() != "10.0.0.0/8" {
 		t.Fatalf("got %v", nets)
+	}
+}
+
+func TestArgon2id(t *testing.T) {
+	c, err := load(t, `{"origin":"http://o","price_sats":1,"protect":["/x"],"pow_algorithm":"argon2id","lightning":{"backend":"fake"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := c.PoW(1)
+	if p.Algorithm != "argon2id" || p.MemoryMiB != 16 || p.Difficulty != 10 { // 10 s / (16 MiB / 1500 MiB/s) = 2^9.9
+		t.Fatalf("got %+v", p)
+	}
+	if p := c.PoW(10); p.Difficulty != 13 { // ten times the price, ~2^3.3 more work
+		t.Fatalf("got %+v", p)
+	}
+}
+
+func TestBotDefaults(t *testing.T) {
+	c, err := load(t, `{"origin":"http://o","price_sats":1,"protect":["/x"],"lightning":{"backend":"fake"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.IdentifyBotsOn() || len(c.Bots()) == 0 || len(c.BotPolicies) != 0 || c.WebBotAuthDevMode {
+		t.Fatalf("unexpected defaults: %+v", c)
+	}
+	c, err = load(t, `{"origin":"http://o","price_sats":1,"protect":["/x"],"identify_bots":false,
+		"known_bots":[{"name":"MyBot","user_agent":"MyBot","reverse_dns":["example.org"]}],
+		"bot_policies":{"impostor":{"action":"pow-only"},"verified":{"action":"pay","price_multiplier":2}},"lightning":{"backend":"fake"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.IdentifyBotsOn() || c.Bots()[0].Name != "MyBot" || c.BotPolicies["impostor"].PriceMultiplier != 1 || c.BotPolicies["verified"].PriceMultiplier != 2 {
+		t.Fatalf("got %+v", c)
 	}
 }
