@@ -1,10 +1,14 @@
 {
   "listen": ":8402",
   "origin": "http://localhost:8080",
-  "price_sats": 10,
+  "price_sats": 1,
   "protect": ["/premium/**"],
+  "pow_seconds_per_sat": 10,
   "pow_difficulty": 0,
   "challenge_ttl_seconds": 600,
+  "challenges_per_minute": 30,
+  "max_pending_invoices": 10000,
+  "client_ip_header": "",
   "secret_key": "",
   "lightning": {
     "backend": "fake"

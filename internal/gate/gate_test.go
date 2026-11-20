@@ -40,6 +40,9 @@ func newFixture(t *testing.T) *fixture {
 		SecretKey:     []byte(strings.Repeat("s", 32)),
 		Lightning:     f.ln,
 		Next:          origin,
+
+		ChallengesPerMinute: 1000,
+		MaxPendingInvoices:  1000,
 	})
 	f.gate.now = func() time.Time { return f.now }
 	return f
@@ -209,8 +212,9 @@ func TestExpiredChallenge(t *testing.T) {
 func TestBoundToResource(t *testing.T) {
 	f := newFixture(t)
 	b := f.challenge(t, "/premium/cheap")
+	auth := f.pay(t, b)
 	for _, target := range []string{"/premium/expensive", "/premium/cheap?page=2"} {
-		rec := f.get(target, f.pay(t, b), "")
+		rec := f.get(target, auth, "")
 		if rec.Code != http.StatusPaymentRequired || !strings.Contains(rec.Body.String(), errWrongTarget.Error()) {
 			t.Fatalf("%s: got %d %q", target, rec.Code, rec.Body.String())
 		}

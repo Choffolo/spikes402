@@ -8,14 +8,16 @@ import (
 
 func TestSolveAndCheck(t *testing.T) {
 	const challenge = "hello"
-	nonce, err := Solve(context.Background(), challenge, 12)
-	if err != nil {
-		t.Fatal(err)
+	for _, d := range []int{0, 1, 12} {
+		nonce, err := Solve(context.Background(), challenge, d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !Check(challenge, nonce, d) {
+			t.Fatalf("difficulty %d: solution does not verify", d)
+		}
 	}
-	if !Check(challenge, nonce, 12) {
-		t.Fatal("solution does not verify")
-	}
-	if Hash(challenge, nonce) == Hash("other", nonce) {
+	if Hash("hello", 1) == Hash("other", 1) {
 		t.Fatal("hash must depend on the challenge")
 	}
 }
@@ -41,18 +43,41 @@ func TestDifficultyBounds(t *testing.T) {
 }
 
 func TestSolveCancel(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
+	start := time.Now()
 	if _, err := Solve(ctx, "x", MaxDifficulty); err == nil {
 		t.Fatal("expected cancellation")
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("cancellation took too long")
 	}
 }
 
 func TestDifficultyForPrice(t *testing.T) {
-	cases := map[int64]int{0: 17, 1: 17, 10: 20, 1000: 26, 1 << 40: 32}
-	for price, want := range cases {
-		if got := DifficultyForPrice(price); got != want {
-			t.Errorf("price %d: got %d, want %d", price, got, want)
+	cases := []struct {
+		price         int64
+		secondsPerSat float64
+		want          int
+	}{
+		{1, 10, 24},      // 2e7 hashes  -> 2^24.25
+		{10, 10, 28},     // 2e8 hashes  -> 2^27.6
+		{100, 10, 31},    // 2e9 hashes  -> 2^30.9
+		{1000, 10, 32},   // capped
+		{1, 0.001, 16},   // raised to the minimum
+		{1, 0, 16},       // degenerate input
+		{1 << 40, 1, 32}, // huge price
+		{3, 1, 23},       // 6e6 hashes -> 2^22.5 rounds to 23
+	}
+	for _, c := range cases {
+		if got := DifficultyForPrice(c.price, c.secondsPerSat); got != c.want {
+			t.Errorf("price %d at %g s/sat: got %d, want %d", c.price, c.secondsPerSat, got, c.want)
 		}
+	}
+}
+
+func TestExpectedSeconds(t *testing.T) {
+	if got := ExpectedSeconds(21); got < 1.04 || got > 1.05 { // 2^21 / 2e6
+		t.Fatalf("got %g", got)
 	}
 }

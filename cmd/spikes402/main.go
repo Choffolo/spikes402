@@ -17,6 +17,7 @@ import (
 	"github.com/Choffolo/spikes402/internal/config"
 	"github.com/Choffolo/spikes402/internal/gate"
 	"github.com/Choffolo/spikes402/internal/lightning"
+	"github.com/Choffolo/spikes402/pow"
 )
 
 func main() {
@@ -65,6 +66,10 @@ func main() {
 		SecretKey:     secret,
 		Lightning:     backend,
 		Next:          proxy,
+
+		ChallengesPerMinute: cfg.ChallengesPerMinute,
+		MaxPendingInvoices:  cfg.MaxPendingInvoices,
+		ClientIPHeader:      cfg.ClientIPHeader,
 	}))
 
 	srv := &http.Server{
@@ -73,7 +78,7 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
-	log.Printf("spikes402 listening on %s, protecting %v of %s at %d sats or PoW difficulty %d",
-		cfg.Listen, cfg.Protect, cfg.Origin, cfg.PriceSats, cfg.PowDifficulty)
+	log.Printf("spikes402 listening on %s, protecting %v of %s at %d sats or PoW difficulty %d (~%.1f s on one CPU core)",
+		cfg.Listen, cfg.Protect, cfg.Origin, cfg.PriceSats, cfg.PowDifficulty, pow.ExpectedSeconds(cfg.PowDifficulty))
 	log.Fatal(srv.ListenAndServe())
 }

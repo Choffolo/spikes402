@@ -22,7 +22,7 @@ import (
 
 func main() {
 	mode := flag.String("mode", "pow", `"pow" to do the work, "pay" to pay (fake backend only)`)
-	maxDifficulty := flag.Int("max-difficulty", 24, "refuse proof-of-work puzzles harder than this")
+	maxDifficulty := flag.Int("max-difficulty", 28, "refuse proof-of-work puzzles harder than this")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: spikes-bot [-mode pow|pay] URL")
 		flag.PrintDefaults()

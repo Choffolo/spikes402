@@ -20,8 +20,12 @@ type Config struct {
 	Origin              string    `json:"origin"`                // website to protect, e.g. "http://localhost:8080"
 	PriceSats           int64     `json:"price_sats"`            // price per request in sats
 	Protect             []string  `json:"protect"`               // path patterns that require payment
-	PowDifficulty       int       `json:"pow_difficulty"`        // 0 = derived from price
+	PowSecondsPerSat    float64   `json:"pow_seconds_per_sat"`   // CPU-core seconds of work per sat, default 10
+	PowDifficulty       int       `json:"pow_difficulty"`        // 0 = derived from price and pow_seconds_per_sat
 	ChallengeTTLSeconds int       `json:"challenge_ttl_seconds"` // default 600
+	ChallengesPerMinute int       `json:"challenges_per_minute"` // per client, default 30
+	MaxPendingInvoices  int       `json:"max_pending_invoices"`  // default 10000
+	ClientIPHeader      string    `json:"client_ip_header"`      // e.g. "CF-Connecting-IP", default "" (use the TCP address)
 	SecretKey           string    `json:"secret_key"`            // or env SPIKES402_SECRET_KEY
 	Lightning           Lightning `json:"lightning"`
 }
@@ -65,8 +69,14 @@ func (c *Config) complete() error {
 	if c.ChallengeTTLSeconds == 0 {
 		c.ChallengeTTLSeconds = 600
 	}
-	if c.PowDifficulty == 0 {
-		c.PowDifficulty = pow.DifficultyForPrice(c.PriceSats)
+	if c.PowSecondsPerSat == 0 {
+		c.PowSecondsPerSat = 10
+	}
+	if c.ChallengesPerMinute == 0 {
+		c.ChallengesPerMinute = 30
+	}
+	if c.MaxPendingInvoices == 0 {
+		c.MaxPendingInvoices = 10_000
 	}
 	if c.Lightning.Backend == "phoenixd" && c.Lightning.PhoenixdURL == "" {
 		c.Lightning.PhoenixdURL = "http://127.0.0.1:9740"
@@ -90,11 +100,20 @@ func (c *Config) complete() error {
 			return fmt.Errorf("protect pattern %q: %w", p, err)
 		}
 	}
+	if c.PowSecondsPerSat < 0 {
+		return errors.New(`"pow_seconds_per_sat" must be positive`)
+	}
+	if c.PowDifficulty == 0 {
+		c.PowDifficulty = pow.DifficultyForPrice(c.PriceSats, c.PowSecondsPerSat)
+	}
 	if c.PowDifficulty < 1 || c.PowDifficulty > pow.MaxDifficulty {
 		return fmt.Errorf(`"pow_difficulty" must be between 1 and %d`, pow.MaxDifficulty)
 	}
 	if c.ChallengeTTLSeconds < 10 {
 		return errors.New(`"challenge_ttl_seconds" must be at least 10`)
+	}
+	if c.ChallengesPerMinute < 1 || c.MaxPendingInvoices < 1 {
+		return errors.New(`"challenges_per_minute" and "max_pending_invoices" must be at least 1`)
 	}
 	if c.SecretKey != "" && len(c.SecretKey) < 32 {
 		return errors.New(`"secret_key" must be at least 32 characters (try: openssl rand -hex 32)`)

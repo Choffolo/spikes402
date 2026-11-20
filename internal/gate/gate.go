@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"path"
 	"strconv"
@@ -31,23 +32,38 @@ type Options struct {
 	SecretKey     []byte        // signs tokens; keep it secret
 	Lightning     lightning.Backend
 	Next          http.Handler // where paid/free requests go (the origin)
+
+	// Abuse protection for unpaid requests.
+	ChallengesPerMinute int    // 402 answers per client per minute
+	MaxPendingInvoices  int    // open invoices at once; beyond this, PoW only
+	ClientIPHeader      string // header with the real client IP behind a trusted proxy, or ""
 }
 
 // Gate is the pay-or-PoW http.Handler.
 type Gate struct {
-	opt   Options
-	sign  signer
-	spent *spentSet
-	now   func() time.Time // replaceable in tests
+	opt     Options
+	sign    signer
+	spent   *spentSet
+	limiter *rateLimiter
+	pending *pendingOffers
+	now     func() time.Time // replaceable in tests
 }
 
 // New returns a Gate. It panics on programmer errors; validate user
 // input with the config package first.
 func New(opt Options) *Gate {
-	if len(opt.SecretKey) < 32 || opt.Lightning == nil || opt.Next == nil || opt.PriceSats < 1 || opt.ChallengeTTL <= 0 {
+	if len(opt.SecretKey) < 32 || opt.Lightning == nil || opt.Next == nil || opt.PriceSats < 1 ||
+		opt.ChallengeTTL <= 0 || opt.ChallengesPerMinute < 1 || opt.MaxPendingInvoices < 1 {
 		panic("gate: invalid options")
 	}
-	return &Gate{opt: opt, sign: signer{opt.SecretKey}, spent: newSpentSet(), now: time.Now}
+	return &Gate{
+		opt:     opt,
+		sign:    signer{opt.SecretKey},
+		spent:   newSpentSet(),
+		limiter: newRateLimiter(opt.ChallengesPerMinute),
+		pending: newPendingOffers(opt.MaxPendingInvoices),
+		now:     time.Now,
+	}
 }
 
 // ServeHTTP implements http.Handler.
@@ -65,8 +81,9 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var problem string
 	if auth := r.Header.Get("Authorization"); auth != "" {
-		err := g.redeem(r, auth)
+		id, err := g.redeem(r, auth)
 		if err == nil {
+			g.pending.drop(g.pendingKey(r), id)
 			r.Header.Del("Authorization") // our credential, not the origin's business
 			g.opt.Next.ServeHTTP(w, r)
 			return
@@ -117,23 +134,36 @@ var (
 )
 
 // redeem checks an "L402 <token>:<preimage>" or "PoW <token>:<nonce>"
-// credential and marks the token as spent if it is valid.
-func (g *Gate) redeem(r *http.Request, auth string) error {
+// credential and marks the token as spent if it is valid. It returns the
+// token ID.
+func (g *Gate) redeem(r *http.Request, auth string) (string, error) {
+	c, err := g.check(r, auth)
+	if err != nil {
+		return "", err
+	}
+	// Checked last, so a bad attempt does not burn a good token.
+	if !g.spent.use(c.ID, time.Unix(c.Expires, 0), g.now()) {
+		return "", errReplay
+	}
+	return c.ID, nil
+}
+
+// check verifies a credential without spending it.
+func (g *Gate) check(r *http.Request, auth string) (claims, error) {
 	scheme, cred, _ := strings.Cut(auth, " ")
 	token, proof, ok := strings.Cut(strings.TrimSpace(cred), ":")
 	if !ok {
-		return errBadToken
+		return claims{}, errBadToken
 	}
 	c, err := g.sign.verify(token)
 	if err != nil {
-		return err
+		return claims{}, err
 	}
-	now := g.now()
-	if now.Unix() >= c.Expires {
-		return errExpired
+	if g.now().Unix() >= c.Expires {
+		return claims{}, errExpired
 	}
 	if c.Resource != resource(r) {
-		return errWrongTarget
+		return claims{}, errWrongTarget
 	}
 
 	switch strings.ToUpper(scheme) {
@@ -141,26 +171,21 @@ func (g *Gate) redeem(r *http.Request, auth string) error {
 		preimage, err := hex.DecodeString(proof)
 		want, err2 := hex.DecodeString(c.PaymentHash)
 		if err != nil || err2 != nil || len(preimage) != 32 || len(want) != 32 {
-			return errBadProof
+			return claims{}, errBadProof
 		}
 		got := sha256.Sum256(preimage)
 		if subtle.ConstantTimeCompare(got[:], want) != 1 {
-			return errBadProof
+			return claims{}, errBadProof
 		}
 	case "POW":
 		nonce, err := strconv.ParseUint(proof, 10, 64)
 		if err != nil || !pow.Check(token, nonce, c.PowBits) {
-			return errBadProof
+			return claims{}, errBadProof
 		}
 	default:
-		return errScheme
+		return claims{}, errScheme
 	}
-
-	// Checked last, so a bad attempt does not burn a good token.
-	if !g.spent.use(c.ID, time.Unix(c.Expires, 0), now) {
-		return errReplay
-	}
-	return nil
+	return c, nil
 }
 
 // challengeBody is the JSON answer to an unpaid request.
@@ -181,20 +206,47 @@ type l402Offer struct {
 }
 
 type powOffer struct {
-	Challenge  string `json:"challenge"`
-	Difficulty int    `json:"difficulty"`
-	Algorithm  string `json:"algorithm"`
-	Usage      string `json:"usage"`
+	Challenge       string  `json:"challenge"`
+	Difficulty      int     `json:"difficulty"`
+	Algorithm       string  `json:"algorithm"`
+	ExpectedSeconds float64 `json:"expected_seconds_one_cpu_core"`
+	Usage           string  `json:"usage"`
 }
 
-// challenge answers 402 Payment Required with both ways in.
+func (g *Gate) pendingKey(r *http.Request) string {
+	return clientKey(r, g.opt.ClientIPHeader) + " " + resource(r)
+}
+
+// challenge answers 402 Payment Required with both ways in, or 429 Too
+// Many Requests if this client asked for too many challenges.
 func (g *Gate) challenge(w http.ResponseWriter, r *http.Request, problem string) {
-	id := make([]byte, 16)
-	if _, err := rand.Read(id); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+	now := g.now()
+	if ok, wait := g.limiter.allow(clientKey(r, g.opt.ClientIPHeader), now); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
+		http.Error(w, "too many requests", http.StatusTooManyRequests)
 		return
 	}
-	now := g.now()
+
+	// Same client, same page, offer still fresh: hand it out again rather
+	// than creating another invoice.
+	key := g.pendingKey(r)
+	o, ok := g.pending.get(key, now, g.opt.ChallengeTTL/2)
+	if !ok || g.spent.has(o.id) {
+		var err error
+		if o, err = g.newOffer(r, now, key); err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	}
+	g.writeChallenge(w, r, o, problem)
+}
+
+// newOffer creates a token and, if there is room, an invoice.
+func (g *Gate) newOffer(r *http.Request, now time.Time, key string) (offer, error) {
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		return offer{}, err
+	}
 	c := claims{
 		ID:       hex.EncodeToString(id),
 		Resource: resource(r),
@@ -202,46 +254,58 @@ func (g *Gate) challenge(w http.ResponseWriter, r *http.Request, problem string)
 		PowBits:  g.opt.PowDifficulty,
 	}
 
-	// If the Lightning node is unreachable we still offer proof-of-work.
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-	inv, err := g.opt.Lightning.CreateInvoice(ctx, g.opt.PriceSats, "Spikes402: "+c.Resource, g.opt.ChallengeTTL)
-	if err != nil {
-		log.Printf("spikes402: cannot create invoice, offering proof-of-work only: %v", err)
-	} else {
-		c.PaymentHash = hex.EncodeToString(inv.PaymentHash[:])
+	// No invoice if too many are open, or if the Lightning node fails:
+	// proof-of-work is still offered.
+	var invoice string
+	if g.pending.reserve(now) {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		inv, err := g.opt.Lightning.CreateInvoice(ctx, g.opt.PriceSats, "Spikes402: "+c.Resource, g.opt.ChallengeTTL)
+		if err != nil {
+			log.Printf("spikes402: cannot create invoice, offering proof-of-work only: %v", err)
+		} else {
+			c.PaymentHash = hex.EncodeToString(inv.PaymentHash[:])
+			invoice = inv.PaymentRequest
+		}
 	}
 
 	token, err := g.sign.sign(c)
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+		return offer{}, err
 	}
+	o := offer{id: c.ID, token: token, invoice: invoice, expires: time.Unix(c.Expires, 0), powBits: c.PowBits}
+	if invoice != "" {
+		g.pending.put(key, o)
+	}
+	return o, nil
+}
 
+func (g *Gate) writeChallenge(w http.ResponseWriter, r *http.Request, o offer, problem string) {
 	body := challengeBody{
 		Error:     "payment required",
 		Problem:   problem,
-		Resource:  c.Resource,
+		Resource:  resource(r),
 		PriceSats: g.opt.PriceSats,
-		ExpiresAt: time.Unix(c.Expires, 0).UTC(),
+		ExpiresAt: o.expires.UTC(),
 		PoW: powOffer{
-			Challenge:  token,
-			Difficulty: c.PowBits,
-			Algorithm:  "sha256d",
-			Usage:      `find nonce so that SHA256(SHA256(challenge + ":" + nonce)) has "difficulty" leading zero bits, then send "Authorization: PoW <challenge>:<nonce>"`,
+			Challenge:       o.token,
+			Difficulty:      o.powBits,
+			Algorithm:       "sha256d",
+			ExpectedSeconds: math.Round(pow.ExpectedSeconds(o.powBits)*10) / 10,
+			Usage:           `find nonce so that SHA256(SHA256(challenge + ":" + nonce)) has "difficulty" leading zero bits, then send "Authorization: PoW <challenge>:<nonce>"`,
 		},
 	}
 
 	h := w.Header()
-	if c.PaymentHash != "" {
-		h.Add("WWW-Authenticate", fmt.Sprintf(`L402 macaroon=%q, invoice=%q`, token, inv.PaymentRequest))
+	if o.invoice != "" {
+		h.Add("WWW-Authenticate", fmt.Sprintf(`L402 macaroon=%q, invoice=%q`, o.token, o.invoice))
 		body.L402 = &l402Offer{
-			Token:   token,
-			Invoice: inv.PaymentRequest,
+			Token:   o.token,
+			Invoice: o.invoice,
 			Usage:   `pay the invoice, then send "Authorization: L402 <token>:<preimage hex>"`,
 		}
 	}
-	h.Add("WWW-Authenticate", fmt.Sprintf(`PoW challenge=%q, difficulty="%d", algorithm="sha256d"`, token, c.PowBits))
+	h.Add("WWW-Authenticate", fmt.Sprintf(`PoW challenge=%q, difficulty="%d", algorithm="sha256d"`, o.token, o.powBits))
 	h.Set("Cache-Control", "no-store")
 
 	if strings.Contains(r.Header.Get("Accept"), "text/html") {

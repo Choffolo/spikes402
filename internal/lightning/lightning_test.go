@@ -24,8 +24,29 @@ func TestFakePay(t *testing.T) {
 	if sha256.Sum256(preimage) != inv.PaymentHash {
 		t.Fatal("preimage does not match payment hash")
 	}
+	if _, err := f.Pay(inv.PaymentRequest); err != ErrUnknownInvoice {
+		t.Fatalf("paying twice: got %v", err)
+	}
 	if _, err := f.Pay("lnfake10sat1" + hex.EncodeToString(make([]byte, 32))); err != ErrUnknownInvoice {
 		t.Fatalf("unknown invoice: got %v", err)
+	}
+}
+
+func TestFakeExpiryAndMemory(t *testing.T) {
+	f := NewFake()
+	now := time.Unix(0, 0)
+	f.now = func() time.Time { return now }
+	inv, _ := f.CreateInvoice(context.Background(), 1, "", time.Minute)
+	now = now.Add(time.Minute)
+	if _, err := f.Pay(inv.PaymentRequest); err != ErrUnknownInvoice {
+		t.Fatalf("expired invoice: got %v", err)
+	}
+	for i := 0; i < 5000; i++ {
+		f.CreateInvoice(context.Background(), 1, "", time.Minute)
+		now = now.Add(time.Second)
+	}
+	if n := len(f.invoices); n > 1100 {
+		t.Fatalf("%d invoices kept in memory", n)
 	}
 }
 

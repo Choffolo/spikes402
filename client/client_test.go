@@ -29,6 +29,8 @@ func newProxy(t *testing.T, difficulty int) *httptest.Server {
 		Next: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			io.WriteString(w, "secret article")
 		}),
+		ChallengesPerMinute: 100,
+		MaxPendingInvoices:  100,
 	}))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)

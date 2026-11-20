@@ -37,3 +37,11 @@ func (s *spentSet) use(id string, expires, now time.Time) bool {
 	}
 	return true
 }
+
+// has reports whether id was already spent.
+func (s *spentSet) has(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, seen := s.ids[id]
+	return seen
+}
