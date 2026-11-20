@@ -408,3 +408,78 @@ func TestSignedBotName(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestWithdrawReservesFee(t *testing.T) {
+	e := newWithdrawEnv(t) // balance 1000, Lightning destination
+	max := lightning.MaxWithdrawSat("me@wallet.example", 1000)
+	rec, out := e.call("POST", "/api/withdraw/prepare", adminKey, map[string]any{"amount_sat": max + 1, "password": wdPass})
+	if rec.Code != 400 || !strings.Contains(fmt.Sprint(out), "routing fee") || !strings.Contains(fmt.Sprint(out), fmt.Sprintf("at most %d sat", max)) {
+		t.Fatalf("%d %v", rec.Code, out)
+	}
+	rec, out = e.call("POST", "/api/withdraw/prepare", adminKey, map[string]any{"amount_sat": max, "password": wdPass})
+	if rec.Code != 200 || out["fee_sat"] != float64(lightning.EstimatedFeeSat("me@wallet.example", max)) {
+		t.Fatalf("%d %v", rec.Code, out)
+	}
+}
+
+// unsureWithdrawer never knows whether the money left.
+type unsureWithdrawer struct{ calls int }
+
+func (u *unsureWithdrawer) Withdraw(context.Context, string, int64) (string, error) {
+	u.calls++
+	return "", fmt.Errorf("%w: phoenixd: timeout", lightning.ErrUncertain)
+}
+
+func TestWithdrawUnknownOutcome(t *testing.T) {
+	e := newWithdrawEnv(t)
+	u := &unsureWithdrawer{}
+	e.srv.withdrawer = u
+	send := func() (*httptest.ResponseRecorder, map[string]any) {
+		rec, p := e.call("POST", "/api/withdraw/prepare", adminKey, map[string]any{"amount_sat": 100, "password": wdPass})
+		if rec.Code != 200 {
+			return rec, p
+		}
+		return e.call("POST", "/api/withdraw/confirm", adminKey, map[string]any{"confirm_id": p["confirm_id"], "amount_sat": 100, "password": wdPass})
+	}
+	if rec, _ := send(); rec.Code != 504 || u.calls != 1 {
+		t.Fatalf("%d, %d calls", rec.Code, u.calls)
+	}
+	_, info := e.call("GET", "/api/withdraw", adminKey, nil)
+	h := info["history"].([]any)[0].(map[string]any)
+	if h["unknown"] != true || h["ok"] != false || !strings.HasPrefix(h["result"].(string), "unknown — check the node") || info["unresolved"] == nil {
+		t.Fatalf("%v", info)
+	}
+	// Blocked until resolved: no second payment can start.
+	if rec, _ := send(); rec.Code != 409 || u.calls != 1 {
+		t.Fatalf("%d, %d calls", rec.Code, u.calls)
+	}
+	resolve := func(body map[string]any) int {
+		rec, _ := e.call("POST", "/api/withdraw/resolve", aiKey, body)
+		if rec.Code != 403 {
+			t.Fatalf("AI resolved: %d", rec.Code)
+		}
+		rec, _ = e.call("POST", "/api/withdraw/resolve", adminKey, body)
+		return rec.Code
+	}
+	if c := resolve(map[string]any{"sent": true, "password": "wrong"}); c != 403 {
+		t.Fatal(c)
+	}
+	if c := resolve(map[string]any{"password": wdPass}); c != 400 {
+		t.Fatal(c)
+	}
+	if c := resolve(map[string]any{"sent": true, "password": wdPass}); c != 200 {
+		t.Fatal(c)
+	}
+	_, info = e.call("GET", "/api/withdraw", adminKey, nil)
+	h = info["history"].([]any)[0].(map[string]any)
+	if h["ok"] != true || h["unknown"] != nil || info["unresolved"] != nil {
+		t.Fatalf("%v", info)
+	}
+	if c := resolve(map[string]any{"sent": false, "password": wdPass}); c != 409 {
+		t.Fatalf("nothing to resolve: %d", c)
+	}
+	// Unblocked: the next attempt reaches the node again.
+	if rec, _ := send(); rec.Code != 504 || u.calls != 2 {
+		t.Fatalf("%d, %d calls", rec.Code, u.calls)
+	}
+}

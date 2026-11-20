@@ -7,7 +7,7 @@ or **do some work** (a proof-of-work puzzle, like Bitcoin mining in
 miniature). Everything else passes through untouched.
 
 > **Status: experimental.** This is a first prototype. Do not use it with
-> real money on mainnet before an independent review. 🇮🇹 [Riassunto in italiano](README.it.md).
+> real money on mainnet before an independent review.
 
 - One request = one payment. No accounts, no subscriptions, no time passes.
 - Non-custodial: payments go to *your own* Lightning node. Spikes402 never
@@ -410,9 +410,22 @@ export SPIKES402_WITHDRAW_PASSWORD='a long passphrase, not the admin key'
 export PHOENIXD_FULL_PASSWORD=<http-password from phoenix.conf>
 ```
 
-- **Destination**: a Lightning address (`name@domain`, via phoenixd
-  `/paylnaddress`) or a Bitcoin address (on-chain via `/sendtoaddress`, which
-  needs `feerate_sat_vbyte`).
+- **Destination**: a Lightning address or a
+  [BIP353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki)
+  address that resolves to a BOLT12 offer (both look like `name@domain`; a
+  leading `₿`, as in `₿you@phoenixwallet.me`, is accepted and removed).
+  phoenixd's `/paylnaddress` pays both: it tries BIP353 first, then the
+  classic Lightning address (LNURL). Or a Bitcoin address (on-chain via
+  `/sendtoaddress`, which needs `feerate_sat_vbyte`).
+- **Routing fee reserved**: for Lightning destinations the amount plus
+  Phoenix's routing fee (4 sats + 0.4 %, rounded up) must fit in the balance;
+  if it does not, the error tells you the largest amount you can withdraw.
+- **Unknown outcome**: if phoenixd does not answer clearly (for example a
+  timeout), the withdrawal is recorded as "unknown — check the node", not as
+  failed, and new withdrawals are blocked. Check the node's outgoing payments
+  (`phoenix-cli listoutgoingpayments` or the Phoenix logs), then click
+  "It was sent" or "It was not sent" on the dashboard (withdraw password
+  needed). This prevents paying twice.
 - **⚠ phoenixd full-access password.** Withdrawing needs phoenixd's *full*
   `http-password`, which can spend everything on the node. It is only read
   when withdrawals are enabled and is used only by the withdrawal code; the
@@ -548,7 +561,7 @@ withdrawals), `internal/mcp`, `internal/lightning` (fake + phoenixd),
 (bot classification), `internal/sfv` (structured header parsing), `webbotauth`
 (Web Bot Auth sign/verify), `pow`, `client`.
 
-## Donations / Donazioni
+## Donations
 
 If Spikes402 is useful to you, you can support it with bitcoin (on-chain):
 

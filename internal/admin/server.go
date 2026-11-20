@@ -109,6 +109,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/withdraw", s.api(true, s.withdrawInfo))
 	mux.HandleFunc("POST /api/withdraw/prepare", s.api(true, s.withdrawPrepare))
 	mux.HandleFunc("POST /api/withdraw/confirm", s.api(true, s.withdrawConfirm))
+	mux.HandleFunc("POST /api/withdraw/resolve", s.api(true, s.withdrawResolve))
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no such endpoint")
 	})

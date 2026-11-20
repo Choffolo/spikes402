@@ -6,10 +6,13 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"log"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/Choffolo/spikes402/internal/lightning"
 )
 
 const (
@@ -42,14 +45,29 @@ type pendingWithdrawal struct {
 	expires time.Time
 }
 
-// WithdrawalRecord is one completed or failed withdrawal.
+// WithdrawalRecord is one withdrawal: sent (OK), failed, or Unknown (the
+// node did not answer clearly; the admin must check it and resolve).
 type WithdrawalRecord struct {
 	Time        time.Time `json:"time"`
 	AmountSat   int64     `json:"amount_sat"`
 	Destination string    `json:"destination"`
 	OK          bool      `json:"ok"`
+	Unknown     bool      `json:"unknown,omitempty"`
 	Result      string    `json:"result"`
 }
+
+// unresolvedLocked returns the withdrawal whose outcome is still unknown,
+// if any; it must be called with mu held.
+func (wd *withdrawals) unresolvedLocked() *WithdrawalRecord {
+	for i := range wd.history {
+		if wd.history[i].Unknown {
+			return &wd.history[i]
+		}
+	}
+	return nil
+}
+
+var errUnresolved = fail(http.StatusConflict, "a previous withdrawal has an unknown outcome: check the node's outgoing payments, then resolve it first")
 
 func newWithdrawals(destination, password string) *withdrawals {
 	return &withdrawals{destination: destination, pwHash: sha256.Sum256([]byte(password))}
@@ -88,6 +106,9 @@ func (s *Server) withdrawInfo(_ http.ResponseWriter, _ *http.Request, _ Role) (a
 	if s.now().Before(s.wd.lockedUntil) {
 		out["locked_until"] = s.wd.lockedUntil.UTC()
 	}
+	if u := s.wd.unresolvedLocked(); u != nil {
+		out["unresolved"] = *u
+	}
 	return out, nil
 }
 
@@ -109,11 +130,16 @@ func (s *Server) withdrawPrepare(_ http.ResponseWriter, r *http.Request, _ Role)
 	if err := wd.checkPasswordLocked(in.Password, now); err != nil {
 		return nil, err
 	}
+	if wd.unresolvedLocked() != nil {
+		return nil, errUnresolved
+	}
 	if in.AmountSat < 1 || in.AmountSat > maxWithdrawSats {
 		return nil, fail(http.StatusBadRequest, "amount_sat must be at least 1")
 	}
-	if info, _ := s.nodeStatus(); info != nil && in.AmountSat > info.BalanceSat {
-		return nil, fail(http.StatusBadRequest, "amount is more than the balance (%d sat)", info.BalanceSat)
+	fee := lightning.EstimatedFeeSat(wd.destination, in.AmountSat)
+	if info, _ := s.nodeStatus(); info != nil && in.AmountSat+fee > info.BalanceSat {
+		return nil, fail(http.StatusBadRequest, "amount + estimated routing fee (%d sat) is more than the balance (%d sat); you can withdraw at most %d sat",
+			fee, info.BalanceSat, lightning.MaxWithdrawSat(wd.destination, info.BalanceSat))
 	}
 	id := make([]byte, 16)
 	rand.Read(id)
@@ -121,6 +147,7 @@ func (s *Server) withdrawPrepare(_ http.ResponseWriter, r *http.Request, _ Role)
 	return map[string]any{
 		"confirm_id":  wd.pending.id,
 		"amount_sat":  in.AmountSat,
+		"fee_sat":     fee, // estimate; 0 for on-chain
 		"destination": wd.destination,
 		"expires_at":  wd.pending.expires.UTC(),
 		"next":        "check the destination and amount, then confirm with the same amount and password",
@@ -154,6 +181,9 @@ func (s *Server) withdrawConfirm(_ http.ResponseWriter, r *http.Request, _ Role)
 	if p.amount != in.AmountSat {
 		return nil, fail(http.StatusConflict, "amount does not match the prepared withdrawal; start again")
 	}
+	if wd.unresolvedLocked() != nil {
+		return nil, errUnresolved
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), withdrawTimeout)
 	defer cancel()
 	log.Printf("admin: withdrawing %d sat to %s", p.amount, wd.destination)
@@ -162,6 +192,10 @@ func (s *Server) withdrawConfirm(_ http.ResponseWriter, r *http.Request, _ Role)
 	if err != nil {
 		rec.Result = truncate(err.Error(), 300)
 	}
+	if errors.Is(err, lightning.ErrUncertain) {
+		rec.Unknown = true
+		rec.Result = truncate("unknown — check the node: "+err.Error(), 300)
+	}
 	wd.history = append(wd.history, rec)
 	if len(wd.history) > 20 {
 		wd.history = wd.history[1:]
@@ -169,10 +203,46 @@ func (s *Server) withdrawConfirm(_ http.ResponseWriter, r *http.Request, _ Role)
 	s.nodeMu.Lock()
 	s.nodeAt = time.Time{} // refresh the balance
 	s.nodeMu.Unlock()
+	if rec.Unknown {
+		log.Printf("admin: withdrawal outcome UNKNOWN: %s", rec.Result)
+		return nil, fail(http.StatusGatewayTimeout, "%s; new withdrawals are blocked until you resolve it", rec.Result)
+	}
 	if err != nil {
 		log.Printf("admin: withdrawal failed: %s", rec.Result)
 		return nil, fail(http.StatusBadGateway, "withdrawal failed: %s", rec.Result)
 	}
 	log.Printf("admin: withdrawal sent: %s", ref)
 	return rec, nil
+}
+
+// withdrawResolve records what the admin found on the node for a withdrawal
+// with an unknown outcome ("sent": true or false), which unblocks new ones.
+func (s *Server) withdrawResolve(_ http.ResponseWriter, r *http.Request, _ Role) (any, error) {
+	if s.wd == nil {
+		return nil, fail(http.StatusNotFound, `withdrawals are disabled ("withdraw.enabled")`)
+	}
+	var in struct {
+		Sent     *bool  `json:"sent"`
+		Password string `json:"password"`
+	}
+	if err := decode(r, &in); err != nil {
+		return nil, err
+	}
+	if in.Sent == nil {
+		return nil, fail(http.StatusBadRequest, `"sent" (true or false) is required`)
+	}
+	wd := s.wd
+	wd.mu.Lock()
+	defer wd.mu.Unlock()
+	if err := wd.checkPasswordLocked(in.Password, s.now()); err != nil {
+		return nil, err
+	}
+	u := wd.unresolvedLocked()
+	if u == nil {
+		return nil, fail(http.StatusConflict, "no withdrawal with an unknown outcome")
+	}
+	u.Unknown, u.OK = false, *in.Sent
+	u.Result = truncate(u.Result+map[bool]string{true: " — admin: sent", false: " — admin: not sent"}[*in.Sent], 300)
+	log.Printf("admin: unknown withdrawal resolved as sent=%v", *in.Sent)
+	return *u, nil
 }
