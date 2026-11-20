@@ -1,0 +1,60 @@
+:root {
+  color-scheme: light;
+  --fg: #1c1917;
+  --muted: #57534e;
+  --line: #e7e5e4;
+  --accent: #0f766e;
+  --danger: #b45309;
+  --bg: #fafaf9;
+}
+* { box-sizing: border-box; }
+body {
+  font: 14px/1.45 system-ui, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  margin: 0;
+  width: 360px;
+  padding: 12px 14px 16px;
+}
+header { margin-bottom: 8px; }
+h1 { font-size: 16px; margin: 0; }
+h2 { font-size: 13px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+label { display: block; margin: 8px 0; font-size: 13px; }
+input, textarea, select, button {
+  font: inherit;
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+button { background: var(--accent); color: #fff; border-color: var(--accent); cursor: pointer; }
+button.secondary { background: #fff; color: var(--fg); border-color: var(--line); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+.row { display: flex; gap: 8px; margin: 8px 0; }
+.row button { flex: 1; }
+.row.end { justify-content: flex-end; }
+.row.end button { width: auto; flex: 0; }
+.muted, .hint { color: var(--muted); font-size: 12px; }
+.hint { margin: 0 0 8px; }
+.msg { padding: 8px; border-radius: 6px; margin: 0 0 8px; background: #ecfdf3; }
+.msg.err { background: #fef3c7; }
+.balance { font-size: 16px; margin: 4px 0 8px; }
+.mono { font-family: ui-monospace, monospace; font-size: 11px; word-break: break-all; }
+.wrap { max-height: 6em; overflow: auto; }
+.words {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 12px;
+  padding: 0;
+  margin: 8px 0;
+}
+.words li { margin-left: 1.2em; }
+.check { display: flex; align-items: center; gap: 8px; }
+.check input { width: auto; margin: 0; }
+.pending { border: 1px solid var(--danger); background: #fff7ed; padding: 8px; border-radius: 8px; margin-bottom: 10px; }
+.qr { display: flex; justify-content: center; margin: 8px 0; }
+.qr svg { width: 180px; height: 180px; background: #fff; }
+.history { list-style: none; padding: 0; margin: 0; }
+.history li { border-top: 1px solid var(--line); padding: 6px 0; font-size: 12px; }

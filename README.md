@@ -621,6 +621,15 @@ withdrawals), `internal/mcp`, `internal/lightning` (fake + phoenixd),
 (bot classification), `internal/sfv` (structured header parsing), `webbotauth`
 (Web Bot Auth sign/verify), `pow`, `client`.
 
+## Browser wallet extension (prototype)
+
+A Manifest V3 browser extension lives in [`extension/`](extension/). It keeps
+a non-custodial Spark wallet in the browser and injects `window.webln` so the
+402 page's "Pay with one click" can work without Alby. See
+[extension/README.md](extension/README.md) for how to build it and load it
+unpacked in Chrome or Firefox. It is an early prototype: Lightning send and
+receive need a Breez API key and Bitcoin mainnet (tiny amounts only).
+
 ## Donations
 
 If Spikes402 is useful to you, you can support it with bitcoin (on-chain):

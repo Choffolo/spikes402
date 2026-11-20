@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Spikes402 Wallet</title>
+    <link rel="stylesheet" href="./popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Spikes402 Wallet</h1>
+      <p id="network-flag" class="muted"></p>
+    </header>
+    <p id="msg" class="msg" hidden></p>
+
+    <section id="view-setup" hidden>
+      <p>Create a wallet in this browser, or restore one from a 12-word phrase. The words never leave this machine.</p>
+      <label>Password (at least 8 characters) <input id="setup-pass" type="password" autocomplete="new-password" /></label>
+      <label>Confirm password <input id="setup-pass2" type="password" autocomplete="new-password" /></label>
+      <div class="row">
+        <button id="btn-create" type="button">Create a new wallet</button>
+        <button id="btn-show-restore" type="button" class="secondary">I have a recovery phrase</button>
+      </div>
+      <div id="restore-box" hidden>
+        <label>Recovery phrase
+          <textarea id="restore-words" rows="3" placeholder="twelve words, separated by spaces"></textarea>
+        </label>
+        <button id="btn-restore" type="button">Restore wallet</button>
+      </div>
+    </section>
+
+    <section id="view-backup" hidden>
+      <p><strong>Write these 12 words down and keep them offline.</strong> They are shown once. Anyone who has them can spend your funds. They are not sent to us — we have no server.</p>
+      <ol id="mnemonic-list" class="words"></ol>
+      <label class="check"><input id="backup-confirm" type="checkbox" /> I have written these words down.</label>
+      <button id="btn-backup-done" type="button" disabled>Done</button>
+    </section>
+
+    <section id="view-unlock" hidden>
+      <p>Unlock your wallet to pay Spikes402 pages and to send or receive sats.</p>
+      <label>Password <input id="unlock-pass" type="password" autocomplete="current-password" /></label>
+      <button id="btn-unlock" type="button">Unlock</button>
+    </section>
+
+    <section id="view-main" hidden>
+      <div id="pending-box" class="pending" hidden>
+        <h2>Confirm payment</h2>
+        <p id="pending-text"></p>
+        <p class="mono" id="pending-origin"></p>
+        <div class="row">
+          <button id="btn-accept" type="button">Pay</button>
+          <button id="btn-decline" type="button" class="secondary">Decline</button>
+        </div>
+      </div>
+
+      <p class="balance">Balance: <strong id="balance">—</strong> sats</p>
+      <p id="lightning-hint" class="hint"></p>
+
+      <h2>Receive</h2>
+      <label>Amount (sats) <input id="recv-amount" type="number" min="1" step="1" value="100" /></label>
+      <button id="btn-receive" type="button">Create Lightning invoice</button>
+      <div id="recv-out" hidden>
+        <div id="recv-qr" class="qr"></div>
+        <p class="mono wrap" id="recv-invoice"></p>
+        <button id="btn-copy-invoice" type="button" class="secondary">Copy invoice</button>
+      </div>
+
+      <h2>Send</h2>
+      <label>Lightning invoice or address
+        <textarea id="send-dest" rows="3" placeholder="lnbc… or name@domain"></textarea>
+      </label>
+      <label>Amount (sats), if the invoice has none
+        <input id="send-amount" type="number" min="1" step="1" />
+      </label>
+      <button id="btn-send" type="button">Send</button>
+
+      <h2>Budgets</h2>
+      <label>Max sats per page payment <input id="set-per-pay" type="number" min="1" step="1" /></label>
+      <label>Max sats per site per day <input id="set-per-site" type="number" min="1" step="1" /></label>
+      <label>Max sats per day (all sites) <input id="set-per-day" type="number" min="1" step="1" /></label>
+      <label class="check"><input id="set-autopay" type="checkbox" /> Auto-pay when a request is within the budget</label>
+      <button id="btn-save-budget" type="button" class="secondary">Save budgets</button>
+
+      <h2>Network</h2>
+      <label>Network
+        <select id="set-network">
+          <option value="regtest">regtest (no real money, no Lightning)</option>
+          <option value="mainnet">mainnet (tiny amounts only)</option>
+        </select>
+      </label>
+      <label>Breez API key (needed for Lightning on mainnet)
+        <input id="set-apikey" type="password" autocomplete="off" placeholder="paste the key, stored only on this computer" />
+      </label>
+      <button id="btn-save-network" type="button" class="secondary">Save network settings</button>
+      <p class="muted">After changing the network or the key, unlock the wallet again.</p>
+
+      <h2>Recent payments</h2>
+      <ul id="history" class="history"></ul>
+
+      <div class="row end">
+        <button id="btn-lock" type="button" class="secondary">Lock</button>
+      </div>
+    </section>
+
+    <script type="module" src="./popup.ts"></script>
+  </body>
+</html>
