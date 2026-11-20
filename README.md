@@ -50,10 +50,13 @@ You need [Go](https://go.dev/dl/) 1.22 or newer.
 
 ```sh
 git clone https://github.com/Choffolo/spikes402 && cd spikes402
-go run ./cmd/demo-origin &                                   # a stand-in website on :8080
-go run ./cmd/spikes402 -config config.example.json &         # the proxy on :8402
-go run ./cmd/spikes-bot -mode pow http://localhost:8402/premium/article
+go build -o bin/ ./cmd/...
+bin/demo-origin & bin/spikes402 -config config.example.json & sleep 1
+bin/spikes-bot -mode pow http://localhost:8402/premium/article
 ```
+
+This starts a stand-in website on port 8080, the proxy on port 8402 in front
+of it, and then the example bot. Stop the servers with `kill %1 %2`.
 
 Expected output:
 
@@ -104,7 +107,7 @@ non-custodial Lightning node by ACINQ. Your keys stay on your server.
    export SPIKES402_SECRET_KEY=$(openssl rand -hex 32)
    export PHOENIXD_PASSWORD=<http-password-limited-access>
    # in your config: "lightning": {"backend": "phoenixd"}
-   go run ./cmd/spikes402 -config config.json
+   bin/spikes402 -config config.json
    ```
 
 phoenixd gets inbound liquidity automatically; the first payments it
@@ -130,8 +133,10 @@ Paying needs a `client.Payer` (your wallet). Only a fake payer exists so far.
   A token cannot be reused, moved to another page, or forged without the
   secret key. Wrong attempts do not burn a valid token.
 - **Not real macaroons.** The `macaroon="…"` field holds this simpler signed
-  token. Standard L402 clients treat it as opaque and work, but macaroon
-  features such as caveats/delegation are not supported.
+  token. The header layout follows L402, so clients that treat the token as
+  an opaque string work; clients that decode macaroons (such as Lightning
+  Labs' own tools) will not understand it yet. Caveats/delegation are not
+  supported.
 - **The secret key** must stay secret and stable: anyone who has it can mint
   tokens. Never commit it; use the environment variable.
 - **Your credentials stay with you:** Spikes402 removes its own `Authorization`

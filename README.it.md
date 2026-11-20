@@ -28,9 +28,9 @@ Serve [Go](https://go.dev/dl/) 1.22 o successivo.
 
 ```sh
 git clone https://github.com/Choffolo/spikes402 && cd spikes402
-go run ./cmd/demo-origin &
-go run ./cmd/spikes402 -config config.example.json &
-go run ./cmd/spikes-bot -mode pow http://localhost:8402/premium/article
+go build -o bin/ ./cmd/...
+bin/demo-origin & bin/spikes402 -config config.example.json & sleep 1
+bin/spikes-bot -mode pow http://localhost:8402/premium/article
 ```
 
 Con `-mode pay` il bot paga con un portafoglio finto invece di lavorare.

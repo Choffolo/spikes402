@@ -1,5 +1,3 @@
 # Local configuration may contain secrets: only config.example.json is tracked.
 /config.json
-/spikes402
-/spikes-bot
-/demo-origin
+/bin/
