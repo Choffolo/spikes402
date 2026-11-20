@@ -1,0 +1,3 @@
+# Local configuration may contain secrets: only config.example.json is tracked.
+/config.json
+/bin/
