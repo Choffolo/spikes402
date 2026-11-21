@@ -163,11 +163,22 @@ async function refresh() {
   document.body.classList.toggle("paused", !!s.paused);
 }
 
+function formatSurge(live, cfg) {
+  if (!(live || []).length) {
+    return (cfg && cfg.enabled) ? "on (no groups yet)" : "off (config file only)";
+  }
+  return live.map((g) => {
+    const demand = Number(g.demand_per_minute || 0).toFixed(1);
+    return `${g.group}: ${g.multiplier}× → ${g.price_sats} sats (${demand}/min)`;
+  }).join("; ");
+}
+
 function renderCurrent(st) {
   const s = st.settings, n = st.gate.node, p = s.current_pow;
   const list = [["Origin", s.origin], ["Paused", s.paused ? "yes (protected paths are free)" : "no"],
     ["Protected", s.protect.join(" ")], ["Price", s.price_sats + " sats"],
     ["Path prices", (s.prices || []).map((r) => r.pattern + " = " + r.price_sats + " sats").join(", ") || "none (default only)"],
+    ["Surge", formatSurge(st.gate.surge, s.surge)],
     ["Proof-of-work", `${p.Algorithm} difficulty ${p.Difficulty}` + (p.MemoryMiB ? `, ${p.MemoryMiB} MiB` : "")],
     ["Invoices / min (all)", s.max_invoices_per_minute], ["Bot identification", s.identify_bots ? "on" : "off"],
     ["Visitor IPs in monitor", s.visitor_ips], ["AI may apply changes", s.ai_can_apply ? "yes" : "no (propose only)"],

@@ -106,6 +106,18 @@ func (p *pendingOffers) len() int {
 	return len(p.offers)
 }
 
+func (p *pendingOffers) nearCap() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.max <= 0 {
+		return false
+	}
+	return len(p.invoices)+p.reserved >= int(float64(p.max)*surgePressureFrac)
+}
+
 // get returns the pending offer for key if it still has at least
 // minLeft before it expires.
 func (p *pendingOffers) get(key string, now time.Time, minLeft time.Duration) (offer, bool) {

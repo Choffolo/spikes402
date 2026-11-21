@@ -140,6 +140,7 @@ func main() {
 
 		Classifier:         classifier,
 		Policies:           cfg.BotPolicies,
+		Surge:              cfg.Surge,
 		Observer:           observer,
 		Argon2MaxMemoryMiB: cfg.Argon2MaxMemoryMiB,
 
@@ -176,6 +177,10 @@ func main() {
 	}
 	if len(cfg.BotPolicies) > 0 {
 		log.Printf("bot policies: %v", cfg.BotPolicies)
+	}
+	if cfg.Surge.Active() {
+		log.Printf("surge pricing on: up to %.2g× if a rule group stays above %.0f 402s/min (step +%.2g every %.3g min, half-life 3 min)",
+			cfg.Surge.MaxMultiplier, cfg.Surge.ThresholdPerMinute, cfg.Surge.Step, cfg.Surge.StepIntervalMinutes)
 	}
 	if cfg.Paused {
 		log.Print("protection is paused: protected paths are served free and no invoices will be created")

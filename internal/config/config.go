@@ -51,6 +51,7 @@ type Config struct {
 	PriceSats            int64              `json:"price_sats"`              // default price per request in sats
 	Protect              []string           `json:"protect"`                 // path patterns that require payment
 	Prices               []gate.PriceRule   `json:"prices,omitempty"`        // optional per-path prices; first match wins
+	Surge                gate.SurgeConfig   `json:"surge,omitempty"`         // optional demand-based price multiplier, off by default
 	Previews             []gate.PreviewRule `json:"previews,omitempty"`      // optional teaser of a protected page on its 402 page; first match wins
 	PowSecondsPerSat     float64            `json:"pow_seconds_per_sat"`     // CPU-core seconds of work per sat, default 10
 	PowDifficulty        int                `json:"pow_difficulty"`          // 0 = derived from price and pow_seconds_per_sat
@@ -265,6 +266,9 @@ func (c *Config) complete() error {
 		if r.PriceSats < 1 || r.PriceSats > maxPriceSats {
 			return fmt.Errorf(`prices[%d].price_sats must be between 1 and %d`, i, maxPriceSats)
 		}
+	}
+	if err := c.checkSurge(); err != nil {
+		return err
 	}
 	if len(c.Previews) > maxPriceRules {
 		return fmt.Errorf(`"previews" can list at most %d rules`, maxPriceRules)
@@ -598,6 +602,7 @@ func (c *Config) Apply(ch Changes) (*Config, error) {
 	n.BotPolicies = maps.Clone(c.BotPolicies)
 	n.Prices = append([]gate.PriceRule(nil), c.Prices...)
 	n.Protect = append([]string(nil), c.Protect...)
+	n.Surge.Groups = maps.Clone(c.Surge.Groups)
 	if ch.PriceSats != nil {
 		n.PriceSats = *ch.PriceSats
 	}
@@ -643,6 +648,7 @@ type Public struct {
 	Protect              []string               `json:"protect"`
 	PriceSats            int64                  `json:"price_sats"`
 	Prices               []gate.PriceRule       `json:"prices"`
+	Surge                gate.SurgeConfig       `json:"surge"`
 	Paused               bool                   `json:"paused"`
 	PowAlgorithm         string                 `json:"pow_algorithm"`
 	PowSecondsPerSat     float64                `json:"pow_seconds_per_sat"`
@@ -666,7 +672,7 @@ type Public struct {
 // Public returns the configuration without secrets.
 func (c *Config) Public() Public {
 	p := Public{
-		Origin: c.Origin, Protect: append([]string(nil), c.Protect...), PriceSats: c.PriceSats, Prices: c.Prices, Paused: c.Paused, PowAlgorithm: c.PowAlgorithm,
+		Origin: c.Origin, Protect: append([]string(nil), c.Protect...), PriceSats: c.PriceSats, Prices: c.Prices, Surge: c.Surge, Paused: c.Paused, PowAlgorithm: c.PowAlgorithm,
 		PowSecondsPerSat: c.PowSecondsPerSat, PowDifficulty: c.PowDifficulty, Argon2MemoryMiB: c.Argon2MemoryMiB,
 		CurrentPoW: c.PoW(c.PriceSats), ChallengeTTLSeconds: c.ChallengeTTLSeconds, ChallengesPerMinute: c.ChallengesPerMinute,
 		MaxInvoicesPerMinute: c.MaxInvoicesPerMinute, MaxPendingInvoices: c.MaxPendingInvoices,
@@ -692,5 +698,44 @@ func (c *Config) GateSettings() gate.Settings {
 		PriceSats: c.PriceSats, Prices: append([]gate.PriceRule(nil), c.Prices...),
 		Protect: append([]string(nil), c.Protect...), Paused: c.Paused,
 		PoW: c.PoW, Policies: c.BotPolicies, ChallengesPerMinute: c.ChallengesPerMinute,
+		Surge: c.Surge,
 	}
+}
+
+// checkSurge validates optional dynamic pricing and fills defaults when
+// it is in use. Group keys must be one of the protect or prices patterns
+// so a typo cannot silently create an unused group.
+func (c *Config) checkSurge() error {
+	if err := c.Surge.Normalize(); err != nil {
+		return err
+	}
+	known := map[string]struct{}{}
+	for _, p := range c.Protect {
+		known[p] = struct{}{}
+	}
+	for _, r := range c.Prices {
+		known[r.Pattern] = struct{}{}
+	}
+	for pat := range c.Surge.Groups {
+		if err := checkPathPattern("surge.groups pattern", pat, c.ProtectCaseSensitive); err != nil {
+			return err
+		}
+		if _, ok := known[pat]; !ok {
+			// allow a case-insensitive match when protect is not case-sensitive
+			if !c.ProtectCaseSensitive {
+				found := false
+				for k := range known {
+					if strings.EqualFold(k, pat) {
+						found = true
+						break
+					}
+				}
+				if found {
+					continue
+				}
+			}
+			return fmt.Errorf("surge.groups %q does not match a protect or prices pattern", pat)
+		}
+	}
+	return nil
 }

@@ -20,6 +20,7 @@ type Settings struct {
 	PoW                 func(priceSats int64) pow.Params
 	Policies            map[string]Policy
 	ChallengesPerMinute int
+	Surge               SurgeConfig
 }
 
 // Settings returns the settings in force. Do not modify the Policies map.
@@ -39,6 +40,10 @@ func (g *Gate) UpdateSettings(s Settings) error {
 	g.limiter.setPerMinute(s.ChallengesPerMinute)
 	s.Prices = append([]PriceRule(nil), s.Prices...)
 	s.Protect = append([]string(nil), s.Protect...)
+	s.Surge = cloneSurge(s.Surge)
+	if g.surge != nil {
+		g.surge.setConfig(s.Surge, surgePatterns(s.Protect, s.Prices))
+	}
 	g.live.Store(&s)
 	return nil
 }
@@ -79,9 +84,10 @@ func (g *Gate) observe(r *http.Request, class botid.Class, o Outcome) {
 
 // Status is a snapshot of the gate's internal state for the dashboard.
 type Status struct {
-	OpenInvoices int        `json:"open_invoices"`
-	SpentTokens  int        `json:"spent_tokens"`
-	Node         NodeStatus `json:"node"`
+	OpenInvoices int                `json:"open_invoices"`
+	SpentTokens  int                `json:"spent_tokens"`
+	Node         NodeStatus         `json:"node"`
+	Surge        []SurgeGroupStatus `json:"surge,omitempty"`
 }
 
 // NodeStatus describes the guard in front of the Lightning node.
@@ -99,5 +105,9 @@ type NodeStatus struct {
 
 // Status returns a snapshot of the gate's state.
 func (g *Gate) Status() Status {
-	return Status{OpenInvoices: g.pending.len(), SpentTokens: g.spent.len(), Node: g.node.status(g.now())}
+	st := Status{OpenInvoices: g.pending.len(), SpentTokens: g.spent.len(), Node: g.node.status(g.now())}
+	if g.surge != nil && g.live.Load().Surge.Active() {
+		st.Surge = g.surgeStatus(g.live.Load(), g.now(), g.underPressure())
+	}
+	return st
 }
