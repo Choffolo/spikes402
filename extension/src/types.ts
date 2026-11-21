@@ -11,7 +11,7 @@ export const defaultSettings = (): Settings => ({
   maxSatsPerPayment: 10,
   maxSatsPerSitePerDay: 100,
   maxSatsPerDay: 500,
-  autoPay: true,
+  siteAllowances: {},
   network: "mainnet",
 });
 
@@ -29,8 +29,10 @@ export type PendingPayment = {
   origin: string;
   invoice: string;
   amountSats: number;
+  costSats: number;
   reason: string;
   createdAt: number;
+  tabId?: number;
 };
 
 export type StoredState = {

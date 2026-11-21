@@ -1,19 +1,26 @@
 export type BudgetSettings = {
-  /** Hard cap for a single page payment. Above this, the payment is refused. */
+  /**
+   * Usual cap for one page payment (invoice amount plus max fees).
+   * If a page costs more than this, the extension asks before paying.
+   * A per-site allowance can raise this for one origin.
+   */
   maxSatsPerPayment: number;
-  /** Soft daily cap for one site origin; going over asks for confirmation. */
+  /** Daily cap for one site origin; going over asks for confirmation. */
   maxSatsPerSitePerDay: number;
-  /** Soft daily cap across every site; going over asks for confirmation. */
+  /** Daily cap across every site; going over asks for confirmation. */
   maxSatsPerDay: number;
-  /** If false, every payment asks for confirmation (still refuses hard caps). */
-  autoPay: boolean;
+  /**
+   * Per-origin raised per-page caps, set when the user chooses
+   * "always allow this price on this site".
+   */
+  siteAllowances: Record<string, number>;
 };
 
 export const defaultBudget: BudgetSettings = {
   maxSatsPerPayment: 10,
   maxSatsPerSitePerDay: 100,
   maxSatsPerDay: 500,
-  autoPay: true,
+  siteAllowances: {},
 };
 
 export type SpendState = {
@@ -28,10 +35,14 @@ export const emptySpend = (day: string): SpendState => ({
   perSite: {},
 });
 
+export type ConfirmCause = "over_payment_cap" | "over_site_day" | "over_global_day";
+
 export type Decision =
   | { action: "refuse"; reason: string }
   | { action: "pay" }
-  | { action: "confirm"; reason: string };
+  | { action: "confirm"; reason: string; cause: ConfirmCause };
+
+export type ConfirmChoice = "once" | "always" | "refuse";
 
 export function todayLocal(now = new Date()): string {
   const y = now.getFullYear();
@@ -46,7 +57,7 @@ export function spendForToday(stored: SpendState | undefined, today: string): Sp
   return stored;
 }
 
-/** Invoice amount plus the fee we are willing to pay, used for daily caps. */
+/** Invoice amount plus the fee we are willing to pay. */
 export function paymentCost(amountSats: number, feeSats: number): number {
   if (!Number.isSafeInteger(amountSats) || !Number.isSafeInteger(feeSats) || amountSats < 0 || feeSats < 0) {
     throw new Error("Payment cost is invalid.");
@@ -56,13 +67,24 @@ export function paymentCost(amountSats: number, feeSats: number): number {
   return total;
 }
 
+/** Effective per-page cap for an origin, including any "always allow" allowance. */
+export function effectivePaymentCap(settings: BudgetSettings, origin: string): number {
+  const extra = settings.siteAllowances[origin] ?? 0;
+  return Math.max(settings.maxSatsPerPayment, extra);
+}
+
+/**
+ * If the page price (amount + fees) fits the per-page cap and both daily
+ * caps, pay with no prompt. Otherwise ask. Amountless and invalid invoices
+ * are still refused.
+ */
 export function decidePayment(input: {
   amountSats: number | null;
   origin: string;
   settings: BudgetSettings;
   spend: SpendState;
   today: string;
-  /** Max routing / SSP fee we will accept; counted against daily caps, not the per-payment cap. */
+  /** Max routing / SSP fee we will accept; counted in every cap. */
   feeSats?: number;
 }): Decision {
   const { amountSats, origin, settings } = input;
@@ -76,32 +98,49 @@ export function decidePayment(input: {
   if (!Number.isInteger(feeSats) || feeSats < 0) {
     return { action: "refuse", reason: "Fee is invalid." };
   }
-  if (amountSats > settings.maxSatsPerPayment) {
+
+  const cost = paymentCost(amountSats, feeSats);
+  const cap = effectivePaymentCap(settings, origin);
+  if (cost > cap) {
     return {
-      action: "refuse",
-      reason: `This invoice is ${amountSats} sats, above the per-payment cap of ${settings.maxSatsPerPayment} sats.`,
+      action: "confirm",
+      cause: "over_payment_cap",
+      reason: `This page costs ${cost} sats (including up to ${feeSats} sats of fees), above the per-page cap of ${cap} sats.`,
     };
   }
 
   const spend = spendForToday(input.spend, input.today);
   const site = spend.perSite[origin] ?? 0;
-  const cost = paymentCost(amountSats, feeSats);
   if (site + cost > settings.maxSatsPerSitePerDay) {
     return {
       action: "confirm",
+      cause: "over_site_day",
       reason: `This would take today's spend on ${origin} to ${site + cost} sats, including up to ${feeSats} sats of fees (limit ${settings.maxSatsPerSitePerDay}).`,
     };
   }
   if (spend.globalSats + cost > settings.maxSatsPerDay) {
     return {
       action: "confirm",
+      cause: "over_global_day",
       reason: `This would take today's total spend to ${spend.globalSats + cost} sats, including up to ${feeSats} sats of fees (limit ${settings.maxSatsPerDay}).`,
     };
   }
-  if (!settings.autoPay) {
-    return { action: "confirm", reason: "Auto-pay is off. Confirm this payment?" };
-  }
   return { action: "pay" };
+}
+
+const ALLOWANCE_MAX_SITES = 100;
+
+/** Remember a higher per-page cap for one origin. */
+export function withSiteAllowance(settings: BudgetSettings, origin: string, costSats: number): BudgetSettings {
+  if (!Number.isInteger(costSats) || costSats < 1) return settings;
+  const current = settings.siteAllowances[origin] ?? 0;
+  const next = { ...settings.siteAllowances, [origin]: Math.max(current, costSats) };
+  const keys = Object.keys(next);
+  if (keys.length > ALLOWANCE_MAX_SITES && !(origin in settings.siteAllowances)) {
+    const drop = keys.find((k) => k !== origin);
+    if (drop) delete next[drop];
+  }
+  return { ...settings, siteAllowances: next };
 }
 
 export function recordSpend(spend: SpendState, today: string, origin: string, amountSats: number): SpendState {

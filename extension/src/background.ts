@@ -1,4 +1,13 @@
-import { decidePayment, paymentCost, recordSpend, spendForToday, todayLocal } from "./budget";
+import { applyTabBadge, type TabPrice } from "./badge";
+import {
+  decidePayment,
+  paymentCost,
+  recordSpend,
+  spendForToday,
+  todayLocal,
+  withSiteAllowance,
+  type ConfirmChoice,
+} from "./budget";
 import { encryptMnemonic, generateMnemonic, isValidMnemonic, normalizeMnemonic } from "./crypto";
 import { InvoiceError, isBolt11, parseBolt11AmountSats } from "./invoice";
 import { lightningHint } from "./backend";
@@ -16,7 +25,8 @@ import {
 import type { PaymentRecord, PendingPayment, Settings, WalletInfo } from "./types";
 
 const CONFIRM_TTL_MS = 5 * 60 * 1000;
-const waiters = new Map<string, { resolve: (ok: boolean) => void }>();
+const waiters = new Map<string, { resolve: (choice: ConfirmChoice) => void }>();
+const tabPrices = new Map<number, TabPrice>();
 
 /** Serializes budget checks and payments so two pages cannot double-spend a cap. */
 let budgetTail: Promise<void> = Promise.resolve();
@@ -38,9 +48,10 @@ type PopupMsg =
   | { type: "saveSettings"; settings: Partial<Settings> }
   | { type: "receive"; amountSats: number }
   | { type: "send"; destination: string; amountSats?: number }
-  | { type: "confirmPayment"; id: string; accept: boolean };
+  | { type: "confirmPayment"; id: string; choice: ConfirmChoice };
 
 type PageMsg = { type: "webln"; method: "enable" | "getInfo" | "sendPayment"; origin: string; invoice?: string };
+type PagePriceMsg = { type: "pagePrice"; amountSats: number | null };
 
 chrome.runtime.onInstalled.addListener(() => {
   void ensureWalletHost();
@@ -50,7 +61,11 @@ chrome.runtime.onStartup?.addListener(() => {
   void ensureWalletHost();
 });
 
-chrome.runtime.onMessage.addListener((msg: PopupMsg | PageMsg, sender, sendResponse) => {
+chrome.tabs.onRemoved.addListener((tabId) => {
+  tabPrices.delete(tabId);
+});
+
+chrome.runtime.onMessage.addListener((msg: PopupMsg | PageMsg | PagePriceMsg, sender, sendResponse) => {
   if (!msg || typeof msg !== "object" || !("type" in msg)) return;
   if ((msg as { target?: string }).target === "wallet") return; // for the wallet host
   handle(msg, sender)
@@ -59,7 +74,11 @@ chrome.runtime.onMessage.addListener((msg: PopupMsg | PageMsg, sender, sendRespo
   return true;
 });
 
-async function handle(msg: PopupMsg | PageMsg, sender: chrome.runtime.MessageSender): Promise<unknown> {
+async function handle(msg: PopupMsg | PageMsg | PagePriceMsg, sender: chrome.runtime.MessageSender): Promise<unknown> {
+  if (msg.type === "pagePrice") {
+    handlePagePrice(msg, sender);
+    return { ok: true };
+  }
   if (msg.type !== "webln" && !isExtensionPage(sender, chrome.runtime.getURL(""))) {
     throw new Error("This action is only available from the extension popup.");
   }
@@ -82,7 +101,7 @@ async function handle(msg: PopupMsg | PageMsg, sender: chrome.runtime.MessageSen
     case "send":
       return sendFromPopup(msg.destination, msg.amountSats);
     case "confirmPayment":
-      return resolvePending(msg.id, msg.accept);
+      return resolvePending(msg.id, msg.choice);
     case "webln":
       return handleWebln(msg, sender);
     default:
@@ -106,7 +125,6 @@ async function snapshot(): Promise<{ info: WalletInfo; settings: Settings; histo
     try {
       const w = await walletCall<{ balanceSats: number; pubkey: string }>("getInfo");
       info.balanceSats = w.balanceSats;
-      info.pubkey = w.pubkey;
     } catch (e) {
       info.lightningHint = e instanceof Error ? e.message : String(e);
     }
@@ -185,8 +203,7 @@ async function handleWebln(msg: PageMsg, sender: chrome.runtime.MessageSender): 
 
   if (msg.method === "enable") return { enabled: true };
   if (msg.method === "getInfo") {
-    const w = await walletCall<{ balanceSats: number; pubkey: string }>("getInfo");
-    return { node: { alias: "Spikes402", pubkey: w.pubkey }, methods: ["sendPayment", "getInfo"] };
+    return { node: { alias: "Spikes402" }, methods: ["sendPayment", "getInfo"] };
   }
   if (msg.method !== "sendPayment" || !msg.invoice) throw new Error("sendPayment needs an invoice.");
   const invoice = msg.invoice;
@@ -209,13 +226,15 @@ async function handleWebln(msg: PageMsg, sender: chrome.runtime.MessageSender): 
   }
   if (first.action === "confirm") {
     confirmReason = first.reason;
-    const accepted = await askUser({
+    const choice = await askUser({
       origin,
-      invoice: invoice,
+      invoice,
       amountSats: amountSats ?? 0,
+      costSats: paymentCost(amountSats ?? 0, feeSats),
       reason: first.reason,
+      tabId: sender.tab?.id,
     });
-    if (!accepted) {
+    if (choice === "refuse") {
       await log(origin, amountSats ?? 0, invoice, "refused", "You declined the payment.");
       throw new Error("Payment declined.");
     }
@@ -227,13 +246,6 @@ async function handleWebln(msg: PageMsg, sender: chrome.runtime.MessageSender): 
       if (again.action !== "pay") {
         await log(origin, amountSats ?? 0, invoice, "refused", again.reason);
         throw new Error(again.reason);
-      }
-    } else if (amountSats !== null) {
-      const s = await loadState();
-      if (amountSats > s.settings.maxSatsPerPayment) {
-        const reason = `This invoice is ${amountSats} sats, above the per-payment cap of ${s.settings.maxSatsPerPayment} sats.`;
-        await log(origin, amountSats, invoice, "refused", reason);
-        throw new Error(reason);
       }
     }
     const s = await loadState();
@@ -247,6 +259,7 @@ async function handleWebln(msg: PageMsg, sender: chrome.runtime.MessageSender): 
       const recorded = paymentCost(amountSats ?? 0, res.feeSats ?? feeSats);
       await saveSpend(recordSpend(spend, today, origin, recorded));
       await log(origin, recorded, invoice, "sent", res.detail);
+      markPaid(sender.tab?.id, amountSats ?? recorded);
       return { preimage: res.preimage };
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
@@ -269,32 +282,81 @@ async function decideWebln(origin: string, amountSats: number | null, feeSats: n
   });
 }
 
-function askUser(p: { origin: string; invoice: string; amountSats: number; reason: string }): Promise<boolean> {
+function askUser(p: Omit<PendingPayment, "id" | "createdAt">): Promise<ConfirmChoice> {
   const id = crypto.randomUUID();
   const pending: PendingPayment = { ...p, id, createdAt: Date.now() };
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       waiters.delete(id);
       void setPending(undefined);
-      resolve(false);
+      markConfirm(pending.tabId, false);
+      resolve("refuse");
     }, CONFIRM_TTL_MS);
     waiters.set(id, {
-      resolve: (ok) => {
+      resolve: (choice) => {
         clearTimeout(timer);
-        resolve(ok);
+        resolve(choice);
       },
     });
-    void setPending(pending).then(() => openPopup(pending));
+    void setPending(pending).then(() => {
+      markConfirm(pending.tabId, true);
+      void openPopup(pending);
+    });
   });
 }
 
-async function resolvePending(id: string, accept: boolean): Promise<{ ok: true }> {
+async function resolvePending(id: string, choice: ConfirmChoice): Promise<{ ok: true }> {
   const s = await loadState();
   if (!s.pending || s.pending.id !== id) throw new Error("This confirmation has expired.");
+  const pending = s.pending;
+  if (choice === "always") {
+    await saveSettings(withSiteAllowance(s.settings, pending.origin, pending.costSats));
+  }
   await setPending(undefined);
-  waiters.get(id)?.resolve(accept);
+  markConfirm(pending.tabId, false);
+  waiters.get(id)?.resolve(choice);
   waiters.delete(id);
   return { ok: true };
+}
+
+function handlePagePrice(msg: PagePriceMsg, sender: chrome.runtime.MessageSender): void {
+  const tabId = sender.tab?.id;
+  if (tabId === undefined) return;
+  const amount =
+    typeof msg.amountSats === "number" && Number.isFinite(msg.amountSats) && msg.amountSats > 0
+      ? Math.floor(msg.amountSats)
+      : undefined;
+  if (!amount) {
+    tabPrices.delete(tabId);
+    void applyTabBadge(tabId, undefined);
+    return;
+  }
+  const prev = tabPrices.get(tabId);
+  const paid = !!prev?.paid && prev.amountSats === amount;
+  const state: TabPrice = { amountSats: amount, paid, needsConfirm: !!prev?.needsConfirm };
+  tabPrices.set(tabId, state);
+  void applyTabBadge(tabId, state);
+}
+
+function markPaid(tabId: number | undefined, amountSats: number): void {
+  if (tabId === undefined) return;
+  const prev = tabPrices.get(tabId);
+  const state: TabPrice = {
+    amountSats: prev?.amountSats ?? amountSats,
+    paid: true,
+    needsConfirm: false,
+  };
+  tabPrices.set(tabId, state);
+  void applyTabBadge(tabId, state);
+}
+
+function markConfirm(tabId: number | undefined, needsConfirm: boolean): void {
+  if (tabId === undefined) return;
+  const prev = tabPrices.get(tabId);
+  if (!prev) return;
+  const state = { ...prev, needsConfirm };
+  tabPrices.set(tabId, state);
+  void applyTabBadge(tabId, state);
 }
 
 async function log(
@@ -318,7 +380,7 @@ async function openPopup(pending?: { origin: string; amountSats: number }) {
   try {
     if (chrome.action.openPopup) await chrome.action.openPopup();
   } catch {
-    /* some Chrome views refuse this; the badge still marks a pending payment */
+    /* some Chrome views refuse this; the toolbar badge still shows the page price */
   }
   const summary = pending
     ? `Pay ${pending.amountSats} sats to ${pending.origin}? Open the extension to confirm or decline.`

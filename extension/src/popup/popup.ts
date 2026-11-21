@@ -68,7 +68,6 @@ async function refresh() {
   ($("set-per-pay") as HTMLInputElement).value = String(settings.maxSatsPerPayment);
   ($("set-per-site") as HTMLInputElement).value = String(settings.maxSatsPerSitePerDay);
   ($("set-per-day") as HTMLInputElement).value = String(settings.maxSatsPerDay);
-  ($("set-autopay") as HTMLInputElement).checked = settings.autoPay;
   ($("set-network") as HTMLSelectElement).value = settings.network;
 
   const list = $("history");
@@ -203,7 +202,6 @@ $("btn-save-budget").addEventListener("click", async () => {
         maxSatsPerPayment: Number(($("set-per-pay") as HTMLInputElement).value),
         maxSatsPerSitePerDay: Number(($("set-per-site") as HTMLInputElement).value),
         maxSatsPerDay: Number(($("set-per-day") as HTMLInputElement).value),
-        autoPay: ($("set-autopay") as HTMLInputElement).checked,
       },
     });
     showMsg("Budgets saved.");
@@ -228,19 +226,16 @@ $("btn-save-network").addEventListener("click", async () => {
   }
 });
 
-$("btn-accept").addEventListener("click", async () => {
+async function confirmPending(choice: "once" | "always" | "refuse") {
   const id = $("pending-box").dataset.id;
   if (!id) return;
-  await call({ type: "confirmPayment", id, accept: true });
+  await call({ type: "confirmPayment", id, choice });
   await refresh();
-});
+}
 
-$("btn-decline").addEventListener("click", async () => {
-  const id = $("pending-box").dataset.id;
-  if (!id) return;
-  await call({ type: "confirmPayment", id, accept: false });
-  await refresh();
-});
+$("btn-accept-once").addEventListener("click", () => void confirmPending("once"));
+$("btn-accept-always").addEventListener("click", () => void confirmPending("always"));
+$("btn-decline").addEventListener("click", () => void confirmPending("refuse"));
 
 document.addEventListener("DOMContentLoaded", () => {
   void refresh().catch((e) => showMsg(e instanceof Error ? e.message : String(e), true));

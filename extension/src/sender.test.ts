@@ -27,15 +27,13 @@ describe("pageOrigin", () => {
 
 describe("sanitizeSettings", () => {
   it("accepts well-formed values and rejects NaN, fractions, and zero", () => {
-    expect(sanitizeSettings({ maxSatsPerPayment: 10, autoPay: true, network: "mainnet" })).toEqual({
+    expect(sanitizeSettings({ maxSatsPerPayment: 10, network: "mainnet" })).toEqual({
       maxSatsPerPayment: 10,
-      autoPay: true,
       network: "mainnet",
     });
     expect(() => sanitizeSettings({ maxSatsPerPayment: Number.NaN })).toThrow(/whole number/);
     expect(() => sanitizeSettings({ maxSatsPerDay: 1.5 })).toThrow(/whole number/);
     expect(() => sanitizeSettings({ maxSatsPerSitePerDay: 0 })).toThrow(/whole number/);
-    expect(() => sanitizeSettings({ autoPay: "yes" })).toThrow(/true or false/);
     expect(() => sanitizeSettings({ network: "testnet" })).toThrow(/mainnet or regtest/);
   });
 });

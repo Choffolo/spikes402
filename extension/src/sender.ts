@@ -35,7 +35,6 @@ export function sanitizeSettings(patch: Record<string, unknown>): {
   maxSatsPerPayment?: number;
   maxSatsPerSitePerDay?: number;
   maxSatsPerDay?: number;
-  autoPay?: boolean;
   network?: "regtest" | "mainnet";
 } {
   const out: ReturnType<typeof sanitizeSettings> = {};
@@ -46,10 +45,6 @@ export function sanitizeSettings(patch: Record<string, unknown>): {
       throw new Error(`Settings: ${key} must be a whole number of sats between 1 and ${MAX_CAP}.`);
     }
     out[key] = n;
-  }
-  if (patch.autoPay !== undefined) {
-    if (typeof patch.autoPay !== "boolean") throw new Error("Settings: autoPay must be true or false.");
-    out.autoPay = patch.autoPay;
   }
   if (patch.network !== undefined) {
     if (patch.network !== "regtest" && patch.network !== "mainnet") {

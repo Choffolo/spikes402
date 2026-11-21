@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { decidePayment, defaultBudget, emptySpend, recordSpend, spendForToday } from "./budget";
+import {
+  decidePayment,
+  defaultBudget,
+  effectivePaymentCap,
+  emptySpend,
+  recordSpend,
+  spendForToday,
+  withSiteAllowance,
+} from "./budget";
 
 const origin = "https://example.com";
 const today = "2026-11-20";
@@ -12,57 +20,79 @@ describe("decidePayment", () => {
     expect(decidePayment({ ...base, amountSats: 1.5 }).action).toBe("refuse");
   });
 
-  it("refuses amounts above the per-payment cap", () => {
-    const d = decidePayment({ ...base, amountSats: 11 });
-    expect(d.action).toBe("refuse");
-    if (d.action !== "refuse") throw new Error("expected refuse");
-    expect(d.reason).toMatch(/per-payment cap of 10/);
-  });
-
-  it("pays silently when auto-pay is on and all caps fit", () => {
+  it("pays automatically when the page price fits every cap", () => {
     expect(decidePayment({ ...base, amountSats: 10 })).toEqual({ action: "pay" });
+    expect(decidePayment({ ...base, amountSats: 5, feeSats: 5 })).toEqual({ action: "pay" });
   });
 
-  it("asks for confirmation when auto-pay is off, even inside the budget", () => {
-    const d = decidePayment({
-      ...base,
-      amountSats: 2,
-      settings: { ...defaultBudget, autoPay: false },
-    });
+  it("asks (does not refuse) when the price is above the per-page cap", () => {
+    const d = decidePayment({ ...base, amountSats: 11 });
     expect(d.action).toBe("confirm");
+    if (d.action !== "confirm") throw new Error("expected confirm");
+    expect(d.cause).toBe("over_payment_cap");
+    expect(d.reason).toMatch(/above the per-page cap of 10/);
   });
 
-  it("asks for confirmation when the site daily cap would be exceeded", () => {
+  it("counts fees toward the per-page cap", () => {
+    // 10 sat invoice + 5 sat fee is 15, above the 10-sat cap.
+    const d = decidePayment({ ...base, amountSats: 10, feeSats: 5 });
+    expect(d.action).toBe("confirm");
+    if (d.action !== "confirm") throw new Error("expected confirm");
+    expect(d.cause).toBe("over_payment_cap");
+    expect(d.reason).toMatch(/15 sats/);
+    expect(decidePayment({ ...base, amountSats: 10, feeSats: 0 }).action).toBe("pay");
+  });
+
+  it("asks when the site daily cap would be exceeded", () => {
     const spend = recordSpend(emptySpend(today), today, origin, 95);
     const d = decidePayment({ ...base, amountSats: 10, spend });
     expect(d.action).toBe("confirm");
     if (d.action !== "confirm") throw new Error("expected confirm");
+    expect(d.cause).toBe("over_site_day");
     expect(d.reason).toMatch(/example.com/);
   });
 
-  it("asks for confirmation when the global daily cap would be exceeded", () => {
+  it("asks when the global daily cap would be exceeded", () => {
     const spend = recordSpend(emptySpend(today), today, "https://other.test", 495);
     const d = decidePayment({ ...base, amountSats: 10, spend });
     expect(d.action).toBe("confirm");
     if (d.action !== "confirm") throw new Error("expected confirm");
+    expect(d.cause).toBe("over_global_day");
     expect(d.reason).toMatch(/total spend/);
   });
 
-  it("counts fees against the daily caps, not the per-payment cap", () => {
+  it("counts fees against the daily caps as well", () => {
     const spend = recordSpend(emptySpend(today), today, origin, 90);
-    // 10 sat invoice + 5 sat fee would be 15, still under the 10-sat per-payment cap
-    // check, but 90+15=105 exceeds the 100-sat site day cap.
-    const d = decidePayment({ ...base, amountSats: 10, feeSats: 5, spend });
+    const settings = { ...defaultBudget, maxSatsPerPayment: 20 };
+    const d = decidePayment({ ...base, settings, amountSats: 10, feeSats: 5, spend });
     expect(d.action).toBe("confirm");
     if (d.action !== "confirm") throw new Error("expected confirm");
-    expect(d.reason).toMatch(/including up to 5 sats of fees/);
-    // Without the fee, 90+10 fits the site cap.
-    expect(decidePayment({ ...base, amountSats: 10, feeSats: 0, spend }).action).toBe("pay");
+    expect(d.cause).toBe("over_site_day");
+    expect(decidePayment({ ...base, settings, amountSats: 10, feeSats: 0, spend }).action).toBe("pay");
+  });
+
+  it("pays automatically when a site allowance covers this price", () => {
+    const settings = withSiteAllowance(defaultBudget, origin, 15);
+    expect(effectivePaymentCap(settings, origin)).toBe(15);
+    expect(decidePayment({ ...base, settings, amountSats: 10, feeSats: 5 }).action).toBe("pay");
+    // Other sites still use the default cap.
+    const other = decidePayment({ ...base, settings, origin: "https://other.test", amountSats: 10, feeSats: 5 });
+    expect(other.action).toBe("confirm");
   });
 
   it("resets spend on a new day", () => {
     const yesterday = recordSpend(emptySpend("2026-11-19"), "2026-11-19", origin, 100);
     expect(spendForToday(yesterday, today)).toEqual(emptySpend(today));
     expect(decidePayment({ ...base, amountSats: 10, spend: yesterday }).action).toBe("pay");
+  });
+});
+
+describe("withSiteAllowance", () => {
+  it("keeps the higher of the existing allowance and the new price", () => {
+    const once = withSiteAllowance(defaultBudget, origin, 15);
+    const twice = withSiteAllowance(once, origin, 12);
+    expect(twice.siteAllowances[origin]).toBe(15);
+    const up = withSiteAllowance(once, origin, 20);
+    expect(up.siteAllowances[origin]).toBe(20);
   });
 });

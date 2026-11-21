@@ -3,7 +3,7 @@
 A small Manifest V3 extension that keeps a **non-custodial** Lightning
 wallet in your browser and injects [`window.webln`](https://www.webln.guide/)
 so a [Spikes402](https://github.com/Choffolo/spikes402) 402 page can pay
-with one click (or automatically, when the amount is within your budget).
+automatically when the amount is within your budget.
 
 Keys never leave this machine. There is no Spikes402 server for the wallet.
 The wallet uses the official [Spark SDK](https://docs.spark.money/wallets/typescript)
@@ -23,16 +23,24 @@ On mainnet, use only tiny amounts.
   worker). The host locks itself after 15 minutes of inactivity.
 - Popup: balance, Receive (Lightning invoice + QR), Send to a Lightning
   invoice or a Spark address, budget settings, payment history.
-- Budgets: max sats per page payment (default 10), max sats per site per
-  day (default 100), global daily cap (default 500), auto-pay on/off.
+- Budgets: max sats per page payment (default 10, invoice plus fees), max
+  sats per site per day (default 100), global daily cap (default 500).
+  Pages that fit all three caps are paid automatically. If a page costs
+  more, the popup asks whether to pay once, always allow this price on
+  this site, or decline. "Always allow" raises the per-page cap for that
+  origin only; later visits still respect the daily caps.
+- Toolbar badge: the number of sats the current tab's page costs to open
+  (read from the 402 invoice on the page). The badge is cleared when you
+  navigate away. Colour is muted for the price, teal after a successful
+  pay, and amber if a confirmation is waiting.
 - `window.webln` on http(s) pages: `enable`, `sendPayment`, `getInfo`.
-  `sendPayment` decodes the invoice amount, refuses amountless invoices and
-  amounts above the per-payment cap, pays silently when auto-pay is on and
-  the daily caps still fit, and otherwise asks you to confirm in the popup
-  (the page origin is shown). After a Lightning payment the extension waits
-  for the payment preimage, then checks locally that `sha256(preimage)`
-  equals the invoice's payment hash (needed for WebLN / L402). Daily budget
-  caps include the Lightning fee, not only the invoice amount.
+  `getInfo` returns only a node alias and the method list (no identity
+  key or pubkey). `sendPayment` decodes the invoice amount, verifies the
+  BOLT11 bech32 checksum, and refuses amountless invoices. After a
+  Lightning payment the extension waits for the payment preimage, then
+  checks locally that `sha256(preimage)` equals the invoice's payment
+  hash (needed for WebLN / L402). Every cap includes the Lightning fee,
+  not only the invoice amount.
 - Default network is **Bitcoin mainnet**. Spark **regtest** is available
   for development (no real money). Creating a Lightning invoice on regtest
   works without an API key; paying or topping up from a real wallet such
@@ -122,8 +130,8 @@ Gaps compared to Chrome:
 - No offscreen documents: a small "wallet host" window is opened instead.
   Do not close it while you want the wallet unlocked.
 - `chrome.action.openPopup` may be missing; if a payment needs
-  confirmation, look for the `!` badge on the toolbar icon and open the
-  popup yourself.
+  confirmation, the toolbar badge turns amber (it still shows the page
+  price) and a notification may appear; open the popup yourself.
 - Store review on addons.mozilla.org is stricter for wallets. This
   prototype is meant to be loaded temporarily, not published yet.
 
@@ -151,11 +159,12 @@ Gaps compared to Chrome:
 
 ## Tests
 
-Unit tests cover budget decisions (silent pay, confirm, refuse, day reset,
-fees on daily caps), BOLT11 amount and payment-hash parsing, local preimage
-checks, mnemonic generation and password encryption, sender/origin and
-settings checks, and Spark helpers (network mapping, fee cap, address
-shape, payment status).
+Unit tests cover budget decisions (silent pay when a page fits, confirm
+when it does not, site allowances, refuse amountless invoices, day reset,
+fees on every cap), toolbar badge text, BOLT11 amount, checksum and
+payment-hash parsing, local preimage checks, mnemonic generation and
+password encryption, sender/origin and settings checks, and Spark helpers
+(network mapping, fee cap, address shape, payment status).
 
 ```sh
 npm test
