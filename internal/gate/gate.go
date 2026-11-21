@@ -99,6 +99,9 @@ type Gate struct {
 
 	preview *previewer // nil: no teasers
 
+	invoices *invoiceCache // looks up whether a 402 invoice has been paid
+	claimLim *rateLimiter  // polls of /.spikes402/claim, per client
+
 	nodeLog  rateLog // why no invoice was offered
 	classLog rateLog // bot classifications
 }
@@ -124,9 +127,12 @@ func New(opt Options) *Gate {
 
 		preview:  newPreviewer(opt),
 		argon:    newArgonBudget(opt.Argon2MaxMemoryMiB),
+		invoices: newInvoiceCache(opt.Lightning),
+		claimLim: newRateLimiter(claimPerMinute),
 		nodeLog:  rateLog{perMinute: 1},
 		classLog: rateLog{perMinute: 60},
 	}
+	g.invoices.now = func() time.Time { return g.now() }
 	g.live.Store(&Settings{
 		PriceSats: opt.PriceSats, Prices: append([]PriceRule(nil), opt.Prices...),
 		Protect: append([]string(nil), opt.Protect...), Paused: opt.Paused,
@@ -141,8 +147,8 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "URI too long", http.StatusRequestURITooLong)
 		return
 	}
-	if r.URL.Path == WorkerPath {
-		serveWorker(w, r)
+	if strings.HasPrefix(r.URL.Path, ReservedPrefix) {
+		g.serveReserved(w, r)
 		return
 	}
 	passes := takePassCookies(r) // read before session() removes them
@@ -515,6 +521,7 @@ type l402Offer struct {
 	Token   string `json:"token"`
 	Invoice string `json:"invoice"`
 	Usage   string `json:"usage"`
+	Claim   string `json:"claim,omitempty"` // GET /.spikes402/claim with Authorization: Bearer <token>
 }
 
 type powOffer struct {
@@ -651,7 +658,8 @@ func (g *Gate) writeChallenge(w http.ResponseWriter, r *http.Request, o offer, p
 		body.L402 = &l402Offer{
 			Token:   o.token,
 			Invoice: o.invoice,
-			Usage:   `pay the invoice, then send "Authorization: L402 <token>:<preimage hex>"`,
+			Usage:   `pay the invoice, then send "Authorization: L402 <token>:<preimage hex>". To learn that an external wallet paid, GET ` + ClaimPath + ` with "Authorization: Bearer <token>"; when paid, the body contains the preimage.`,
+			Claim:   ClaimPath,
 		}
 	}
 	h.Add("WWW-Authenticate", powHeader)

@@ -30,6 +30,7 @@ type fakeInvoice struct {
 	preimage []byte
 	amount   int64
 	expires  time.Time
+	paid     bool
 }
 
 // FakeWithdrawal records one Withdraw call.
@@ -89,12 +90,30 @@ func (f *Fake) Pay(paymentRequest string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	inv, ok := f.invoices[hashHex]
-	if !ok || !f.now().Before(inv.expires) {
+	if !ok || inv.paid || !f.now().Before(inv.expires) {
 		return "", ErrUnknownInvoice
 	}
-	delete(f.invoices, hashHex)
+	inv.paid = true
+	f.invoices[hashHex] = inv
 	f.balance += inv.amount
 	return hex.EncodeToString(inv.preimage), nil
+}
+
+// LookupIncoming implements IncomingLookup.
+func (f *Fake) LookupIncoming(_ context.Context, paymentHash [32]byte) (IncomingPayment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	inv, ok := f.invoices[hex.EncodeToString(paymentHash[:])]
+	if !ok {
+		return IncomingPayment{}, ErrNotFound
+	}
+	out := IncomingPayment{PaymentHash: paymentHash, Expired: !f.now().Before(inv.expires), Paid: inv.paid}
+	if inv.paid {
+		copy(out.Preimage[:], inv.preimage)
+		out.ReceivedSat = inv.amount
+		out.Expired = false
+	}
+	return out, nil
 }
 
 // NodeInfo implements Inspector.

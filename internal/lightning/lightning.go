@@ -22,6 +22,23 @@ type Backend interface {
 	CreateInvoice(ctx context.Context, amountSat int64, memo string, expiry time.Duration) (Invoice, error)
 }
 
+// IncomingPayment is the status of an invoice we created.
+type IncomingPayment struct {
+	PaymentHash [32]byte
+	Preimage    [32]byte // set when Paid is true
+	Paid        bool
+	Expired     bool
+	ReceivedSat int64
+}
+
+// IncomingLookup looks up a received payment by hash. The limited-access
+// phoenixd password can do this (GET /payments/incoming/{paymentHash}).
+// The fake backend implements it too, so tests and the demo can wait
+// for a payment the same way.
+type IncomingLookup interface {
+	LookupIncoming(ctx context.Context, paymentHash [32]byte) (IncomingPayment, error)
+}
+
 // NodeInfo is what the admin dashboard shows about the node.
 type NodeInfo struct {
 	NodeID       string `json:"node_id"`

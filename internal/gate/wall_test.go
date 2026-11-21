@@ -45,6 +45,7 @@ func TestEnergyWallPage(t *testing.T) {
 		`class="ways"`,
 		`width="160"`,
 		`id="webln-pay"`, // the Lightning invoice flow is still there
+		`id="open-wallet"`, `id="pay-wait"`, "Open in wallet",
 		"data:image/png;base64,",
 	} {
 		if !strings.Contains(body, want) {
@@ -69,8 +70,8 @@ func TestEnergyWallPage(t *testing.T) {
 	if strings.Contains(csp, "unsafe-eval") || strings.Contains(csp, "script-src 'unsafe") || strings.Contains(csp, "*") {
 		t.Errorf("CSP too loose: %s", csp)
 	}
-	if got := len(inlineScripts(body)); got != 2 {
-		t.Errorf("%d inline scripts, want 2 (wallet, puzzle)", got)
+	if got := len(inlineScripts(body)); got != 3 {
+		t.Errorf("%d inline scripts, want 3 (wallet, invoice wait, puzzle)", got)
 	}
 	// Machine-readable parts are unchanged.
 	if len(rec.Header().Values("WWW-Authenticate")) != 2 {
@@ -139,7 +140,7 @@ func TestArgon2idHidesThePuzzle(t *testing.T) {
 	f.pow = pow.Params{Algorithm: pow.Argon2id, Difficulty: 4, MemoryMiB: 1}
 	rec := f.get("/premium/article", "", "text/html")
 	body := rec.Body.String()
-	if rec.Code != http.StatusPaymentRequired || strings.Contains(body, `id="pow-box"`) || len(inlineScripts(body)) != 1 {
+	if rec.Code != http.StatusPaymentRequired || strings.Contains(body, `id="pow-box"`) || len(inlineScripts(body)) != 2 {
 		t.Fatalf("Argon2id page offers a puzzle the browser cannot solve: %d", rec.Code)
 	}
 }

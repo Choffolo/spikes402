@@ -37,14 +37,20 @@ func passName(resHash string) string { return passPrefix + resHash[:8] }
 
 // issuePass sets the pass cookie for the resource of r.
 func (g *Gate) issuePass(w http.ResponseWriter, r *http.Request, id string) {
-	res := hashResource(resource(r))
-	pass, err := g.sign.sign(claims{ID: id, Resource: res, Expires: g.now().Add(PassTTL).Unix(), Kind: "pass"})
+	g.issuePassFor(w, r, id, hashResource(resource(r)))
+}
+
+// issuePassFor sets the pass cookie for a resource hash (for example the
+// one already stored in a 402 token). The cookie path is / so a claim
+// at /.spikes402/claim can unlock the original page.
+func (g *Gate) issuePassFor(w http.ResponseWriter, r *http.Request, id, resHash string) {
+	pass, err := g.sign.sign(claims{ID: id, Resource: resHash, Expires: g.now().Add(PassTTL).Unix(), Kind: "pass"})
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name: passName(res), Value: pass, Path: "/", MaxAge: int(PassTTL / time.Second),
+		Name: passName(resHash), Value: pass, Path: "/", MaxAge: int(PassTTL / time.Second),
 		HttpOnly: true, Secure: g.scheme(r) == "https", SameSite: http.SameSiteStrictMode,
 	})
 	w.Header().Set("Cache-Control", protectedCacheControl)

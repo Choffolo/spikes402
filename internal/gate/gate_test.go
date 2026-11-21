@@ -155,8 +155,8 @@ func TestHTMLPage(t *testing.T) {
 	// Every script in the page is exactly what the CSP hash covers.
 	csp := rec.Header().Get("Content-Security-Policy")
 	scripts := inlineScripts(body)
-	if len(scripts) != 2 || !strings.Contains(csp, "connect-src 'self'") {
-		t.Fatalf("want two inline scripts and connect-src 'self', got %d, CSP %q", len(scripts), csp)
+	if len(scripts) != 3 || !strings.Contains(csp, "connect-src 'self'") {
+		t.Fatalf("want hashed inline scripts and connect-src 'self', got %d, CSP %q", len(scripts), csp)
 	}
 	for _, js := range scripts {
 		if want := "sha256-" + base64.StdEncoding.EncodeToString(sha256Sum([]byte(js))); !strings.Contains(csp, want) {
