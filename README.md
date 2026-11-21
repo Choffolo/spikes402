@@ -48,8 +48,13 @@ Free paths are forwarded to your website directly, with no challenge.
    [WebLN](https://www.webln.guide/) wallet is in the browser, a "Pay with
    one click" button also appears, and the page tries to pay once on load
    with the invoice already shown (no second invoice). If the payment fits
-   the wallet's budget, that can succeed without a further click. Without
-   WebLN the page is unchanged.
+   the wallet's budget, that can succeed without a further click. After
+   paying, the page swaps the proof for a **pass**: a cookie (HttpOnly,
+   SameSite=Strict, one page, 60 seconds) and then loads the page for real, so
+   its CSS, images and scripts work, files download normally, and a reload
+   within a minute does not pay again. Without WebLN the page is unchanged.
+   (Paying with a QR code and an external wallet does not unlock the page yet;
+   see "Known limits".)
 2. **Pay:** paying the invoice reveals its *preimage*. The bot repeats the
    request with `Authorization: L402 <token>:<preimage>`. Spikes402 checks
    that `sha256(preimage)` equals the payment hash inside the token.
@@ -163,9 +168,11 @@ web server sits behind Spikes402. So:
   ]
   ```
 
-  The signed L402 token records the price it was issued for. A token for a
-  cheaper page cannot unlock a dearer one (the token is also bound to the
-  exact method and URL).
+  The signed L402 token records the price it was issued for, and is bound to
+  the exact method and URL. If you raise a price, an invoice that was already
+  paid is still honoured at the old price until its token expires
+  (`challenge_ttl_seconds`). A proof-of-work token is not: its difficulty was
+  set for the old price, so it must cover the new one.
 
 ## Proof-of-work pricing
 
@@ -620,6 +627,13 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
 
 - Pricing does not yet move between a min and a max with load. Today you
   set a default `price_sats` and, optionally, fixed per-path prices.
+- Paying the invoice with a QR code and a wallet that is not in the browser
+  does not unlock the page: the server cannot see the payment, and a person
+  cannot send the `Authorization` header. Bots and WebLN wallets are fine.
+- If your website fails to answer (a 5xx status or no answer) for a GET or HEAD
+  that carried a valid proof, the same proof can be sent again: up to 3 times
+  within 30 seconds, and it is delivered at most once. Other methods get no
+  second try.
 - Spent tokens are remembered in memory: run **one** proxy instance; a restart
   forgets them (tokens expire after `challenge_ttl_seconds`, so the replay
   window is limited to that).

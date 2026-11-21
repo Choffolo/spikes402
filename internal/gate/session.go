@@ -30,6 +30,10 @@ func (g *Gate) session(r *http.Request) string {
 			}
 			continue
 		}
+		if strings.HasPrefix(c.Name, passPrefix) {
+			found = true // dropped here; the gate reads it with takePassCookies first
+			continue
+		}
 		kept = append(kept, c.String())
 	}
 	if found {
