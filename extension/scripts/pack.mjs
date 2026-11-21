@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = resolve(root, "dist");
-const zip = resolve("/workspace/spikes402-extension.zip");
+const zip = resolve(root, "spikes402-extension.zip");
 
 if (!existsSync(resolve(dist, "manifest.json"))) {
   throw new Error("dist/ is missing a manifest. Run npm run build first.");

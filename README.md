@@ -45,11 +45,11 @@ Free paths are forwarded to your website directly, with no challenge.
    holds a signed **token**, a Lightning **invoice** for the price, and a
    **proof-of-work challenge** (the same token). A JSON body explains both
    options; browsers get a small page with a QR code instead. If a
-   [WebLN](https://www.webln.guide/) wallet such as Alby is in the browser,
-   a "Pay with one click" button also appears, and the page tries to pay
-   once on load with the invoice already shown (no second invoice). With a
-   per-site budget (Alby allowances), that attempt can succeed without a
-   further click. Without WebLN the page is unchanged.
+   [WebLN](https://www.webln.guide/) wallet is in the browser, a "Pay with
+   one click" button also appears, and the page tries to pay once on load
+   with the invoice already shown (no second invoice). If the payment fits
+   the wallet's budget, that can succeed without a further click. Without
+   WebLN the page is unchanged.
 2. **Pay:** paying the invoice reveals its *preimage*. The bot repeats the
    request with `Authorization: L402 <token>:<preimage>`. Spikes402 checks
    that `sha256(preimage)` equals the payment hash inside the token.
@@ -463,11 +463,12 @@ export PHOENIXD_FULL_PASSWORD=<http-password from phoenix.conf>
 
 - **Destination**: a Lightning address or a
   [BIP353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki)
-  address that resolves to a BOLT12 offer (both look like `name@domain`; a
-  leading `₿`, as in `₿you@phoenixwallet.me`, is accepted and removed).
-  phoenixd's `/paylnaddress` pays both: it tries BIP353 first, then the
-  classic Lightning address (LNURL). Or a Bitcoin address (on-chain via
-  `/sendtoaddress`, which needs `feerate_sat_vbyte`).
+  address (both look like `name@domain`; a leading `₿` is accepted and
+  removed). phoenixd's `/paylnaddress` pays both: it tries BIP353 first,
+  then the classic Lightning address (LNURL). Or a Bitcoin address
+  (on-chain via `/sendtoaddress`, which needs `feerate_sat_vbyte`). A raw
+  BOLT12 offer (`lno1…`) is not accepted as a destination (the donation
+  offer below is for sending *to* this project, not for withdrawals).
 - **Routing fee reserved**: for Lightning destinations the amount plus
   Phoenix's routing fee (4 sats + 0.4 %, rounded up) must fit in the balance;
   if it does not, the error tells you the largest amount you can withdraw.
@@ -619,16 +620,16 @@ Layout: `cmd/spikes402` (proxy), `cmd/spikes-bot` (example bot),
 withdrawals), `internal/mcp`, `internal/lightning` (fake + phoenixd),
 `internal/config`, `internal/botid`
 (bot classification), `internal/sfv` (structured header parsing), `webbotauth`
-(Web Bot Auth sign/verify), `pow`, `client`.
+(Web Bot Auth sign/verify), `pow`, `client`, `extension/` (browser wallet).
 
 ## Browser wallet extension (prototype)
 
-A Manifest V3 browser extension lives in [`extension/`](extension/). It keeps
-a non-custodial Spark wallet in the browser and injects `window.webln` so the
-402 page's "Pay with one click" can work without Alby. See
-[extension/README.md](extension/README.md) for how to build it and load it
-unpacked in Chrome or Firefox. It uses the official Spark SDK (no API key).
-On mainnet, use only tiny amounts; this is an early prototype.
+[`extension/`](extension/) is a Manifest V3 wallet (v0.1.1) that injects
+WebLN so a 402 page can pay with one click. It uses the official Spark SDK
+(no API key). The phrase stays on the device; default budgets are 10 sats
+per page, 100 per site per day, 500 per day. This is an early prototype: on
+mainnet, use only tiny amounts. [Try it](docs/try-the-wallet.md); build
+notes are in [extension/README.md](extension/README.md).
 
 ## Donations
 
