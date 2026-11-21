@@ -24,10 +24,10 @@ export function lightningHint(network: Network): { ready: boolean; hint: string 
   if (network !== "mainnet") {
     return {
       ready: true,
-      hint: "Network: Spark regtest (no real money). Invoice creation works; routing a real payment may still fail. Use mainnet with tiny amounts for Phoenix top-ups and 402 payments.",
+      hint: "Test network: no real money. Invoices can be created, but real payments may fail. Use real bitcoin, in small amounts, to top up or pay pages.",
     };
   }
-  return { ready: true, hint: "Network: Bitcoin mainnet. Use only tiny amounts; this is unreviewed prototype software." };
+  return { ready: true, hint: "Real bitcoin. Keep only small amounts here: this is an early version." };
 }
 
 /** Cap on Lightning routing + SSP fees we will accept for a given invoice amount. */

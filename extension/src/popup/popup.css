@@ -68,3 +68,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .pending-actions button {
   width: 100%;
 }
+
+/* Nothing may push the popup sideways: long words and numbers wrap or are cut with an ellipsis. */
+html, body { overflow-x: hidden; }
+body, p, li, label, h2, .msg, .pending, .mono { overflow-wrap: anywhere; }
+textarea { resize: vertical; }
+button.spaced { margin-top: 12px; }
+.history li { padding: 6px 0; }
+.h-top { display: flex; justify-content: space-between; gap: 8px; min-width: 0; }
+.h-site { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.h-time { color: var(--muted); flex: none; }
+.h-nums { display: flex; flex-wrap: wrap; gap: 2px 12px; color: var(--muted); margin-top: 2px; }

@@ -16,16 +16,47 @@ On mainnet, use only tiny amounts. To try it in your browser, see
 
 ## What works today
 
-- Create a 12-word recovery phrase locally, or restore one. Confirm you have
-  written the words down (they are shown once).
+- First screen: **Create a new wallet** or **Restore from 12 words**; the
+  password (typed twice) comes on the next step. Every password field is a
+  real form, so the Enter key submits it.
+- A new wallet is **not usable until you prove you saved the words**: after
+  the 12 words are shown you must type 3 random ones back. Chrome closes a
+  popup when you click outside it, so this step survives that: the wallet
+  stays locked and "pending backup" is stored with the encrypted vault; when
+  you reopen the popup you enter your password to see the words again and
+  finish. (A restored wallet needs no quiz: you already have the words.)
+  **Recovery words** in the popup shows them again later, behind your
+  password; they are decrypted in the wallet host, shown for 60 seconds at
+  most, and never stored in plain text.
 - Encrypt the phrase at rest with your password (WebCrypto: PBKDF2-SHA-256,
   600,000 iterations, AES-256-GCM). Unlock sends the vault and password to
   the wallet host, which decrypts the phrase only there (not in the service
   worker). The host locks itself after 15 minutes of inactivity.
-- Popup: balance, Receive (Lightning invoice + QR), Send to a Lightning
-  invoice or a Spark address, budget settings, payment history.
-- Budgets: max sats per page payment (default 10, invoice plus fees), max
-  sats per site per day (default 100), global daily cap (default 500).
+- Popup: balance (refreshed every few seconds while the popup is open, so a
+  receive or a payment shows without reopening), Receive (Lightning invoice
+  + QR), Send, limits, and a separate **Transaction history** screen (last
+  20: site, time, price, fee, total; never the invoice or the preimage).
+- Send takes a Lightning invoice, a Spark address, or a **Lightning
+  address** (`name@domain`, a leading ₿ is fine). A Lightning address is
+  paid through LNURL-pay (LUD-16): the wallet fetches
+  `https://domain/.well-known/lnurlp/name` (https only, no redirects, 10 s,
+  64 KiB), requires the payment link (callback) to be https on the same
+  host, checks your amount against the address's minimum and maximum, asks
+  for an invoice, and **refuses to pay unless that invoice is for exactly
+  your amount**. The same fee cap as for pages applies. Addresses that are
+  only a BIP353 / BOLT12 offer (Phoenix addresses such as
+  `name@phoenixwallet.me`) cannot be paid: the Spark SDK has no BOLT12, and
+  such domains serve no LNURL, so the popup says "This address type isn't
+  supported yet. Paste an invoice instead." After a send the popup shows
+  "Sending…", then "Sent N sats (fee M)" or the error, clears the form and
+  updates the balance.
+- Limits: max sats per page payment (default 10; an **all-inclusive** cap:
+  the price plus the biggest possible fee must fit, otherwise the popup
+  asks first, showing "N sats + a fee of up to M"), max sats per site per
+  day (default 100), global daily cap (default 500). The biggest fee is 10%
+  of the price, at least 5 sats, so with the default cap a page above 5
+  sats asks first; you only pay the real fee, which is often lower. Each
+  paid page is written to the history with its real fee.
   Pages that fit all three caps are paid automatically. If a page costs
   more, the popup asks whether to pay once, always allow this price on
   this site, or decline. "Always allow" raises the per-page cap for that
@@ -44,6 +75,11 @@ On mainnet, use only tiny amounts. To try it in your browser, see
 - Confirmations queue up (up to 10 waiting); the popup shows the oldest
   and how many more wait. Each one expires after 5 minutes on its own; an
   expired or answered confirmation cannot be answered again.
+- No flash of the 402 page: when a page will be paid without asking, the
+  content script covers it at once with "Paying N sats…" (it asks the
+  background, which only checks your limits; it reserves and pays nothing).
+  The notice goes away if the payment fails. The wallet also looks for the
+  payment result every 0.25 s at first, instead of every second.
 - Toolbar badge: the number of sats the current tab's page costs to open
   (read from the 402 invoice on the page). The badge is cleared when you
   navigate away. Colour is muted for the price, teal after a successful
@@ -79,8 +115,9 @@ Lightning service provider listed below.
 
 ## Network hosts
 
-The extension is allowed to connect only to these HTTPS endpoints (Spark
-SDK v0.16.0 defaults). They are infrastructure, not a place we load
+The Spark SDK connects to these HTTPS endpoints (v0.16.0 defaults). Apart
+from them, the wallet only contacts the server of a Lightning address when
+you send to one (see Security notes). They are infrastructure, not a place we load
 JavaScript from:
 
 | Host | Role |
@@ -93,10 +130,10 @@ JavaScript from:
 | `https://mempool.space` | Mainnet chain lookup (electrs) |
 | `https://regtest-mempool.us-west-2.sparkinfra.net` | Regtest chain lookup |
 
-These also appear in `manifest.json` as `host_permissions` and in the
-extension page CSP `connect-src`. If the Spark SDK changes its default
-hosts, this list and the manifest must be updated together
-(`src/spark-util.ts` holds the same list).
+These also appear in `manifest.json` as `host_permissions` (the extension
+page CSP `connect-src` is wider, see Security notes). If the Spark SDK
+changes its default hosts, this list and the manifest must be updated
+together (`src/spark-util.ts` holds the same list).
 
 ## Build
 
@@ -135,16 +172,18 @@ Spikes402 proxy such as `http://127.0.0.1:8402/...` is fine.
 
 ## Load in Firefox
 
-**Experimental and untested.** The manifest lists `background.scripts`
-next to `background.service_worker` (Firefox ignores the service worker and
-runs the scripts as an event page; Chrome 121+ ignores the scripts), and
-the code has a fallback for the missing offscreen API, but the wallet has
+**Experimental and untested.** The Chrome build (`npm run build`) has only
+`background.service_worker`, so Chrome shows no manifest warning. Firefox
+needs `background.scripts` and an add-on id instead; they live in
+`src/manifest.firefox.json` and `npm run build:firefox` merges them into
+`dist/manifest.json` (rebuild with `npm run build` for Chrome). The code
+has a fallback for the missing offscreen API, but the wallet has
 not been run in a real Firefox. Firefox 128 or newer is required
 (`world: "MAIN"` content scripts). Event pages can be unloaded when idle,
 which may drop a waiting confirmation; treat Firefox as a way to help test,
 not as a supported browser.
 
-1. Build as above.
+1. Run `npm run build:firefox`.
 2. Open `about:debugging#/runtime/this-firefox`.
 3. Click **Load Temporary Add-on…** and select `extension/dist/manifest.json`.
 
@@ -171,13 +210,14 @@ Gaps compared to Chrome:
 - **No remote code.** Manifest V3 CSP for extension pages is
   `script-src 'self' 'wasm-unsafe-eval'` (the Spark SDK instantiates
   bundled WASM for signing; there is no `unsafe-eval` and no remote
-  script), plus `frame-ancestors 'none'`. `connect-src` is limited to the
-  hosts above. The service worker does not run the wallet; an offscreen
+  script), plus `frame-ancestors 'none'`. `connect-src` allows any `https:`
+  host, because a Lightning address can live on any domain; the wallet only
+  contacts one when you send to that address (never a redirect, never an
+  http URL, callback on the same host), and the Spark hosts above otherwise. The service worker does not run the wallet; an offscreen
   document (or a Firefox host window) does. The wallet host auto-locks
   after 15 minutes of inactivity.
 - **Password.** Choose a unique password. It is not recoverable. The
-  recovery phrase is; the backup screen is the only time it is shown after
-  a new wallet is created.
+  recovery phrase is: see it under "Recovery words" with your password.
 - **Mainnet.** This is unreviewed prototype software. Use tiny amounts.
 
 ## Tests
@@ -190,7 +230,13 @@ when it does not, site allowances, refuse amountless invoices, day reset,
 fees on every cap), toolbar badge text, BOLT11 amount, checksum and
 payment-hash parsing, local preimage checks, mnemonic generation and
 password encryption, sender/origin and settings checks, and Spark helpers
-(network mapping, fee cap, address shape, payment status).
+(network mapping, fee cap, address shape, payment status, faster result
+polling), the seed backup (a new wallet stays locked until the quiz is
+passed, the pending state is stored, only the popup can confirm or reveal),
+Lightning addresses (parsing, same-host https callback, min/max, exact
+invoice amount, no redirects), the "will it be paid" check for the Paying
+notice, history rows (host only, price, fee, total, no preimage), and the
+Chrome and Firefox manifests.
 
 ```sh
 npm test

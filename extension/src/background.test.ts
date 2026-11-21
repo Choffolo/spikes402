@@ -11,6 +11,9 @@ let listener: Listener;
 let walletSend: (msg: Record<string, unknown>) => Promise<Reply>;
 let walletLookup: (msg: Record<string, unknown>) => Promise<Reply>;
 let sends: Record<string, unknown>[];
+let walletOther: (msg: Record<string, unknown>) => Reply;
+let hostUnlocked: boolean;
+let walletCalls: Record<string, unknown>[];
 
 const OK = (feeSats?: number): Reply => ({ preimage: "00".repeat(32), detail: "ok", ...(feeSats === undefined ? {} : { feeSats }) });
 const PENDING_REPLY: Reply = { error: "Timed out waiting for the Lightning payment preimage.", uncertain: true, requestId: "req-1" };
@@ -20,6 +23,9 @@ function installChrome() {
   sends = [];
   walletSend = async () => OK();
   walletLookup = async () => ({ state: "pending" });
+  walletOther = () => ({});
+  hostUnlocked = true;
+  walletCalls = [];
   const noop = async () => undefined;
   (globalThis as unknown as { chrome: unknown }).chrome = {
     runtime: {
@@ -27,11 +33,13 @@ function installChrome() {
       onStartup: { addListener: () => undefined },
       onMessage: { addListener: (l: Listener) => (listener = l) },
       getURL: () => "chrome-extension://abc/",
+      getContexts: async () => [{}], // the wallet host is already running
       lastError: undefined,
       sendMessage: (msg: Record<string, unknown>, cb: (r: unknown) => void) => {
         if (msg.target !== "wallet") return;
         const done = (r: unknown) => queueMicrotask(() => cb(r));
-        if (msg.type === "status") return done({ unlocked: true });
+        walletCalls.push(msg);
+        if (msg.type === "status") return done({ unlocked: hostUnlocked });
         if (msg.type === "send") {
           sends.push(msg);
           void walletSend(msg).then(done);
@@ -41,9 +49,10 @@ function installChrome() {
           void walletLookup(msg).then(done);
           return;
         }
-        done({});
+        done(walletOther(msg));
       },
     },
+    offscreen: { createDocument: noop, Reason: { WORKERS: "WORKERS" } },
     tabs: { onRemoved: { addListener: () => undefined } },
     storage: {
       local: {
@@ -68,7 +77,9 @@ const answer = (id: string, choice: "once" | "always" | "refuse") => call({ type
 
 type Stored = {
   spend?: { globalSats: number; perSite: Record<string, number> };
-  history?: { result: string; detail: string; amountSats: number }[];
+  history?: { result: string; detail: string; amountSats: number; priceSats?: number; feeSats?: number; origin?: string }[];
+  vault?: unknown;
+  backupPending?: boolean;
   prompts?: PendingPayment[];
   reservations?: Reservation[];
   settings?: { siteAllowances: Record<string, number>; maxSatsPerSitePerDay: number };
@@ -263,5 +274,156 @@ describe("fee cap", () => {
 
     await pay("https://two.example", small(), 2);
     expect(sends[1].maxFeeSats).toBe(maxFeeSatsFor(5));
+  });
+});
+
+describe("history and prompts show the fee", () => {
+  it("records price, real fee and total of a paid page, without the preimage", async () => {
+    walletSend = async () => OK(4);
+    expect((await pay("https://a.example", encodeBolt11ForTest("lnbc20n"))).error).toBeUndefined(); // 2 sats
+    expect(state().history?.at(-1)).toMatchObject({ result: "sent", priceSats: 2, feeSats: 4, amountSats: 6, origin: "https://a.example" });
+    expect(JSON.stringify(state().history)).not.toMatch(/preimage|0000/);
+  });
+
+  it("the page price and the biggest fee must fit the per-page cap together", async () => {
+    // 6 sats + fee cap 5 = 11 > 10: asks, and the prompt carries both numbers.
+    const p = pay("https://a.example", encodeBolt11ForTest("lnbc60n"));
+    await tick();
+    const prompt = state().prompts![0];
+    expect(prompt).toMatchObject({ amountSats: 6, costSats: 11 });
+    expect(prompt.reason).toMatch(/more than your limit for one page \(10 sats, fee included\)/);
+    expect(sends).toHaveLength(0);
+    await answer(prompt.id, "refuse");
+    await p;
+    // 5 sats + 5 = 10 fits exactly: paid without asking.
+    expect((await pay("https://a.example", small())).error).toBeUndefined();
+  });
+});
+
+describe("a new wallet is not usable until the words are confirmed", () => {
+  const PW = "correct horse battery";
+
+  it("creating keeps it locked, remembers the pending backup, and refuses to unlock", async () => {
+    const r = await call({ type: "createWallet", password: PW }, ext);
+    expect(r.error).toBeUndefined();
+    expect(String(r.mnemonic).split(" ")).toHaveLength(12);
+    expect(state().backupPending).toBe(true);
+    expect(state().vault).toBeTruthy();
+    expect(JSON.stringify(store)).not.toContain(String(r.mnemonic)); // only the encrypted vault is stored
+    expect(walletCalls.some((m) => m.type === "connect")).toBe(false);
+
+    expect((await call({ type: "unlock", password: PW }, ext)).error).toMatch(/12 words/);
+    expect(walletCalls.some((m) => m.type === "connect")).toBe(false);
+    const snap = (await call({ type: "getState" }, ext)) as unknown as { info: { backupPending: boolean } };
+    expect(snap.info.backupPending).toBe(true); // reopening the popup resumes the backup step
+  });
+
+  it("a wrong quiz keeps it locked; a right one clears the flag and unlocks", async () => {
+    await call({ type: "createWallet", password: PW }, ext);
+    const answers = [{ index: 0, word: "a" }, { index: 3, word: "b" }, { index: 7, word: "c" }];
+
+    walletOther = (m) => (m.type === "checkWords" ? { error: "Those words do not match your recovery phrase." } : {});
+    expect((await call({ type: "confirmBackup", password: PW, answers }, ext)).error).toMatch(/do not match/);
+    expect(state().backupPending).toBe(true);
+    expect(walletCalls.some((m) => m.type === "connect")).toBe(false);
+
+    walletOther = () => ({});
+    expect((await call({ type: "confirmBackup", password: PW, answers }, ext)).error).toBeUndefined();
+    expect(state().backupPending).toBe(false);
+    expect(walletCalls.some((m) => m.type === "connect")).toBe(true);
+    expect(walletCalls.find((m) => m.type === "checkWords")).toMatchObject({ answers, password: PW });
+  });
+
+  it("confirming and revealing are only for the popup, and revealing needs a wallet", async () => {
+    expect((await call({ type: "confirmBackup", password: PW, answers: [] }, pageSender("https://evil.example"))).error).toMatch(/only available/);
+    expect((await call({ type: "revealPhrase", password: PW }, pageSender("https://evil.example"))).error).toMatch(/only available/);
+    expect((await call({ type: "revealPhrase", password: PW }, ext)).error).toMatch(/No wallet/);
+    expect((await call({ type: "confirmBackup", password: PW, answers: [] }, ext)).error).toMatch(/nothing to confirm/);
+  });
+
+  it("the phrase is decrypted in the wallet host, never in the service worker", async () => {
+    await call({ type: "createWallet", password: PW }, ext);
+    walletOther = (m) => (m.type === "reveal" ? { mnemonic: "one two three" } : {});
+    const r = await call({ type: "revealPhrase", password: PW }, ext);
+    expect(r.mnemonic).toBe("one two three");
+    expect(walletCalls.find((m) => m.type === "reveal")).toMatchObject({ password: PW });
+  });
+
+  it("restoring from known words needs no quiz", async () => {
+    const words = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    expect((await call({ type: "restoreWallet", mnemonic: words, password: PW }, ext)).error).toBeUndefined();
+    expect(state().backupPending).toBeFalsy();
+    expect(walletCalls.some((m) => m.type === "connect")).toBe(true);
+  });
+});
+
+describe("will this page be paid without asking? (the Paying… notice)", () => {
+  const check = (invoice: string, origin = "https://a.example") => call({ type: "autoPayCheck", invoice }, pageSender(origin));
+
+  it("says yes for a page that fits, no for one that needs a confirmation, and pays nothing", async () => {
+    expect(await check(small())).toEqual({ willPay: true, amountSats: 5 });
+    expect(await check(big())).toEqual({ willPay: false });
+    expect(await check("junk")).toEqual({ willPay: false });
+    expect(sends).toHaveLength(0);
+    expect(state().reservations ?? []).toHaveLength(0);
+    expect(state().spend?.globalSats ?? 0).toBe(0);
+  });
+
+  it("says no while the wallet is locked", async () => {
+    hostUnlocked = false;
+    expect(await check(small())).toEqual({ willPay: false });
+  });
+});
+
+describe("sending from the popup", () => {
+  it("tells how much was sent and the fee, gives the wallet the fee cap, and keeps no preimage", async () => {
+    walletSend = async () => OK(3);
+    const r = await call({ type: "send", destination: big() }, ext);
+    expect(r.detail).toBe("Sent 250 sats (fee 3).");
+    expect(sends[0].maxFeeSats).toBe(maxFeeSatsFor(250));
+    expect(state().history?.at(-1)).toMatchObject({ result: "sent", priceSats: 250, feeSats: 3, amountSats: 253, detail: "Sent." });
+  });
+
+  it("a Lightning address is turned into an invoice for the typed amount, then paid with the fee cap", async () => {
+    const inv = encodeBolt11ForTest("lnbc210n"); // 21 sats
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      calls.push(String(url));
+      const body = String(url).includes("/.well-known/")
+        ? { tag: "payRequest", callback: "https://example.com/cb", minSendable: 1000, maxSendable: 1_000_000 }
+        : { pr: inv };
+      return new Response(JSON.stringify(body));
+    });
+    try {
+      walletSend = async () => OK(1);
+      const r = await call({ type: "send", destination: "₿bob@example.com", amountSats: 21 }, ext);
+      expect(r.detail).toBe("Sent 21 sats (fee 1).");
+      expect(calls).toEqual(["https://example.com/.well-known/lnurlp/bob", "https://example.com/cb?amount=21000"]);
+      expect(sends[0]).toMatchObject({ destination: inv, maxFeeSats: maxFeeSatsFor(21) });
+      expect(state().history?.at(-1)).toMatchObject({ result: "sent", priceSats: 21, feeSats: 1 });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("an invoice for another amount is never paid, and a BOLT12-only address gets a clear message", async () => {
+    vi.stubGlobal("fetch", async (url: string) =>
+      String(url).includes("/.well-known/")
+        ? new Response(JSON.stringify({ tag: "payRequest", callback: "https://example.com/cb", minSendable: 1000, maxSendable: 1_000_000 }))
+        : new Response(JSON.stringify({ pr: encodeBolt11ForTest("lnbc2100n") })),
+    );
+    try {
+      expect((await call({ type: "send", destination: "bob@example.com", amountSats: 21 }, ext)).error).toMatch(/different amount/);
+      expect(sends).toHaveLength(0);
+      vi.stubGlobal("fetch", async () => {
+        throw new TypeError("Failed to fetch");
+      });
+      expect((await call({ type: "send", destination: "chromescar71@phoenixwallet.me", amountSats: 21 }, ext)).error).toBe(
+        "This address type isn't supported yet. Paste an invoice instead.",
+      );
+      expect(sends).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

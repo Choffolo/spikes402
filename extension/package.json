@@ -1,6 +1,6 @@
 {
   "name": "spikes402-extension",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "Minimal non-custodial WebLN wallet extension for Spikes402, built on the official Spark SDK.",
   "type": "module",
@@ -9,7 +9,8 @@
     "test": "vitest run",
     "lint": "eslint src scripts --max-warnings=0",
     "audit": "npm audit --omit=dev",
-    "pack": "npm run build && node scripts/pack.mjs"
+    "pack": "npm run build && node scripts/pack.mjs",
+    "build:firefox": "tsc --noEmit && vite build && node scripts/copy-static.mjs --firefox"
   },
   "engines": {
     "node": ">=22"

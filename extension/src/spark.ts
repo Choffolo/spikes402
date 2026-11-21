@@ -17,8 +17,12 @@ import {
  * document). The SDK is bundled into the extension; no remote script or WASM
  * is fetched. Lightning invoices go through the default public SSP (no API key).
  */
-const PREIMAGE_POLL_MS = 1000;
-const PREIMAGE_POLL_ATTEMPTS = 60;
+// Look often at first (most payments settle within a few seconds), then every second.
+// About 60 seconds in all.
+const FAST_POLL_MS = 250;
+const FAST_POLL_ATTEMPTS = 20;
+const SLOW_POLL_MS = 1000;
+const PREIMAGE_POLL_ATTEMPTS = FAST_POLL_ATTEMPTS + 55;
 
 let wallet: SparkWallet | undefined;
 let lastNetwork: "regtest" | "mainnet" = "mainnet";
@@ -144,7 +148,7 @@ async function waitForPreimage(
     if (sendRequestFailed(req?.status)) {
       throw new WalletError(`Lightning payment failed (${req?.status ?? "unknown"}).`);
     }
-    await new Promise((r) => setTimeout(r, PREIMAGE_POLL_MS));
+    await new Promise((r) => setTimeout(r, i < FAST_POLL_ATTEMPTS ? FAST_POLL_MS : SLOW_POLL_MS));
   }
   throw new PaymentPendingError("Timed out waiting for the Lightning payment preimage.", id);
 }
