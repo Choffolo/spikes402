@@ -18,7 +18,8 @@ Only the latest commit on `main` gets security fixes.
 ## Running it safely
 
 - Put Spikes402 behind your own TLS reverse proxy, list only that proxy in
-  `trusted_proxies`, and keep the admin dashboard on `127.0.0.1`.
+  `trusted_proxies` (client-IP and `X-Forwarded-*` headers are believed only
+  from those addresses), and keep the admin dashboard on `127.0.0.1`.
 - Keep withdrawals off. While they are on, the internet-facing process holds
   phoenixd's full-access password, which can spend all funds; a bug there
   could empty the node. Withdraw with phoenixd's own tools instead, or turn

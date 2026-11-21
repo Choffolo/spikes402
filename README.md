@@ -40,6 +40,11 @@ sequenceDiagram
 ```
 
 Free paths are forwarded to your website directly, with no challenge.
+Protected-path answers (the 402 itself, and the page after payment, work, a
+pass, a pause, or a free policy) always go out with
+`Cache-Control: private, no-store`, so a shared cache or CDN cannot serve a
+paid page for free. Unprotected paths keep whatever `Cache-Control` your
+website sets.
 
 1. A request to a protected path without proof gets **HTTP 402**. The answer
    holds a signed **token**, a Lightning **invoice** for the price, and a
@@ -116,7 +121,8 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `max_invoices_per_minute` | Invoices created per minute, all clients together; beyond that, proof-of-work only | `300` |
 | `max_pending_invoices` | Open (unpaid, unexpired) invoices at once; beyond that, proof-of-work only | `10000` |
 | `client_ip_header` | Header holding the visitor's IP when Spikes402 runs behind your own proxy, e.g. `"X-Forwarded-For"`, `"X-Real-IP"`, `"CF-Connecting-IP"` | `""` (use the connection's address) |
-| `trusted_proxies` | IPs or CIDR ranges of those proxies, e.g. `["127.0.0.1"]`. The header is ignored from anyone else. Required with `client_ip_header` | `[]` |
+| `trusted_proxies` | IPs or CIDR ranges of those proxies, e.g. `["127.0.0.1"]`. The header is ignored from anyone else. Required with `client_ip_header` or `preserve_host` | `[]` |
+| `preserve_host` | Send the public `Host` (or `X-Forwarded-Host`) to the origin, for name-based virtual hosts. Only from `trusted_proxies`; if `public_hosts` is set, only those names are forwarded. Off: the origin sees the host of `origin` | `false` |
 | `max_connections` | Client connections open at once; more wait in the queue | `10000` |
 | `read_timeout_seconds` / `write_timeout_seconds` | Longest time to receive a whole request / send a whole response (raise the second for very large downloads or streaming) | `60` / `300` |
 | `unsafe_allow_dangerous_config` | Accept settings refused by default: `trusted_proxies` or `admin.allowed_ips` covering the whole internet (`0.0.0.0/0`, `::/0`), or the fake backend on a non-localhost address | `false` |
@@ -395,7 +401,14 @@ first, the payment still unlocks the page once (work after a payment is refused)
 come from the proxy. Set `client_ip_header` *and* `trusted_proxies`: the
 header is only believed on connections from those addresses. It is read
 from right to left, skipping trusted proxies, so a fake address a client
-puts at the start of `X-Forwarded-For` is ignored.
+puts at the start of `X-Forwarded-For` is ignored. The same rule applies
+when forwarding to your website: `X-Forwarded-*` and the client-IP header
+are kept or appended only from a trusted proxy; any other peer's spoofed
+headers are stripped and replaced with the connection address. By default
+the `Host` sent to the origin is the host of `origin`. Set `preserve_host`
+if your website is a name-based virtual host and must see the public host
+name; that only applies to trusted proxies, and if `public_hosts` is set,
+only those names are forwarded.
 
 **Bounded memory.** Rate-limit windows, open offers and used tokens are
 evicted when they expire. Hard caps also apply: 100,000 tracked clients per
@@ -624,7 +637,8 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
   calibrated for a CPU core (see [Proof-of-work pricing](#proof-of-work-pricing));
   a GPU solves it about 1000× faster.
 - **Client IP header:** it is only trusted from `trusted_proxies`; list only
-  proxies you control.
+  proxies you control. Spoofed `X-Forwarded-*` and client-IP headers from
+  anyone else are stripped before the request reaches your website.
 - **Admin dashboard:** keep it on localhost (default) and reach it through an
   SSH tunnel. Over plain http on a network the key could be sniffed; use
   `admin.allowed_ips` only on a network you trust, or put TLS in front.
