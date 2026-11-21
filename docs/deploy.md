@@ -88,8 +88,14 @@ If Caddy runs in Compose, attach it to the `spikes402` network, proxy to
 
 When Spikes402 is behind your proxy, set `client_ip_header` (for example
 `X-Forwarded-For`) and `trusted_proxies` to that proxy's addresses, so rate
-limits and bot checks see the visitor, not the proxy. Never set
-`trusted_proxies` to the whole internet.
+limits and bot checks see the visitor, not the proxy, and so the visitor's
+address is forwarded to your website. Never set `trusted_proxies` to the
+whole internet. If your origin needs the public `Host` header (name-based
+virtual hosts), also set `preserve_host`.
+
+Protected-path responses are sent with `Cache-Control: private, no-store`
+(including 402 pages and origin answers after payment). Unprotected paths
+keep the origin's cache headers.
 
 ## Config basics
 

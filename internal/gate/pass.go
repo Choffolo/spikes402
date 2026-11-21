@@ -47,7 +47,7 @@ func (g *Gate) issuePass(w http.ResponseWriter, r *http.Request, id string) {
 		Name: passName(res), Value: pass, Path: "/", MaxAge: int(PassTTL / time.Second),
 		HttpOnly: true, Secure: g.scheme(r) == "https", SameSite: http.SameSiteStrictMode,
 	})
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Cache-Control", protectedCacheControl)
 	w.WriteHeader(http.StatusNoContent)
 }
 

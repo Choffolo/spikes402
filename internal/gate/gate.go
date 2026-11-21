@@ -138,6 +138,9 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.opt.Next.ServeHTTP(w, r)
 		return
 	}
+	// A shared cache or CDN must not store a 402, a paid page, or a
+	// protected answer served while paused or on a free policy.
+	w = noStore(w)
 
 	class := g.classify(r)
 	w.Header().Set(ClassHeader, class.String())
@@ -224,6 +227,40 @@ func (g *Gate) deliver(w http.ResponseWriter, r *http.Request, id, scheme string
 	}
 }
 
+// protectedCacheControl is set on every response for a protected path.
+const protectedCacheControl = "private, no-store"
+
+// noStore wraps w so the response is sent with Cache-Control:
+// private, no-store. Unprotected paths are not wrapped, so the origin
+// can still be cached as it asks.
+func noStore(w http.ResponseWriter) http.ResponseWriter {
+	return &cacheControlWriter{ResponseWriter: w, value: protectedCacheControl}
+}
+
+type cacheControlWriter struct {
+	http.ResponseWriter
+	value string
+	wrote bool
+}
+
+func (w *cacheControlWriter) WriteHeader(code int) {
+	if !w.wrote {
+		w.Header().Set("Cache-Control", w.value)
+		w.wrote = true
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *cacheControlWriter) Write(p []byte) (int, error) {
+	if !w.wrote {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+// Unwrap lets http.ResponseController reach the real writer (flushing).
+func (w *cacheControlWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 // statusRecorder remembers the status code the origin answered with.
 type statusRecorder struct {
 	http.ResponseWriter
@@ -303,6 +340,10 @@ func (g *Gate) pathPrice(p string, set *Settings) int64 {
 
 // resource is what a token is bound to (as a hash): the method and the
 // full path with query string. A token for one page cannot unlock another.
+// The request Host is not part of the binding: a client can set Host to
+// anything, so binding to it would let them mint or redeem a token for a
+// host they chose. Use a configured public host if a site ever needs
+// host-specific tokens.
 func resource(r *http.Request) string {
 	return r.Method + " " + r.URL.RequestURI()
 }
@@ -584,7 +625,7 @@ func (g *Gate) writeChallenge(w http.ResponseWriter, r *http.Request, o offer, p
 		}
 	}
 	h.Add("WWW-Authenticate", powHeader)
-	h.Set("Cache-Control", "no-store")
+	h.Set("Cache-Control", protectedCacheControl)
 
 	if strings.Contains(r.Header.Get("Accept"), "text/html") {
 		h.Set("Content-Type", "text/html; charset=utf-8")

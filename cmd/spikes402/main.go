@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/Choffolo/spikes402/client"
@@ -34,8 +35,14 @@ func main() {
 		log.Fatal(err)
 	}
 
-	origin, _ := url.Parse(cfg.Origin) // validated by config.Load
-	proxy := originProxy(origin)
+	origin, _ := url.Parse(cfg.Origin)   // validated by config.Load
+	trusted, _ := cfg.TrustedProxyNets() // validated by config.Load
+	proxy := newOriginProxy(origin, originOpt{
+		Trusted:        trusted,
+		PreserveHost:   cfg.PreserveHost,
+		PublicHosts:    cfg.PublicHosts,
+		ClientIPHeader: cfg.ClientIPHeader,
+	})
 
 	secret := []byte(cfg.SecretKey)
 	if len(secret) == 0 { // only allowed with the fake backend
@@ -45,8 +52,6 @@ func main() {
 		}
 		log.Print("no secret_key set: using a random one (tokens will not survive a restart)")
 	}
-
-	trusted, _ := cfg.TrustedProxyNets() // validated by config.Load
 
 	mux := http.NewServeMux()
 	var backend lightning.Backend
@@ -193,21 +198,179 @@ func startAdmin(cfg *config.Config, configFile string, g *gate.Gate, monitor *ad
 // indefinitely: the proxy answers 502, and a GET/HEAD can retry the token
 // (see gate.deliver).
 func originProxy(origin *url.URL) *httputil.ReverseProxy {
-	return newOriginProxy(origin, originTransport())
+	return newOriginProxy(origin, originOpt{})
 }
 
-func newOriginProxy(origin *url.URL, tr http.RoundTripper) *httputil.ReverseProxy {
+// originOpt is how the origin proxy treats forwarding headers and Host.
+type originOpt struct {
+	Transport      http.RoundTripper
+	Trusted        []*net.IPNet
+	PreserveHost   bool
+	PublicHosts    []string
+	ClientIPHeader string
+}
+
+func newOriginProxy(origin *url.URL, opt originOpt) *httputil.ReverseProxy {
+	tr := opt.Transport
+	if tr == nil {
+		tr = originTransport()
+	}
 	return &httputil.ReverseProxy{
-		Rewrite: func(r *httputil.ProxyRequest) {
-			r.SetURL(origin)
-			r.SetXForwarded()
-		},
+		Rewrite:   rewriteToOrigin(origin, opt),
 		Transport: tr,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("origin error: %v", err)
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 		},
 	}
+}
+
+// hop and client-IP headers a direct client must not be allowed to set.
+var forwardingHeaders = []string{
+	"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto",
+	"X-Forwarded-Port", "X-Forwarded-By", "X-Forwarded-Server",
+	"X-Forwarded-Scheme", "X-Real-IP", "X-Client-IP",
+	"X-Cluster-Client-IP", "CF-Connecting-IP", "True-Client-IP",
+	"Forwarded",
+}
+
+// rewriteToOrigin sends the request to origin. X-Forwarded-* and the
+// configured client-IP header are trusted only when the direct peer is
+// in trusted_proxies; otherwise they are stripped and rebuilt from the
+// socket address. The Host sent to the origin is the origin URL's host,
+// unless preserve_host is set, the peer is trusted, and (when public_hosts
+// is set) the inbound host is one of those names. The inbound Host is
+// never used as X-Forwarded-Host for an untrusted peer.
+func rewriteToOrigin(origin *url.URL, opt originOpt) func(*httputil.ProxyRequest) {
+	return func(r *httputil.ProxyRequest) {
+		inHost := r.In.Host
+		inXFH := firstHeader(r.In.Header, "X-Forwarded-Host")
+		inXFP := firstHeader(r.In.Header, "X-Forwarded-Proto")
+		inXFF := r.In.Header.Values("X-Forwarded-For")
+		peer := requestIP(r.In)
+		trusted := ipInNets(peer, opt.Trusted)
+
+		r.SetURL(origin)
+		if !trusted {
+			stripForwarding(r.Out.Header, opt.ClientIPHeader)
+			if peer != nil {
+				r.Out.Header.Set("X-Forwarded-For", peer.String())
+			}
+			if r.In.TLS != nil {
+				r.Out.Header.Set("X-Forwarded-Proto", "https")
+			} else {
+				r.Out.Header.Set("X-Forwarded-Proto", "http")
+			}
+			// Never the attacker's Host.
+			r.Out.Header.Set("X-Forwarded-Host", origin.Host)
+			return
+		}
+
+		setTrustedForwarded(r, peer, inXFF, inXFP, firstNonEmpty(inXFH, inHost))
+		if opt.PreserveHost {
+			host := firstNonEmpty(inXFH, inHost)
+			if hostAllowed(host, opt.PublicHosts) {
+				r.Out.Host = host
+			}
+		}
+	}
+}
+
+func setTrustedForwarded(r *httputil.ProxyRequest, peer net.IP, inXFF []string, proto, host string) {
+	var parts []string
+	for _, v := range inXFF {
+		for _, p := range strings.Split(v, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				parts = append(parts, p)
+			}
+		}
+	}
+	if peer != nil {
+		parts = append(parts, peer.String())
+	}
+	if len(parts) > 0 {
+		r.Out.Header.Set("X-Forwarded-For", strings.Join(parts, ", "))
+	}
+	if proto == "" {
+		if r.In.TLS != nil {
+			proto = "https"
+		} else {
+			proto = "http"
+		}
+	}
+	r.Out.Header.Set("X-Forwarded-Proto", proto)
+	if host != "" {
+		r.Out.Header.Set("X-Forwarded-Host", host)
+	}
+}
+
+func stripForwarding(h http.Header, clientIPHeader string) {
+	for _, name := range forwardingHeaders {
+		h.Del(name)
+	}
+	if clientIPHeader != "" {
+		h.Del(clientIPHeader)
+	}
+}
+
+func firstHeader(h http.Header, name string) string {
+	if v := h.Values(name); len(v) > 0 {
+		return strings.TrimSpace(v[0])
+	}
+	return ""
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
+func requestIP(r *http.Request) net.IP {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	return net.ParseIP(host)
+}
+
+func ipInNets(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// hostAllowed reports whether host may be sent to the origin when
+// preserve_host is on. With no public_hosts list, a trusted proxy's
+// Host is accepted; otherwise the hostname must match a listed name
+// (letter case and a trailing dot are ignored; a port is stripped).
+func hostAllowed(host string, public []string) bool {
+	name := hostName(host)
+	if name == "" {
+		return false
+	}
+	if len(public) == 0 {
+		return true
+	}
+	for _, p := range public {
+		if hostName(p) == name {
+			return true
+		}
+	}
+	return false
+}
+
+func hostName(h string) string {
+	h = strings.TrimSpace(h)
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		h = host
+	}
+	return strings.ToLower(strings.TrimSuffix(h, "."))
 }
 
 func originTransport() *http.Transport {

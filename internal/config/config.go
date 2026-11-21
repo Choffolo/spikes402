@@ -53,7 +53,8 @@ type Config struct {
 	MaxInvoicesPerMinute int              `json:"max_invoices_per_minute"` // all clients together, default 300
 	MaxPendingInvoices   int              `json:"max_pending_invoices"`    // default 10000
 	ClientIPHeader       string           `json:"client_ip_header"`        // e.g. "X-Forwarded-For", default "" (use the TCP address)
-	TrustedProxies       []string         `json:"trusted_proxies"`         // IPs/CIDRs allowed to set client_ip_header
+	TrustedProxies       []string         `json:"trusted_proxies"`         // IPs/CIDRs allowed to set forwarding and client_ip_header
+	PreserveHost         bool             `json:"preserve_host"`           // send the public Host to the origin (trusted proxies only)
 	SecretKey            string           `json:"secret_key"`              // or env SPIKES402_SECRET_KEY
 	Lightning            Lightning        `json:"lightning"`
 
@@ -292,6 +293,9 @@ func (c *Config) complete() error {
 	}
 	if c.ClientIPHeader != "" && len(c.TrustedProxies) == 0 {
 		return errors.New(`"client_ip_header" needs "trusted_proxies": the addresses of the proxies allowed to set it`)
+	}
+	if c.PreserveHost && len(c.TrustedProxies) == 0 {
+		return errors.New(`"preserve_host" needs "trusted_proxies": the public Host is only forwarded from those addresses`)
 	}
 	if c.SecretKey != "" && len(c.SecretKey) < 32 {
 		return errors.New(`"secret_key" must be at least 32 characters (try: openssl rand -hex 32)`)
