@@ -18,6 +18,7 @@ type claims struct {
 	ID          string `json:"id"`            // random, used to stop replays
 	PaymentHash string `json:"ph"`            // hex sha256 of the invoice preimage ("" if no invoice)
 	Resource    string `json:"res"`           // hash of "METHOD /path?query", the resource the token unlocks
+	PriceSats   int64  `json:"sats"`          // price this token was issued for; cannot unlock a higher-priced path
 	Expires     int64  `json:"exp"`           // unix seconds
 	PowBits     int    `json:"pow"`           // proof-of-work difficulty
 	PowAlg      string `json:"alg,omitempty"` // "" (sha256d) or "argon2id"

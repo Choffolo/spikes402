@@ -97,7 +97,8 @@ A JSON file (see [`config.example.json`](config.example.json)):
 |---|---|---|
 | `listen` | Address the proxy listens on | `":8402"` (`"127.0.0.1:8402"` with the fake backend) |
 | `origin` | The website to protect (`http://` or `https://` URL) | required |
-| `price_sats` | Price of one request, in satoshis | required, ≥ 1 |
+| `price_sats` | Default price of one request, in satoshis (used when no `prices` rule matches) | required, ≥ 1, at most 1,000,000 |
+| `prices` | Optional list of `{ "pattern", "price_sats" }` rules. Same pattern syntax and canonical path as `protect`. **The first matching rule wins**; put more specific patterns first. Unmatched protected paths use `price_sats`. | `[]` |
 | `protect` | Path patterns that require payment. `"/premium/**"` = everything under `/premium`; other patterns use [glob syntax](https://pkg.go.dev/path#Match), e.g. `"/*.pdf"`. See [Path matching](#path-matching) | required |
 | `protect_case_sensitive` | Match `protect` patterns with exact letter case. Off by default, because many websites serve `/Premium` like `/premium` | `false` |
 | `pow_seconds_per_sat` | How much work replaces one sat: seconds of one CPU core (see [Proof-of-work pricing](#proof-of-work-pricing)) | `10` |
@@ -148,15 +149,35 @@ web server sits behind Spikes402. So:
   `;parameters` in a segment (`/premium;x/a`, `/x/..;/premium`), trailing dots
   and spaces in a segment (`/premium./a`) and a trailing slash. All of these
   are asked to pay; the request is forwarded unchanged.
+- `prices` uses this same matching. Example: articles cost 5 sats, premium
+  20, a narrower premium folder 1 (listed first so it wins), everything
+  else that is protected uses `price_sats`:
+
+  ```json
+  "protect": ["/articles/**", "/premium/**"],
+  "price_sats": 5,
+  "prices": [
+    {"pattern": "/premium/special/**", "price_sats": 1},
+    {"pattern": "/premium/**", "price_sats": 20}
+  ]
+  ```
+
+  The signed L402 token records the price it was issued for. A token for a
+  cheaper page cannot unlock a dearer one (the token is also bound to the
+  exact method and URL).
 
 ## Proof-of-work pricing
 
 The puzzle should cost a bot something comparable to the price, so the
-difficulty is derived from it:
+difficulty is derived from it (from this request's price, including a
+matching `prices` rule, not only from the default `price_sats`):
 
 ```
 difficulty = round(log2(price_sats × pow_seconds_per_sat × 2,000,000))   clamped to 16…32 bits
 ```
+
+If you set `pow_difficulty` yourself (not 0), every path uses that fixed
+difficulty, whatever the sats price.
 
 **Assumption:** one commodity CPU core does about **2 million** puzzle
 attempts per second (we measured ~2.7 million on a recent server core;
@@ -582,6 +603,8 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
 
 ## Known limits / not done yet
 
+- Pricing does not yet move between a min and a max with load. Today you
+  set a default `price_sats` and, optionally, fixed per-path prices.
 - Spent tokens are remembered in memory: run **one** proxy instance; a restart
   forgets them (tokens expire after `challenge_ttl_seconds`, so the replay
   window is limited to that).

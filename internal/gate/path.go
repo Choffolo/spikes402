@@ -72,6 +72,18 @@ func matchKey(p string, caseSensitive bool) string {
 	return k
 }
 
+// matchPattern reports whether a protect/prices pattern matches a
+// canonical path (already passed through matchKey). A pattern ending in
+// "/**" matches that prefix and everything below it; anything else uses
+// path.Match.
+func matchPattern(pat, key string) bool {
+	if prefix, ok := strings.CutSuffix(pat, "/**"); ok {
+		return key == prefix || strings.HasPrefix(key, prefix+"/")
+	}
+	ok, _ := path.Match(pat, key)
+	return ok
+}
+
 // hashResource is what tokens and stored offers keep instead of the
 // resource itself, so their size does not depend on the URL.
 func hashResource(res string) string {

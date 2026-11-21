@@ -20,24 +20,41 @@ import (
 	"github.com/Choffolo/spikes402/pow"
 )
 
+const (
+	maxPriceSats  = 1_000_000
+	maxPriceRules = 100
+)
+
+// checkPathPattern is the syntax rule shared by "protect" and "prices".
+func checkPathPattern(what, p string) error {
+	if !strings.HasPrefix(p, "/") {
+		return fmt.Errorf(`%s %q must start with "/"`, what, p)
+	}
+	if _, err := path.Match(strings.TrimSuffix(p, "/**"), "/"); err != nil {
+		return fmt.Errorf("%s %q: %w", what, p, err)
+	}
+	return nil
+}
+
 // Config is the content of the configuration file. See config.example.json.
 type Config struct {
-	Listen               string    `json:"listen"`                  // address to listen on, default ":8402" ("127.0.0.1:8402" with the fake backend)
-	Origin               string    `json:"origin"`                  // website to protect, e.g. "http://localhost:8080"
-	PriceSats            int64     `json:"price_sats"`              // price per request in sats
-	Protect              []string  `json:"protect"`                 // path patterns that require payment
-	PowSecondsPerSat     float64   `json:"pow_seconds_per_sat"`     // CPU-core seconds of work per sat, default 10
-	PowDifficulty        int       `json:"pow_difficulty"`          // 0 = derived from price and pow_seconds_per_sat
-	PowAlgorithm         string    `json:"pow_algorithm"`           // "sha256d" (default) or "argon2id"
-	Argon2MemoryMiB      int       `json:"argon2_memory_mib"`       // argon2id memory per attempt, default 16
-	ChallengeTTLSeconds  int       `json:"challenge_ttl_seconds"`   // default 600
-	ChallengesPerMinute  int       `json:"challenges_per_minute"`   // per client, default 30
-	MaxInvoicesPerMinute int       `json:"max_invoices_per_minute"` // all clients together, default 300
-	MaxPendingInvoices   int       `json:"max_pending_invoices"`    // default 10000
-	ClientIPHeader       string    `json:"client_ip_header"`        // e.g. "X-Forwarded-For", default "" (use the TCP address)
-	TrustedProxies       []string  `json:"trusted_proxies"`         // IPs/CIDRs allowed to set client_ip_header
-	SecretKey            string    `json:"secret_key"`              // or env SPIKES402_SECRET_KEY
-	Lightning            Lightning `json:"lightning"`
+	Listen               string           `json:"listen"`                  // address to listen on, default ":8402" ("127.0.0.1:8402" with the fake backend)
+	Origin               string           `json:"origin"`                  // website to protect, e.g. "http://localhost:8080"
+	PriceSats            int64            `json:"price_sats"`              // default price per request in sats
+	Protect              []string         `json:"protect"`                 // path patterns that require payment
+	Prices               []gate.PriceRule `json:"prices,omitempty"`        // optional per-path prices; first match wins
+	PowSecondsPerSat     float64          `json:"pow_seconds_per_sat"`     // CPU-core seconds of work per sat, default 10
+	PowDifficulty        int              `json:"pow_difficulty"`          // 0 = derived from price and pow_seconds_per_sat
+	PowAlgorithm         string           `json:"pow_algorithm"`           // "sha256d" (default) or "argon2id"
+	Argon2MemoryMiB      int              `json:"argon2_memory_mib"`       // argon2id memory per attempt, default 16
+	ChallengeTTLSeconds  int              `json:"challenge_ttl_seconds"`   // default 600
+	ChallengesPerMinute  int              `json:"challenges_per_minute"`   // per client, default 30
+	MaxInvoicesPerMinute int              `json:"max_invoices_per_minute"` // all clients together, default 300
+	MaxPendingInvoices   int              `json:"max_pending_invoices"`    // default 10000
+	ClientIPHeader       string           `json:"client_ip_header"`        // e.g. "X-Forwarded-For", default "" (use the TCP address)
+	TrustedProxies       []string         `json:"trusted_proxies"`         // IPs/CIDRs allowed to set client_ip_header
+	SecretKey            string           `json:"secret_key"`              // or env SPIKES402_SECRET_KEY
+	Lightning            Lightning        `json:"lightning"`
 
 	ProtectCaseSensitive bool `json:"protect_case_sensitive"` // match "protect" patterns case-sensitively (default: case-insensitive)
 	MaxConnections       int  `json:"max_connections"`        // open client connections at once, default 10000
@@ -186,15 +203,26 @@ func (c *Config) complete() error {
 	if c.PriceSats < 1 {
 		return errors.New(`"price_sats" must be at least 1`)
 	}
+	if c.PriceSats > maxPriceSats {
+		return fmt.Errorf(`"price_sats" must be at most %d`, maxPriceSats)
+	}
 	if len(c.Protect) == 0 {
 		return errors.New(`"protect" needs at least one path pattern, e.g. "/premium/**"`)
 	}
 	for _, p := range c.Protect {
-		if !strings.HasPrefix(p, "/") {
-			return fmt.Errorf(`protect pattern %q must start with "/"`, p)
+		if err := checkPathPattern("protect pattern", p); err != nil {
+			return err
 		}
-		if _, err := path.Match(strings.TrimSuffix(p, "/**"), "/"); err != nil {
-			return fmt.Errorf("protect pattern %q: %w", p, err)
+	}
+	if len(c.Prices) > maxPriceRules {
+		return fmt.Errorf(`"prices" can list at most %d rules`, maxPriceRules)
+	}
+	for i, r := range c.Prices {
+		if err := checkPathPattern("prices pattern", r.Pattern); err != nil {
+			return err
+		}
+		if r.PriceSats < 1 || r.PriceSats > maxPriceSats {
+			return fmt.Errorf(`prices[%d].price_sats must be between 1 and %d`, i, maxPriceSats)
 		}
 	}
 	if c.PowSecondsPerSat < 0 {
@@ -516,8 +544,8 @@ func (c *Config) Apply(ch Changes) (*Config, error) {
 		}
 		n.BotPolicies = maps.Clone(*ch.BotPolicies)
 	}
-	if n.PriceSats > 1_000_000 {
-		return nil, errors.New(`"price_sats" must be at most 1,000,000`)
+	if n.PriceSats > maxPriceSats {
+		return nil, fmt.Errorf(`"price_sats" must be at most %d`, maxPriceSats)
 	}
 	if n.ChallengesPerMinute < 1 || n.ChallengesPerMinute > 100_000 {
 		return nil, errors.New(`"challenges_per_minute" must be between 1 and 100,000`)
@@ -533,6 +561,7 @@ type Public struct {
 	Origin               string                 `json:"origin"`
 	Protect              []string               `json:"protect"`
 	PriceSats            int64                  `json:"price_sats"`
+	Prices               []gate.PriceRule       `json:"prices,omitempty"`
 	PowAlgorithm         string                 `json:"pow_algorithm"`
 	PowSecondsPerSat     float64                `json:"pow_seconds_per_sat"`
 	PowDifficulty        int                    `json:"pow_difficulty"`
@@ -555,7 +584,7 @@ type Public struct {
 // Public returns the configuration without secrets.
 func (c *Config) Public() Public {
 	p := Public{
-		Origin: c.Origin, Protect: c.Protect, PriceSats: c.PriceSats, PowAlgorithm: c.PowAlgorithm,
+		Origin: c.Origin, Protect: c.Protect, PriceSats: c.PriceSats, Prices: c.Prices, PowAlgorithm: c.PowAlgorithm,
 		PowSecondsPerSat: c.PowSecondsPerSat, PowDifficulty: c.PowDifficulty, Argon2MemoryMiB: c.Argon2MemoryMiB,
 		CurrentPoW: c.PoW(c.PriceSats), ChallengeTTLSeconds: c.ChallengeTTLSeconds, ChallengesPerMinute: c.ChallengesPerMinute,
 		MaxInvoicesPerMinute: c.MaxInvoicesPerMinute, MaxPendingInvoices: c.MaxPendingInvoices,

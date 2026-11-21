@@ -13,7 +13,6 @@ import (
 	"math"
 	"net"
 	"net/http"
-	"path"
 	"runtime"
 	"strconv"
 	"strings"
@@ -27,8 +26,9 @@ import (
 
 // Options configure a Gate.
 type Options struct {
-	PriceSats    int64                            // price of one request, in satoshis
+	PriceSats    int64                            // default price of one request, in satoshis
 	Protect      []string                         // path patterns that require payment
+	Prices       []PriceRule                      // optional per-path prices; first match wins
 	PoW          func(priceSats int64) pow.Params // the puzzle for a price
 	ChallengeTTL time.Duration                    // how long a 402 challenge stays valid
 	SecretKey    []byte                           // signs tokens; keep it secret
@@ -56,6 +56,13 @@ type Options struct {
 	Observer func(Event)
 }
 
+// PriceRule maps a path pattern (same syntax as Protect) to a price.
+// Patterns are matched against the canonical path, like Protect.
+type PriceRule struct {
+	Pattern   string `json:"pattern"`
+	PriceSats int64  `json:"price_sats"`
+}
+
 // ClassHeader is the response header that tells the client how it was
 // classified, e.g. `verified; name="Googlebot"; method=ip-list`.
 const ClassHeader = "Spikes402-Class"
@@ -63,7 +70,8 @@ const ClassHeader = "Spikes402-Class"
 // Gate is the pay-or-PoW http.Handler.
 type Gate struct {
 	opt      Options
-	patterns []string // Protect, lower-cased unless CaseSensitive
+	patterns []string    // Protect, lower-cased unless CaseSensitive
+	prices   []priceRule // same canonicalisation as patterns
 	sign     signer
 	spent    *spentSet
 	limiter  *rateLimiter
@@ -107,6 +115,14 @@ func New(opt Options) *Gate {
 		}
 		g.patterns[i] = p
 	}
+	g.prices = make([]priceRule, len(opt.Prices))
+	for i, r := range opt.Prices {
+		pat := r.Pattern
+		if !opt.CaseSensitive {
+			pat = strings.ToLower(pat)
+		}
+		g.prices[i] = priceRule{pattern: pat, price: r.PriceSats}
+	}
 	g.live.Store(&Settings{PriceSats: opt.PriceSats, PoW: opt.PoW, Policies: opt.Policies, ChallengesPerMinute: opt.ChallengesPerMinute})
 	return g
 }
@@ -144,7 +160,7 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.opt.Next.ServeHTTP(w, r)
 		return
 	}
-	price := pol.price(set.PriceSats)
+	price := pol.price(g.pathPrice(r.URL.Path, set.PriceSats))
 	if session == "" {
 		session = newSession(w, g.scheme(r) == "https")
 	}
@@ -152,7 +168,7 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var problem string
 	if auth := r.Header.Get("Authorization"); auth != "" {
-		id, err := g.redeem(r, auth)
+		id, err := g.redeem(r, auth, price)
 		if err == nil {
 			outcome := OutcomePaid
 			if scheme, _, _ := strings.Cut(auth, " "); strings.EqualFold(scheme, "PoW") {
@@ -214,17 +230,29 @@ func (g *Gate) scheme(r *http.Request) string {
 func (g *Gate) protected(p string) bool {
 	p = matchKey(p, g.opt.CaseSensitive)
 	for _, pat := range g.patterns {
-		if prefix, ok := strings.CutSuffix(pat, "/**"); ok {
-			if p == prefix || strings.HasPrefix(p, prefix+"/") {
-				return true
-			}
-			continue
-		}
-		if ok, _ := path.Match(pat, p); ok {
+		if matchPattern(pat, p) {
 			return true
 		}
 	}
 	return false
+}
+
+type priceRule struct {
+	pattern string
+	price   int64
+}
+
+// pathPrice is the sats price for a request path: the first matching
+// rule in Prices, or defaultPrice if none match. Matching uses the same
+// canonical path as protected().
+func (g *Gate) pathPrice(p string, defaultPrice int64) int64 {
+	key := matchKey(p, g.opt.CaseSensitive)
+	for _, r := range g.prices {
+		if matchPattern(r.pattern, key) {
+			return r.price
+		}
+	}
+	return defaultPrice
 }
 
 // resource is what a token is bound to (as a hash): the method and the
@@ -236,6 +264,7 @@ func resource(r *http.Request) string {
 var (
 	errExpired     = errors.New("token expired")
 	errWrongTarget = errors.New("token is for a different resource")
+	errWrongPrice  = errors.New("token was issued for a lower price")
 	errBadProof    = errors.New("wrong preimage or proof-of-work solution")
 	errReplay      = errors.New("token already used")
 	errScheme      = errors.New("unsupported Authorization scheme (use L402 or PoW)")
@@ -258,8 +287,8 @@ func (e *busyError) Error() string { return e.msg }
 // paid the invoice can still use it once even if the puzzle of the same
 // offer was already solved (or burned by a wrong Argon2id answer), so a
 // paid invoice is never worthless. Work after payment is refused.
-func (g *Gate) redeem(r *http.Request, auth string) (string, error) {
-	c, err := g.check(r, auth)
+func (g *Gate) redeem(r *http.Request, auth string, price int64) (string, error) {
+	c, err := g.check(r, auth, price)
 	if err != nil {
 		return "", err
 	}
@@ -283,7 +312,7 @@ func spentKey(scheme, id string) string {
 }
 
 // check verifies a credential without spending it.
-func (g *Gate) check(r *http.Request, auth string) (claims, error) {
+func (g *Gate) check(r *http.Request, auth string, price int64) (claims, error) {
 	scheme, cred, _ := strings.Cut(auth, " ")
 	token, proof, ok := strings.Cut(strings.TrimSpace(cred), ":")
 	if !ok {
@@ -298,6 +327,9 @@ func (g *Gate) check(r *http.Request, auth string) (claims, error) {
 	}
 	if c.Resource != hashResource(resource(r)) {
 		return claims{}, errWrongTarget
+	}
+	if c.PriceSats < price {
+		return claims{}, errWrongPrice
 	}
 
 	switch strings.ToUpper(scheme) {
@@ -435,9 +467,10 @@ func (g *Gate) newOffer(r *http.Request, now time.Time, key string, p pow.Params
 		return offer{}, err
 	}
 	c := claims{
-		ID:       hex.EncodeToString(id),
-		Resource: hashResource(resource(r)),
-		Expires:  now.Add(g.opt.ChallengeTTL).Unix(),
+		ID:        hex.EncodeToString(id),
+		Resource:  hashResource(resource(r)),
+		PriceSats: price,
+		Expires:   now.Add(g.opt.ChallengeTTL).Unix(),
 	}
 	c.PowBits = p.Difficulty
 	if p.Algorithm == pow.Argon2id {
