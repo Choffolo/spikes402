@@ -12,3 +12,6 @@ extension/spikes402-extension.zip
 # Local Compose / environment secrets
 .env
 .env.*
+
+# Default on-disk state (spent tokens, withdrawal intents)
+/state/

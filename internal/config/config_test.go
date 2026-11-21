@@ -202,3 +202,32 @@ func TestPriceRuleLimits(t *testing.T) {
 		t.Fatal("accepted a bad prices glob")
 	}
 }
+
+func TestStateDirDefaultAndRelative(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "c.json")
+	js := `{"origin":"http://o","price_sats":1,"protect":["/x/**"],"secret_key":"` + strings.Repeat("k", 32) + `","lightning":{"backend":"fake"}}`
+	if err := os.WriteFile(file, []byte(js), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.StateDir != filepath.Join(dir, "state") {
+		t.Fatalf("default state_dir: %s", c.StateDir)
+	}
+
+	js2 := `{"origin":"http://o","price_sats":1,"protect":["/x/**"],"state_dir":"data","secret_key":"` + strings.Repeat("k", 32) + `","lightning":{"backend":"fake"}}`
+	file2 := filepath.Join(dir, "d.json")
+	if err := os.WriteFile(file2, []byte(js2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err = Load(file2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.StateDir != filepath.Join(dir, "data") {
+		t.Fatalf("relative state_dir: %s", c.StateDir)
+	}
+}

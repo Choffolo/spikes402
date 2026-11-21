@@ -26,6 +26,12 @@ Only the latest commit on `main` gets security fixes.
   withdrawals on only for the time you need them.
 - Keep the node's balance low; move earnings out regularly.
 - Keep `ai_can_apply` off (see below).
+- Give `state_dir` to the process only (directory mode 0700, files 0600).
+  Records are HMAC-sealed with `secret_key`; no secrets are written to
+  the files. In Docker, mount `state_dir` as a writable volume. If the
+  spent-token store is missing or cannot be verified, the process
+  refuses to start. If a withdrawal intent is unverified, withdrawals
+  stay blocked until you check the node and resolve it.
 
 
 ## Browser wallet

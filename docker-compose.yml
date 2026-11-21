@@ -36,6 +36,9 @@ services:
       #   ./config:/etc/spikes402
       # with config.json inside it, writable by uid 65532.
       - ./config.json:/etc/spikes402/config.json:ro
+      # Spent tokens and withdrawal intents. Must stay writable by
+      # uid 65532 (the process user). A named volume is created for you.
+      - spikes402-state:/var/lib/spikes402
     environment:
       SPIKES402_SECRET_KEY: ${SPIKES402_SECRET_KEY:?set a 32+ character secret (openssl rand -hex 32)}
       SPIKES402_ADMIN_KEY: ${SPIKES402_ADMIN_KEY:?set a 32+ character admin key, different from the secret}
@@ -51,3 +54,4 @@ networks:
 
 volumes:
   phoenixd-data:
+  spikes402-state:

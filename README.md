@@ -127,6 +127,7 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `read_timeout_seconds` / `write_timeout_seconds` | Longest time to receive a whole request / send a whole response (raise the second for very large downloads or streaming) | `60` / `300` |
 | `unsafe_allow_dangerous_config` | Accept settings refused by default: `trusted_proxies` or `admin.allowed_ips` covering the whole internet (`0.0.0.0/0`, `::/0`), or the fake backend on a non-localhost address | `false` |
 | `secret_key` | Signs tokens, ≥ 32 characters. Better set via `SPIKES402_SECRET_KEY` | random with `fake`, required otherwise |
+| `state_dir` | Directory for spent tokens and withdrawal intents (mode 0700, files 0600, HMAC-sealed with `secret_key`). Created on startup if missing. Docker: must be a writable volume | `<directory of the config file>/state` |
 | `identify_bots` | Classify clients (Web Bot Auth, published IP lists, reverse DNS); see [Bot identification](#bot-identification) | `true` |
 | `known_bots` | Replace the built-in list of crawlers: `[{"name", "user_agent", "ip_ranges_url", "reverse_dns": [...]}]` | built-in list |
 | `paused` | Serve protected paths free and create no invoices (dashboard toggle; also honoured in the file / overrides) | `false` |
@@ -413,8 +414,10 @@ only those names are forwarded.
 **Bounded memory.** Rate-limit windows, open offers and used tokens are
 evicted when they expire. Hard caps also apply: 100,000 tracked clients per
 minute (newcomers beyond that share one allowance), `max_pending_invoices`
-offers, and 1,000,000 used tokens. When the used-token list is full, new
-redemptions are refused ("server busy") rather than risking a replay.
+open invoices (counted until they expire, even if the visitor later pays
+with proof-of-work), and 1,000,000 used tokens. When the used-token list
+is full, new redemptions are refused ("server busy") rather than risking a
+replay.
 
 ## Admin dashboard
 
@@ -656,10 +659,11 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
   that carried a valid proof, the same proof can be sent again: up to 3 times
   within 30 seconds, and it is delivered at most once. Other methods get no
   second try.
-- Spent tokens are remembered in memory: about **128 MiB** at the cap of
-  1,000,000 unexpired tokens (measured, ~134 bytes per entry). Run **one**
-  proxy instance; a restart forgets them (tokens expire after
-  `challenge_ttl_seconds`, so the replay window is limited to that).
+- Spent tokens are remembered in memory (about **128 MiB** at the cap of
+  1,000,000 unexpired tokens, ~134 bytes per entry) and, when `secret_key`
+  is set, also on disk in `state_dir` so a restart cannot replay them.
+  Run **one** proxy instance. Without a configured `secret_key` (the fake
+  backend's random key), a restart still forgets them.
 - Rate limits are per IP. A botnet with many addresses can use up the global
   invoice budget; paying visitors then get proof-of-work only until it
   refills. The node itself stays protected. Bots behind one shared address

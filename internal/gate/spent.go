@@ -7,24 +7,32 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Choffolo/spikes402/internal/persist"
 )
 
 // spentSet remembers redeemed token IDs until they expire, so that each
-// token can be used only once. It lives in memory: restarting the proxy
-// forgets it, which is safe only because tokens expire quickly anyway
-// (see "Known limits" in the README).
+// token can be used only once. When a SpentStore is set, uses and releases
+// are written to disk before memory is updated, so a restart cannot replay
+// a spent token.
 //
 // One exception, for payers: if the origin fails to answer (see release),
 // the token can be used again, a few times and only for a short while.
 //
 // Keys are compact: 1 byte kind + 16-byte id. Expiry is stored as Unix
 // seconds. The public methods still take the same string ids as before.
+// SpentStore persists spent tokens across restarts.
+type SpentStore interface {
+	Persist(persist.SpentRecord) error
+}
+
 type spentSet struct {
 	mu        sync.Mutex
 	ids       map[spentID]spentEntry
 	max       int
 	inserts   int
 	lastSweep time.Time
+	store     SpentStore
 }
 
 // spentID is "pay" or "pow" plus the 16-byte token id.
@@ -57,6 +65,16 @@ const maxSpent = 1_000_000
 
 func newSpentSet() *spentSet {
 	return &spentSet{ids: make(map[spentID]spentEntry), max: maxSpent}
+}
+
+func (s *spentSet) load(recs []persist.SpentRecord) {
+	for _, r := range recs {
+		s.ids[compactID(r.ID)] = spentEntry{expires: r.Expires, first: r.First, retries: r.Retries, released: r.Released}
+	}
+}
+
+func toSpentRecord(id string, e spentEntry) persist.SpentRecord {
+	return persist.SpentRecord{ID: id, Expires: e.expires, First: e.first, Retries: e.retries, Released: e.released}
 }
 
 // compactID packs a spent-set key. Production keys are "pay:" or "pow:"
@@ -99,6 +117,9 @@ func (s *spentSet) use(id string, expires, now time.Time) error {
 	if e, seen := s.ids[key]; seen {
 		if e.released && now.Unix() < e.first+int64(retryWindow.Seconds()) {
 			e.released = false
+			if err := s.persistLocked(id, e); err != nil {
+				return err
+			}
 			s.ids[key] = e
 			return nil
 		}
@@ -119,7 +140,21 @@ func (s *spentSet) use(id string, expires, now time.Time) error {
 	if len(s.ids) >= s.max {
 		return errBusy
 	}
-	s.ids[key] = spentEntry{expires: expires.Unix(), first: now.Unix()}
+	e := spentEntry{expires: expires.Unix(), first: now.Unix()}
+	if err := s.persistLocked(id, e); err != nil {
+		return err
+	}
+	s.ids[key] = e
+	return nil
+}
+
+func (s *spentSet) persistLocked(id string, e spentEntry) error {
+	if s.store == nil {
+		return nil
+	}
+	if err := s.store.Persist(toSpentRecord(id, e)); err != nil {
+		return errBusy
+	}
 	return nil
 }
 
@@ -136,6 +171,7 @@ func (s *spentSet) release(id string, now time.Time) {
 	}
 	e.retries++
 	e.released = true
+	_ = s.persistLocked(id, e) // if disk fails, still release in this process
 	s.ids[key] = e
 }
 

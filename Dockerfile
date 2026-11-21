@@ -21,12 +21,15 @@ COPY pow ./pow
 COPY webbotauth ./webbotauth
 
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/spikes402 ./cmd/spikes402
+RUN mkdir -p /out/state && chmod 0700 /out/state
 
 # Static, non-root, no shell. Includes CA certificates (needed to fetch
 # crawler IP lists). The default user is 65532:65532.
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build --chown=nonroot:nonroot /out/spikes402 /spikes402
 COPY --from=build /src/LICENSE /LICENSE
+# Empty state dir, owned by the process user, so a named volume starts writable.
+COPY --from=build --chown=nonroot:nonroot /out/state /var/lib/spikes402
 USER nonroot:nonroot
 # Soft heap target for the Go runtime. Override at run time if the host
 # has more (or less) memory, e.g. docker compose environment GOMEMLIMIT=512MiB.
