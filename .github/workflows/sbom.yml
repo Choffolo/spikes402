@@ -1,0 +1,43 @@
+name: sbom
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: ${{ github.event_name == 'release' && 'write' || 'read' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.27.4"
+      - name: Generate SBOMs and scan
+        run: ./scripts/sbom.sh
+      - name: Upload SBOM and VEX
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: spikes402-sbom
+          path: |
+            sbom/spikes402-source.cdx.json
+            sbom/spikes402-image.cdx.json
+            vex/spikes402.openvex.json
+          if-no-files-found: error
+      - name: Attach SBOM to the GitHub Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            sbom/spikes402-source.cdx.json \
+            sbom/spikes402-image.cdx.json \
+            vex/spikes402.openvex.json \
+            --clobber

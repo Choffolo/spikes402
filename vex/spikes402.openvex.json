@@ -1,0 +1,63 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/Choffolo/spikes402/blob/main/vex/spikes402.openvex.json",
+  "author": "Spikes402 maintainers",
+  "role": "document_creator",
+  "timestamp": "2026-11-21T19:00:00.000Z",
+  "version": 1,
+  "tooling": "manual",
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "DLA-4845-1"
+      },
+      "products": [
+        {
+          "@id": "pkg:deb/debian/ca-certificates@20250419~deb12u1"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "inline_mitigations_already_exist",
+      "impact_statement": "The runtime image is gcr.io/distroless/static-debian12:nonroot (digest sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab, still the current tag as of 2026-11-21), which ships ca-certificates 20250419~deb12u1. DLA-4845-1 removes trust in compromised eMudhra / emSign intermediates. This process is a Go 1.27.4 binary; Go 1.27.3 and later reject those chains in crypto/x509 (GO-2026-6809) even if the system store still contains the roots. The image digest will be refreshed when distroless publishes a base that includes 20250419~deb12u2."
+    },
+    {
+      "vulnerability": {
+        "name": "DLA-4792-1"
+      },
+      "products": [
+        {
+          "@id": "pkg:deb/debian/tzdata@2026b-0+deb12u1"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "DLA-4792-1 ships a newer timezone database (2026c), not a vulnerability in tzdata. It does not affect payment, TLS, or access control."
+    },
+    {
+      "vulnerability": {
+        "name": "DLA-4854-1"
+      },
+      "products": [
+        {
+          "@id": "pkg:deb/debian/tzdata@2026b-0+deb12u1"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "DLA-4854-1 ships a newer timezone database (2026e), not a vulnerability in tzdata. It does not affect payment, TLS, or access control."
+    },
+    {
+      "vulnerability": {
+        "name": "DLA-4867-1"
+      },
+      "products": [
+        {
+          "@id": "pkg:deb/debian/tzdata@2026b-0+deb12u1"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "DLA-4867-1 ships a newer timezone database (2026f), not a vulnerability in tzdata. It does not affect payment, TLS, or access control."
+    }
+  ]
+}
