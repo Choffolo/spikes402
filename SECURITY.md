@@ -26,6 +26,30 @@ Only the latest commit on `main` gets security fixes.
 - Keep the node's balance low; move earnings out regularly.
 - Keep `ai_can_apply` off (see below).
 
+
+## Browser wallet
+
+The Manifest V3 extension in `extension/` is a **prototype**. Use only tiny
+amounts on mainnet. See [Try the wallet](docs/try-the-wallet.md).
+
+- The 12-word recovery phrase is created or restored locally and stored
+  encrypted (PBKDF2-SHA-256, 600,000 iterations, AES-256-GCM). Unlock
+  decrypts it only in the wallet host, not in the service worker. The host
+  locks after 15 minutes of inactivity.
+- Spark's trust model is not a self-custodial Lightning node. The wallet
+  talks to three signing operators (threshold 2-of-3): Lightspark, Breez,
+  and Flashnet. Lightning send and receive go through Lightspark as the
+  default Lightning service provider (LSP). There is no published
+  third-party code audit of this protocol or of the Spark SDK we use.
+- Spark allows a unilateral on-chain exit; that button is **not** in the
+  extension yet. Recovering funds that way today needs the phrase and an
+  external tool (`sparkcli`).
+- While the wallet is unlocked, a page can be paid automatically if it
+  fits the caps (default: 10 sats per page, 100 per site per day, 500 per
+  day, fees included). Over a cap, the popup asks for confirmation.
+- Keys never leave this machine; there is no Spikes402 server for the
+  wallet. Report extension bugs the same way as above.
+
 ## Known limitations
 
 These are known and not fixed yet. Contributions are welcome.

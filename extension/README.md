@@ -11,7 +11,8 @@ The wallet uses the official [Spark SDK](https://docs.spark.money/wallets/typesc
 signup are required.
 
 This is an early prototype. Do not store more than you can afford to lose.
-On mainnet, use only tiny amounts.
+On mainnet, use only tiny amounts. To try it in your browser, see
+[Try the wallet](../docs/try-the-wallet.md).
 
 ## What works today
 
@@ -98,7 +99,7 @@ npm run build
 Spark SDK (including its WASM) is compiled into the offscreen / wallet
 host script, not loaded from a CDN.
 
-`npm run pack` also writes `/workspace/spikes402-extension.zip` (a zip of
+`npm run pack` also writes `spikes402-extension.zip` in this directory (a zip of
 `dist/`) for copying onto another machine.
 
 `npm run audit` runs `npm audit --omit=dev` on production dependencies.
