@@ -87,3 +87,25 @@ These are known and not fixed yet. Contributions are welcome.
   (default 256 MiB). With the default 16 MiB per check, that is 16 at once;
   with 256 MiB per check, one. A setting where one check needs more than
   the budget is refused.
+
+
+## Software bill of materials and VEX
+
+A CycloneDX SBOM of the Go module, the browser extension's npm dependencies
+(including devDependencies), and the runtime Docker image is generated on
+every push and pull request by the `sbom` workflow and attached as the
+`spikes402-sbom` artifact (`spikes402-source.cdx.json` and
+`spikes402-image.cdx.json`). There is no separate release workflow; when a
+GitHub Release is published, the same job attaches those files (and the VEX
+document) to the release.
+
+To generate and scan locally (linux/amd64, Docker optional for the image):
+
+```sh
+./scripts/sbom.sh
+```
+
+Known findings are recorded in
+[`vex/spikes402.openvex.json`](vex/spikes402.openvex.json) (OpenVEX). The
+scan fails CI only on reachable Go issues (`govulncheck`) and on scanner
+findings that are not yet addressed in that file.

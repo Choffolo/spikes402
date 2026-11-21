@@ -1,0 +1,10 @@
+# Syft settings for ./scripts/sbom.sh (CycloneDX SBOMs).
+javascript:
+  # The extension's devDependencies (Vite, ESLint, tests) are part of the
+  # supply chain for anyone who builds the wallet.
+  include-dev-dependencies: true
+
+# We catalog packages only (no per-file components).
+file:
+  metadata:
+    selection: none

@@ -714,6 +714,9 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
 go test -race ./...
 ```
 
+A CycloneDX SBOM and an OpenVEX document are generated in CI; see
+[Software bill of materials and VEX](SECURITY.md#software-bill-of-materials-and-vex).
+
 Layout: `cmd/spikes402` (proxy), `cmd/spikes-bot` (example bot),
 `cmd/demo-origin` (test website), `internal/gate` (402 logic),
 `cmd/spikes402-mcp` (AI admin), `internal/admin` (dashboard, siege monitor,

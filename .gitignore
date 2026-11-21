@@ -15,3 +15,8 @@ extension/spikes402-extension.zip
 
 # Default on-disk state (spent tokens, withdrawal intents)
 /state/
+
+# Generated SBOMs and local scan reports (CI uploads the CycloneDX files as artifacts)
+/sbom/*.cdx.json
+/sbom/*.json
+/sbom/*.tar
