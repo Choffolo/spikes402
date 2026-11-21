@@ -1,11 +1,14 @@
 import { sparkBackend } from "./spark";
 import { PaymentPendingError, WalletError } from "./backend";
 import { decryptMnemonic, type EncryptedVault } from "./crypto";
+import { quizPasses } from "./backup";
 import { isExtensionPage } from "./sender";
 
 type WalletMsg =
   | { target: "wallet"; type: "connect"; mnemonic: string; network: "regtest" | "mainnet" }
   | { target: "wallet"; type: "connect"; vault: EncryptedVault; password: string; network: "regtest" | "mainnet" }
+  | { target: "wallet"; type: "reveal"; vault: EncryptedVault; password: string }
+  | { target: "wallet"; type: "checkWords"; vault: EncryptedVault; password: string; answers: unknown }
   | { target: "wallet"; type: "disconnect" }
   | { target: "wallet"; type: "getInfo" }
   | { target: "wallet"; type: "receive"; amountSats: number }
@@ -52,6 +55,14 @@ async function handle(msg: WalletMsg): Promise<unknown> {
         (msg as { mnemonic?: string; password?: string }).mnemonic = "";
         (msg as { password?: string }).password = "";
       }
+    }
+    case "reveal":
+      // Decrypted here, like unlock, so the service worker never holds the phrase.
+      return { mnemonic: await decryptMnemonic(msg.vault, msg.password) };
+    case "checkWords": {
+      const mnemonic = await decryptMnemonic(msg.vault, msg.password);
+      if (!quizPasses(mnemonic, msg.answers)) throw new WalletError("Those words do not match your recovery phrase. Check your notes and try again.");
+      return { ok: true };
     }
     case "disconnect":
       await sparkBackend.disconnect();

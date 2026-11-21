@@ -58,6 +58,25 @@ describe("spark backend send", () => {
   });
 });
 
+describe("spark backend send speed", () => {
+  it("looks for the preimage every quarter second at first, so a quick payment is not held back", async () => {
+    vi.useFakeTimers();
+    wallet.getLightningSendRequest
+      .mockReset()
+      .mockResolvedValueOnce({ status: "LIGHTNING_PAYMENT_INITIATED" })
+      .mockResolvedValueOnce({ status: "LIGHTNING_PAYMENT_INITIATED" })
+      .mockResolvedValue({ status: "LIGHTNING_PAYMENT_SUCCEEDED", paymentPreimage: "00".repeat(32) });
+    const { sparkBackend } = await import("./spark");
+    let settled = false;
+    const p = sparkBackend.send(invoice, undefined, { maxFeeSats: 25 }).catch(() => undefined).then(() => (settled = true));
+    await vi.advanceTimersByTimeAsync(600); // two polls at 250 ms, the third finds it
+    expect(wallet.getLightningSendRequest).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+    await p;
+    expect(settled).toBe(true);
+  });
+});
+
 describe("spark backend lookupSend", () => {
   it("tells settled, failed and pending apart", async () => {
     const { sparkBackend } = await import("./spark");

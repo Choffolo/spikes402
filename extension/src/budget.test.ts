@@ -31,7 +31,7 @@ describe("decidePayment", () => {
     expect(d.action).toBe("confirm");
     if (d.action !== "confirm") throw new Error("expected confirm");
     expect(d.cause).toBe("over_payment_cap");
-    expect(d.reason).toMatch(/above the per-page cap of 10/);
+    expect(d.reason).toMatch(/more than your limit for one page \(10 sats, fee included\)/);
   });
 
   it("counts fees toward the per-page cap", () => {
@@ -40,7 +40,7 @@ describe("decidePayment", () => {
     expect(d.action).toBe("confirm");
     if (d.action !== "confirm") throw new Error("expected confirm");
     expect(d.cause).toBe("over_payment_cap");
-    expect(d.reason).toMatch(/15 sats/);
+    expect(d.reason).toMatch(/limit for one page/);
     expect(decidePayment({ ...base, amountSats: 10, feeSats: 0 }).action).toBe("pay");
   });
 
@@ -59,7 +59,7 @@ describe("decidePayment", () => {
     expect(d.action).toBe("confirm");
     if (d.action !== "confirm") throw new Error("expected confirm");
     expect(d.cause).toBe("over_global_day");
-    expect(d.reason).toMatch(/total spend/);
+    expect(d.reason).toMatch(/total spending/);
   });
 
   it("counts fees against the daily caps as well", () => {

@@ -11,56 +11,98 @@
       <h1>Spikes402 Wallet</h1>
       <p id="network-flag" class="muted"></p>
     </header>
-    <p id="msg" class="msg" hidden></p>
+    <p id="msg" class="msg" role="alert" hidden></p>
 
     <section id="view-setup" hidden>
-      <p>Create a wallet in this browser, or restore one from a 12-word phrase. The words never leave this machine.</p>
-      <label>Password (at least 8 characters) <input id="setup-pass" type="password" autocomplete="new-password" /></label>
-      <label>Confirm password <input id="setup-pass2" type="password" autocomplete="new-password" /></label>
-      <div class="row">
-        <button id="btn-create" type="button">Create a new wallet</button>
-        <button id="btn-show-restore" type="button" class="secondary">I have a recovery phrase</button>
-      </div>
-      <div id="restore-box" hidden>
-        <label>Recovery phrase
-          <textarea id="restore-words" rows="3" placeholder="twelve words, separated by spaces"></textarea>
+      <p>Your wallet lives only in this browser. There is no account and no email.</p>
+      <button id="btn-create" type="button">Create a new wallet</button>
+      <button id="btn-show-restore" type="button" class="secondary">Restore from 12 words</button>
+    </section>
+
+    <section id="view-restore" hidden>
+      <form id="form-restore-words">
+        <h2>Restore your wallet</h2>
+        <label>Your 12 recovery words
+          <textarea id="restore-words" rows="3" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Type the words with a space between them"></textarea>
         </label>
-        <button id="btn-restore" type="button">Restore wallet</button>
-      </div>
+        <button type="submit">Next</button>
+        <button id="btn-restore-back" type="button" class="secondary">Back</button>
+      </form>
+    </section>
+
+    <section id="view-password" hidden>
+      <form id="form-password">
+        <h2 id="password-title"></h2>
+        <p id="password-help" class="muted"></p>
+        <label>Password (at least 8 characters)
+          <input id="setup-pass" type="password" autocomplete="new-password" />
+        </label>
+        <label>Type the password again
+          <input id="setup-pass2" type="password" autocomplete="new-password" />
+        </label>
+        <button id="btn-password-submit" type="submit"></button>
+        <button id="btn-password-back" type="button" class="secondary">Back</button>
+      </form>
     </section>
 
     <section id="view-backup" hidden>
-      <p><strong>Write these 12 words down and keep them offline.</strong> They are shown once. Anyone who has them can spend your funds. They are not sent to us — we have no server.</p>
-      <ol id="mnemonic-list" class="words"></ol>
-      <label class="check"><input id="backup-confirm" type="checkbox" /> I have written these words down.</label>
-      <button id="btn-backup-done" type="button" disabled>Done</button>
+      <form id="form-backup-gate" hidden>
+        <h2>Finish setting up</h2>
+        <p>Your wallet is not ready yet. Enter your password to see your 12 words again and check that you saved them.</p>
+        <label>Password
+          <input id="gate-pass" type="password" autocomplete="current-password" />
+        </label>
+        <button type="submit">Show my 12 words</button>
+      </form>
+
+      <div id="backup-words" hidden>
+        <h2>Your 12 recovery words</h2>
+        <p><strong>Write these words on paper, in this order, and keep the paper safe.</strong> Anyone with these words can take your money, and they are the only way to get it back if you lose this browser.</p>
+        <p class="muted">Do not click outside this window: it closes. If it does, open the wallet again and enter your password.</p>
+        <ol id="mnemonic-list" class="words"></ol>
+        <button id="btn-backup-next" type="button">I wrote them down</button>
+      </div>
+
+      <form id="form-backup-quiz" hidden>
+        <h2>Check your notes</h2>
+        <p>Type these words from your paper. Your wallet opens when they are right.</p>
+        <div id="quiz-fields"></div>
+        <button type="submit">Confirm and open my wallet</button>
+        <button id="btn-quiz-back" type="button" class="secondary">Show the words again</button>
+      </form>
     </section>
 
     <section id="view-unlock" hidden>
-      <p>Unlock your wallet to pay Spikes402 pages and to send or receive sats.</p>
-      <label>Password <input id="unlock-pass" type="password" autocomplete="current-password" /></label>
-      <button id="btn-unlock" type="button">Unlock</button>
+      <form id="form-unlock">
+        <p>Enter your password to open the wallet.</p>
+        <label>Password
+          <input id="unlock-pass" type="password" autocomplete="current-password" />
+        </label>
+        <button type="submit">Unlock</button>
+      </form>
     </section>
 
     <section id="view-main" hidden>
       <div id="pending-box" class="pending" hidden>
-        <h2>Confirm payment</h2>
+        <h2>Please confirm</h2>
         <p id="pending-text"></p>
         <p class="mono" id="pending-origin"></p>
         <div class="pending-actions">
-          <button id="btn-accept-once" type="button">Pay once</button>
+          <button id="btn-accept-once" type="button">Pay this time</button>
           <button id="btn-accept-always" type="button" class="secondary">Always allow this price on this site</button>
-          <button id="btn-decline" type="button" class="secondary">Decline</button>
+          <button id="btn-decline" type="button" class="secondary">Don't pay</button>
         </div>
-        <p class="muted">You only see this when the page price does not fit your budget.</p>
+        <p class="muted">You only see this when a page costs more than your limits.</p>
       </div>
 
       <p class="balance">Balance: <strong id="balance">—</strong> sats</p>
       <p id="lightning-hint" class="hint"></p>
 
       <h2>Receive</h2>
-      <label>Amount (sats) <input id="recv-amount" type="number" min="1" step="1" value="100" /></label>
-      <button id="btn-receive" type="button">Create Lightning invoice</button>
+      <form id="form-receive">
+        <label>How many sats <input id="recv-amount" type="number" min="1" step="1" value="100" /></label>
+        <button type="submit">Create an invoice to be paid</button>
+      </form>
       <div id="recv-out" hidden>
         <div id="recv-qr" class="qr"></div>
         <p class="mono wrap" id="recv-invoice"></p>
@@ -68,38 +110,57 @@
       </div>
 
       <h2>Send</h2>
-      <label>Lightning invoice or address
-        <textarea id="send-dest" rows="3" placeholder="lnbc… or name@domain"></textarea>
-      </label>
-      <label>Amount (sats), if the invoice has none
-        <input id="send-amount" type="number" min="1" step="1" />
-      </label>
-      <button id="btn-send" type="button">Send</button>
+      <form id="form-send">
+        <label>Lightning invoice or Lightning address
+          <textarea id="send-dest" rows="3" autocomplete="off" spellcheck="false" placeholder="lnbc… or name@domain.com"></textarea>
+        </label>
+        <label>How many sats (only if you send to an address, or the invoice has no amount)
+          <input id="send-amount" type="number" min="1" step="1" />
+        </label>
+        <button type="submit">Send</button>
+      </form>
 
-      <h2>Budgets</h2>
-      <label>Max sats per page payment <input id="set-per-pay" type="number" min="1" step="1" /></label>
-      <label>Max sats per site per day <input id="set-per-site" type="number" min="1" step="1" /></label>
-      <label>Max sats per day (all sites) <input id="set-per-day" type="number" min="1" step="1" /></label>
-      <p class="muted">Pages that fit this budget are paid automatically (invoice plus fees). You are only asked when a page costs more than these caps.</p>
-      <button id="btn-save-budget" type="button" class="secondary">Save budgets</button>
+      <button id="btn-history" type="button" class="secondary spaced">Transaction history</button>
+
+      <h2>Limits</h2>
+      <label>Most to pay for one page, fee included <input id="set-per-pay" type="number" min="1" step="1" /></label>
+      <label>Most to pay one site per day <input id="set-per-site" type="number" min="1" step="1" /></label>
+      <label>Most to pay per day, all sites <input id="set-per-day" type="number" min="1" step="1" /></label>
+      <p class="muted">A page is paid for you when its price plus the biggest possible fee fits these limits. Otherwise the wallet asks you first. You only pay the real fee, which is often lower.</p>
+      <button id="btn-save-budget" type="button" class="secondary">Save limits</button>
 
       <h2>Network</h2>
       <label>Network
         <select id="set-network">
-          <option value="mainnet">mainnet (tiny amounts only)</option>
-          <option value="regtest">regtest (no real money; Lightning usually unavailable)</option>
+          <option value="mainnet">Real bitcoin (small amounts only)</option>
+          <option value="regtest">Test network (no real money)</option>
         </select>
       </label>
-      <button id="btn-save-network" type="button" class="secondary">Save network setting</button>
-      <p class="muted">After changing the network, lock and unlock the wallet to apply it. No API key is required.</p>
+      <button id="btn-save-network" type="button" class="secondary">Save network</button>
+      <p class="muted">After you change the network, lock and unlock the wallet.</p>
 
-      <h2>Recent payments</h2>
-      <ul id="history" class="history"></ul>
+      <h2>Recovery words</h2>
+      <form id="form-reveal">
+        <label>Password
+          <input id="reveal-pass" type="password" autocomplete="current-password" />
+        </label>
+        <button type="submit" class="secondary">Show my 12 words</button>
+      </form>
+      <div id="reveal-out" hidden>
+        <ol id="reveal-list" class="words"></ol>
+        <button id="btn-reveal-hide" type="button" class="secondary">Hide the words</button>
+      </div>
 
       <div class="row end">
         <button id="btn-lock" type="button" class="secondary">Lock</button>
-        <p class="muted">The wallet also locks after 15 minutes of inactivity.</p>
+        <p class="muted">The wallet also locks by itself after 15 minutes.</p>
       </div>
+    </section>
+
+    <section id="view-history" hidden>
+      <h2>Transaction history</h2>
+      <ul id="history" class="history"></ul>
+      <button id="btn-history-back" type="button" class="secondary">Back</button>
     </section>
 
     <script type="module" src="./popup.ts"></script>

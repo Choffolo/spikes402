@@ -105,7 +105,7 @@ export function decidePayment(input: {
     return {
       action: "confirm",
       cause: "over_payment_cap",
-      reason: `This page costs ${cost} sats (including up to ${feeSats} sats of fees), above the per-page cap of ${cap} sats.`,
+      reason: `That is more than your limit for one page (${cap} sats, fee included).`,
     };
   }
 
@@ -115,14 +115,14 @@ export function decidePayment(input: {
     return {
       action: "confirm",
       cause: "over_site_day",
-      reason: `This would take today's spend on ${origin} to ${site + cost} sats, including up to ${feeSats} sats of fees (limit ${settings.maxSatsPerSitePerDay}).`,
+      reason: `Paying would bring today's spending on ${origin} to ${site + cost} sats at most, fees included. Your daily limit for this site is ${settings.maxSatsPerSitePerDay} sats.`,
     };
   }
   if (spend.globalSats + cost > settings.maxSatsPerDay) {
     return {
       action: "confirm",
       cause: "over_global_day",
-      reason: `This would take today's total spend to ${spend.globalSats + cost} sats, including up to ${feeSats} sats of fees (limit ${settings.maxSatsPerDay}).`,
+      reason: `Paying would bring today's total spending to ${spend.globalSats + cost} sats at most, fees included. Your daily limit is ${settings.maxSatsPerDay} sats.`,
     };
   }
   return { action: "pay" };

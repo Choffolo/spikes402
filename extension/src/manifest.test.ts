@@ -1,16 +1,30 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const manifest = JSON.parse(readFileSync(new URL("./manifest.json", import.meta.url), "utf8"));
-const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const read = (f: string) => JSON.parse(readFileSync(new URL(f, import.meta.url), "utf8"));
+const manifest = read("./manifest.json");
+const firefox = read("./manifest.firefox.json");
+const pkg = read("../package.json");
 
 describe("manifest", () => {
-  it("has a service worker for Chrome and background scripts for Firefox", () => {
-    expect(manifest.background.service_worker).toBe("background.js");
-    expect(manifest.background.scripts).toEqual(["background.js"]);
+  it("the Chrome manifest has a service worker and nothing Chrome would warn about", () => {
+    expect(manifest.background).toEqual({ service_worker: "background.js", type: "module" });
+    expect(manifest.browser_specific_settings).toBeUndefined();
+  });
+
+  it("the Firefox additions are kept apart: background scripts and the add-on id", () => {
+    expect(firefox.background.scripts).toEqual(["background.js"]);
+    expect(firefox.browser_specific_settings.gecko.id).toBeTruthy();
+    expect(Object.keys(firefox).sort()).toEqual(["background", "browser_specific_settings"]);
   });
 
   it("has the same version as package.json", () => {
     expect(manifest.version).toBe(pkg.version);
+  });
+
+  it("allows https connections (Lightning addresses) but no remote scripts", () => {
+    const csp: string = manifest.content_security_policy.extension_pages;
+    expect(csp).toMatch(/script-src 'self' 'wasm-unsafe-eval'/);
+    expect(csp).toMatch(/connect-src 'self' https:/);
   });
 });
