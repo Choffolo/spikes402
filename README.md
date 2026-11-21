@@ -633,13 +633,13 @@ per page, 100 per site per day, 500 per day. This is an early prototype: on
 mainnet, use only tiny amounts. [Try it](docs/try-the-wallet.md); build
 notes are in [extension/README.md](extension/README.md).
 
-## Inspirations
+## Inspirations and thank you
 
 Spikes402 is dedicated to the books and thinkers that shaped it:
 
 - *Softwar* by Jason P. Lowery
 - *The Sovereign Individual* by James Dale Davidson and William Rees-Mogg
-- The work of Hans-Hermann Hoppe
+- *Democracy: The God That Failed* by Hans-Hermann Hoppe
 - *The Virtue of Selfishness* by Ayn Rand
 
 ## Donations
