@@ -20,14 +20,19 @@ let setup: { mode: "create" | "restore"; words?: string } = { mode: "create" };
 let backup: { password: string; mnemonic: string } | undefined;
 let revealTimer: ReturnType<typeof setTimeout> | undefined;
 
-function showMsg(text: string, err = false) {
+type MsgKind = "ok" | "err" | "info";
+
+function showMsg(text: string, kind: MsgKind | boolean = "ok") {
   const el = $("msg");
   el.hidden = !text;
   el.textContent = text;
-  el.classList.toggle("err", err);
+  // `true` is kept as a synonym of "err" so existing call sites stay obvious.
+  const k: MsgKind = kind === true ? "err" : kind === false ? "ok" : kind;
+  el.classList.toggle("err", k === "err");
+  el.classList.toggle("info", k === "info");
 }
 
-const fail = (e: unknown) => showMsg(e instanceof Error ? e.message : String(e), true);
+const fail = (e: unknown) => showMsg(e instanceof Error ? e.message : String(e), "err");
 
 function call<T>(msg: Record<string, unknown>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -329,7 +334,7 @@ onSubmit("form-send", async () => {
   const amountSats = raw ? Number(raw) : undefined;
   const button = $<HTMLButtonElement>("form-send").querySelector("button[type=submit]") as HTMLButtonElement;
   button.disabled = true; // one send at a time
-  showMsg("Sending…");
+  showMsg("Sending…", "info");
   try {
     const res = await call<{ detail: string }>({ type: "send", destination, amountSats });
     ($("send-dest") as HTMLTextAreaElement).value = "";

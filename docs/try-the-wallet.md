@@ -1,6 +1,6 @@
 # Try the Spikes402 wallet
 
-A short guide to the prototype browser extension (version 0.1.3). **This is
+A short guide to the prototype browser extension (version 0.1.4). **This is
 unreviewed prototype software. On mainnet, use only tiny amounts. Do not
 store more than you can afford to lose.**
 
@@ -100,8 +100,10 @@ or failed, and the page shows an error. Do not pay the same invoice again.
 **Transaction history** in the popup lists the last 20 payments: site, time,
 price, fee and total.
 
-The toolbar badge shows the price of the current page, in sats, and clears
-when you leave. Colour: muted for the price, teal after a successful
-payment, amber if a confirmation is waiting.
+The toolbar badge shows the price of the current page, in sats. It stays
+on the icon in teal after the page is paid and opens, and clears when you
+leave for another address. The icon flashes yellow briefly when a payment
+succeeds. Colour: muted for the price, teal after a successful payment,
+amber if a confirmation is waiting.
 
 Build notes and security details: [extension/README.md](../extension/README.md).

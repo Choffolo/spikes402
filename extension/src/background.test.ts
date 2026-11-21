@@ -14,6 +14,9 @@ let sends: Record<string, unknown>[];
 let walletOther: (msg: Record<string, unknown>) => Reply;
 let hostUnlocked: boolean;
 let walletCalls: Record<string, unknown>[];
+let badges: Record<number, { text?: string; color?: string; title?: string }>;
+let icons: { tabId: number; path: Record<string, string> }[];
+let tabUpdated: ((tabId: number, info: { url?: string }, tab?: { url?: string }) => void) | undefined;
 
 const OK = (feeSats?: number): Reply => ({ preimage: "00".repeat(32), detail: "ok", ...(feeSats === undefined ? {} : { feeSats }) });
 const PENDING_REPLY: Reply = { error: "Timed out waiting for the Lightning payment preimage.", uncertain: true, requestId: "req-1" };
@@ -26,7 +29,11 @@ function installChrome() {
   walletOther = () => ({});
   hostUnlocked = true;
   walletCalls = [];
+  badges = {};
+  icons = [];
+  tabUpdated = undefined;
   const noop = async () => undefined;
+  const badge = (tabId: number) => (badges[tabId] ??= {});
   (globalThis as unknown as { chrome: unknown }).chrome = {
     runtime: {
       onInstalled: { addListener: () => undefined },
@@ -53,7 +60,10 @@ function installChrome() {
       },
     },
     offscreen: { createDocument: noop, Reason: { WORKERS: "WORKERS" } },
-    tabs: { onRemoved: { addListener: () => undefined } },
+    tabs: {
+      onRemoved: { addListener: () => undefined },
+      onUpdated: { addListener: (l: typeof tabUpdated) => (tabUpdated = l) },
+    },
     storage: {
       local: {
         get: async (k: string) => ({ [k]: structuredClone(store[k]) }),
@@ -62,7 +72,21 @@ function installChrome() {
         },
       },
     },
-    action: { setBadgeText: noop, setTitle: noop, setBadgeBackgroundColor: noop, openPopup: noop },
+    action: {
+      setBadgeText: async (o: { tabId: number; text: string }) => {
+        badge(o.tabId).text = o.text;
+      },
+      setTitle: async (o: { tabId: number; title: string }) => {
+        badge(o.tabId).title = o.title;
+      },
+      setBadgeBackgroundColor: async (o: { tabId: number; color: string }) => {
+        badge(o.tabId).color = o.color;
+      },
+      setIcon: async (o: { tabId: number; path: Record<string, string> }) => {
+        icons.push(o);
+      },
+      openPopup: noop,
+    },
     notifications: { create: noop },
   };
 }
@@ -424,6 +448,75 @@ describe("sending from the popup", () => {
       expect(sends).toHaveLength(0);
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("toolbar badge after a page is paid", () => {
+  const url = "https://a.example/premium/a";
+  const sender = (href = url, tab = 1) => ({
+    origin: "https://a.example",
+    url: href,
+    tab: { id: tab, url: href },
+  });
+  const report = (amount: number | null, href = url, tab = 1) =>
+    call({ type: "pagePrice", amountSats: amount }, sender(href, tab));
+  const payHere = () =>
+    call({ type: "webln", method: "sendPayment", origin: "https://a.example", invoice: encodeBolt11ForTest("lnbc20n") }, sender());
+
+  it("shows the muted price on the 402 page, then keeps a teal paid badge after the unlock reload", async () => {
+    await report(2);
+    expect(badges[1]).toMatchObject({ text: "2", color: "#44403c" });
+
+    expect((await payHere()).error).toBeUndefined();
+    expect(badges[1]).toMatchObject({ text: "2", color: "#0f766e", title: expect.stringMatching(/^Paid 2 sats/) });
+
+    // The page reloads on the same URL; the content script reports no invoice
+    // (and Chrome has cleared the tab badge). Write the paid badge again.
+    badges[1] = {}; // as Chrome does on navigation
+    await report(null);
+    expect(badges[1]).toMatchObject({ text: "2", color: "#0f766e" });
+  });
+
+  it("clears the badge when the tab leaves that URL", async () => {
+    await report(2);
+    await payHere();
+    await report(null);
+    expect(badges[1].text).toBe("2");
+
+    await report(null, "https://a.example/blog");
+    expect(badges[1]).toMatchObject({ text: "", title: "Spikes402 Wallet" });
+  });
+
+  it("clears the badge when the tab navigates to another URL (tabs.onUpdated)", async () => {
+    await report(2);
+    await payHere();
+    expect(tabUpdated).toBeDefined();
+    tabUpdated!(1, { url: "https://a.example/blog" });
+    await tick();
+    expect(badges[1]).toMatchObject({ text: "", title: "Spikes402 Wallet" });
+  });
+
+  it("does not clear the badge on a same-URL reload event", async () => {
+    await report(2);
+    await payHere();
+    tabUpdated!(1, { url });
+    await tick();
+    expect(badges[1]).toMatchObject({ text: "2", color: "#0f766e" });
+  });
+
+  it("flashes the yellow toolbar icon when the payment succeeds", async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = payHere();
+      await vi.advanceTimersByTimeAsync(20);
+      await pending;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(icons.some((i) => i.path["16"] === "icons/icon-flash-16.png")).toBe(true);
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(icons.at(-1)?.path["16"]).toBe("icons/icon-16.png");
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

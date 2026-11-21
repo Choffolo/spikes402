@@ -82,8 +82,11 @@ On mainnet, use only tiny amounts. To try it in your browser, see
   payment result every 0.25 s at first, instead of every second.
 - Toolbar badge: the number of sats the current tab's page costs to open
   (read from the 402 invoice on the page). The badge is cleared when you
-  navigate away. Colour is muted for the price, teal after a successful
-  pay, and amber if a confirmation is waiting.
+  navigate away (including after you leave a page you just paid). Colour is
+  muted for the price, teal after a successful pay — and it stays teal with
+  the price on the unlocked page after the reload, until you go to another
+  URL. The toolbar icon also flashes yellow briefly when a payment
+  succeeds. Amber if a confirmation is waiting.
 - `window.webln` on http(s) pages: `enable`, `sendPayment`, `getInfo`.
   `getInfo` returns only a node alias and the method list (no identity
   key or pubkey). `sendPayment` decodes the invoice amount, verifies the
@@ -227,7 +230,7 @@ payments, release and settle, fee cap shared with the wallet, no stalling
 behind a slow invoice), the confirmation queue and its expiry, the
 manifest, and budget decisions (silent pay when a page fits, confirm
 when it does not, site allowances, refuse amountless invoices, day reset,
-fees on every cap), toolbar badge text, BOLT11 amount, checksum and
+fees on every cap), toolbar badge text (kept after a paid reload, cleared on another URL, yellow icon flash), BOLT11 amount, checksum and
 payment-hash parsing, local preimage checks, mnemonic generation and
 password encryption, sender/origin and settings checks, and Spark helpers
 (network mapping, fee cap, address shape, payment status, faster result

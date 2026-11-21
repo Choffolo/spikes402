@@ -1,4 +1,12 @@
-import { applyTabBadge, type TabPrice } from "./badge";
+import {
+  applyTabBadge,
+  badgeAfterPriceReport,
+  flashPaidIcon,
+  pageKey,
+  restoreTabIcon,
+  samePage,
+  type TabPrice,
+} from "./badge";
 import {
   adjustSpend,
   decidePayment,
@@ -69,6 +77,19 @@ chrome.runtime.onStartup?.addListener(() => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabPrices.delete(tabId);
+  restoreTabIcon(tabId);
+});
+
+// The badge is per-tab and Chrome clears it on navigation. If the new URL
+// is not the page we just paid, drop the memory and the icon flash too.
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (!info.url) return;
+  const prev = tabPrices.get(tabId);
+  if (!prev) return;
+  if (samePage(prev.pageUrl, info.url)) return;
+  tabPrices.delete(tabId);
+  restoreTabIcon(tabId);
+  void applyTabBadge(tabId, undefined);
 });
 
 chrome.runtime.onMessage.addListener((msg: PopupMsg | PageMsg | PagePriceMsg | AutoPayMsg, sender, sendResponse) => {
@@ -315,7 +336,7 @@ async function handleWebln(msg: PageMsg, sender: chrome.runtime.MessageSender): 
     });
     if (!res.preimage) throw new WalletCallError("The wallet paid, but did not return a preimage.", true);
     await finishReservation(reservation.id, { settled: true, feeSats: res.feeSats }, "Paid.");
-    markPaid(sender.tab?.id, amountSats ?? 0);
+    markPaid(sender.tab?.id, amountSats ?? 0, sender.tab?.url);
     return { preimage: res.preimage };
   } catch (e) {
     const detail = e instanceof Error ? e.message : String(e);
@@ -566,28 +587,25 @@ function handlePagePrice(msg: PagePriceMsg, sender: chrome.runtime.MessageSender
     typeof msg.amountSats === "number" && Number.isFinite(msg.amountSats) && msg.amountSats > 0
       ? Math.floor(msg.amountSats)
       : undefined;
-  if (!amount) {
-    tabPrices.delete(tabId);
-    void applyTabBadge(tabId, undefined);
-    return;
-  }
-  const prev = tabPrices.get(tabId);
-  const paid = !!prev?.paid && prev.amountSats === amount;
-  const state: TabPrice = { amountSats: amount, paid, needsConfirm: !!prev?.needsConfirm };
-  tabPrices.set(tabId, state);
+  const pageUrl = sender.tab?.url ?? sender.url;
+  const state = badgeAfterPriceReport(tabPrices.get(tabId), amount, pageUrl);
+  if (state) tabPrices.set(tabId, state);
+  else tabPrices.delete(tabId);
   void applyTabBadge(tabId, state);
 }
 
-function markPaid(tabId: number | undefined, amountSats: number): void {
+function markPaid(tabId: number | undefined, amountSats: number, pageUrl?: string): void {
   if (tabId === undefined) return;
   const prev = tabPrices.get(tabId);
   const state: TabPrice = {
     amountSats: prev?.amountSats ?? amountSats,
     paid: true,
     needsConfirm: false,
+    pageUrl: pageKey(pageUrl) || prev?.pageUrl,
   };
   tabPrices.set(tabId, state);
   void applyTabBadge(tabId, state);
+  flashPaidIcon(tabId);
 }
 
 function markConfirm(tabId: number | undefined, needsConfirm: boolean): void {
