@@ -134,15 +134,15 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "URI too long", http.StatusRequestURITooLong)
 		return
 	}
-	// Refuse paths like "/free/../paid" or "/free%2f..%2fpaid": the origin
-	// could normalise them into a protected path we did not recognise.
-	if why := checkPath(r.URL); why != "" {
-		http.Error(w, "bad path: "+why, http.StatusBadRequest)
-		return
-	}
 	passes := takePassCookies(r) // read before session() removes them
 	session := g.session(r)      // our cookies: not the origin's business
 	set := g.live.Load()         // one consistent snapshot for this request
+	// Refuse paths like "/free/../paid" or "/free%2f..%2fpaid": the origin
+	// could normalise them into a protected path we did not recognise.
+	if why := checkPath(r.URL, func(p string) bool { return g.protected(p, set) }); why != "" {
+		http.Error(w, "bad path: "+why, http.StatusBadRequest)
+		return
+	}
 	if !g.protected(r.URL.Path, set) {
 		g.opt.Next.ServeHTTP(w, r)
 		return

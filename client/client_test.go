@@ -1,9 +1,11 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -161,5 +163,69 @@ func TestBotSignsRequests(t *testing.T) {
 	}
 	if got := resp.Header.Get(gate.ClassHeader); got != `verified-signed; name="`+agent+`"; method=web-bot-auth` {
 		t.Fatalf("class %q", got)
+	}
+}
+
+func TestBotDoesNotLogPreimage(t *testing.T) {
+	srv := newProxy(t, 10)
+	var buf bytes.Buffer
+	c := &Client{
+		Mode:  ModePay,
+		Payer: FakePayer{ProxyURL: srv.URL},
+		Logf:  func(format string, args ...any) { fmt.Fprintf(&buf, format+"\n", args...) },
+	}
+	if got := fetch(t, c, srv.URL+"/premium/a"); got != "secret article" {
+		t.Fatalf("got %q", got)
+	}
+	if strings.Contains(buf.String(), "preimage") {
+		t.Fatalf("log leaked preimage: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "402: paid") {
+		t.Fatalf("expected a paid log, got %s", buf.String())
+	}
+}
+
+func TestBotRetriesFinalURLAfterRedirect(t *testing.T) {
+	gate := newProxy(t, 10)
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, gate.URL+"/premium/a", http.StatusFound)
+	}))
+	t.Cleanup(front.Close)
+	if got := fetch(t, &Client{Mode: ModePoW}, front.URL+"/go"); got != "secret article" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestBotRefusesCrossHostRedirectWithProof(t *testing.T) {
+	gate := newProxy(t, 10)
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "leaked")
+	}))
+	t.Cleanup(other.Close)
+	wrap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			http.Redirect(w, r, other.URL+"/stolen", http.StatusFound)
+			return
+		}
+		req, err := http.NewRequest(r.Method, gate.URL+"/premium/a", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header = r.Header.Clone()
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		for k, vs := range resp.Header {
+			w.Header()[k] = vs
+		}
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	}))
+	t.Cleanup(wrap.Close)
+	_, err := (&Client{Mode: ModePoW}).Get(context.Background(), wrap.URL+"/premium/a")
+	if err == nil || !strings.Contains(err.Error(), "different host") {
+		t.Fatalf("got %v, want a cross-host redirect refusal", err)
 	}
 }

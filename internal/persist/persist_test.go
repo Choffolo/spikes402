@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -45,14 +46,14 @@ func TestDirPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Mode().Perm() != 0o700 {
+	if runtime.GOOS != "windows" && st.Mode().Perm() != 0o700 {
 		t.Fatalf("dir mode %o, want 0700", st.Mode().Perm())
 	}
 	if err := writeAtomic(dir, "x", []byte("hi")); err != nil {
 		t.Fatal(err)
 	}
 	mode, err := fileMode(filepath.Join(dir, "x"))
-	if err != nil || mode != 0o600 {
+	if err != nil || (runtime.GOOS != "windows" && mode != 0o600) {
 		t.Fatalf("file mode %o %v, want 0600", mode, err)
 	}
 }
@@ -181,7 +182,7 @@ func TestIntentRoundTripAndCorrupt(t *testing.T) {
 		t.Fatal(err)
 	}
 	mode, err := fileMode(filepath.Join(dir, intentName))
-	if err != nil || mode != 0o600 {
+	if err != nil || (runtime.GOOS != "windows" && mode != 0o600) {
 		t.Fatalf("intent mode %o %v", mode, err)
 	}
 	st2, _ := OpenIntents(dir, key)

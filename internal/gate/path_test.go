@@ -41,8 +41,9 @@ func TestProtectedPathVariants(t *testing.T) {
 			t.Errorf("%s: got %d %q, want 402 or 400", target, rec.Code, rec.Body.String())
 		}
 	}
-	// Free pages still pass, including harmless encodings.
-	for _, target := range []string{"/", "/free", "/blog/post%20one", "/premiumx", "/caf%C3%A9", "/a.pdf.html", "/docs/"} {
+	// Free pages still pass, including harmless encodings. A %25 that does
+	// not change whether the path is protected is not a 400.
+	for _, target := range []string{"/", "/free", "/blog/post%20one", "/premiumx", "/caf%C3%A9", "/a.pdf.html", "/docs/", "/free/100%25off"} {
 		if rec := f.rawGet(t, target); rec.Code != http.StatusOK {
 			t.Errorf("%s: got %d %q, want 200", target, rec.Code, rec.Body.String())
 		}
@@ -99,5 +100,21 @@ func TestMatchKey(t *testing.T) {
 	}
 	if got := matchKey("/Premium", true); got != "/Premium" {
 		t.Errorf("case-sensitive: %q", got)
+	}
+}
+
+func TestUsablePattern(t *testing.T) {
+	for _, pat := range []string{"/docs/**", "/docs", "/*.pdf", "/", "/Premium/**"} {
+		if err := UsablePattern(pat, false); err != nil {
+			t.Errorf("%q refused: %v", pat, err)
+		}
+	}
+	for _, pat := range []string{"/docs/", "/docs//", "/foo/./bar"} {
+		if err := UsablePattern(pat, false); err == nil {
+			t.Errorf("%q accepted", pat)
+		}
+	}
+	if err := UsablePattern("/docs/", false); err == nil || !strings.Contains(err.Error(), "trailing slash") {
+		t.Fatalf("trailing slash message: %v", err)
 	}
 }

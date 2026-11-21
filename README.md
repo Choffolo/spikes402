@@ -156,9 +156,15 @@ web server sits behind Spikes402. So:
 - Request targets longer than 8 KiB get `414 URI Too Long`, and request
   headers are capped at 32 KiB.
 - Paths that servers read differently are refused with `400 Bad Request`:
-  dot segments and double slashes (`/a/../b`, `//b`), encoded slashes,
-  backslashes and percent signs (`%2F`, `%5C`, `\`, `%25`, so no double
-  encoding), and control characters (`%00`, tabs, line breaks).
+  dot segments and double slashes (`/a/../b`, `//b`), encoded slashes
+  and backslashes (`%2F`, `%5C`, `\`), and control characters (`%00`,
+  tabs, line breaks). A `%25` is refused only when a second decode would
+  change whether the path is protected (so `/x/%252e%252e/premium/article`
+  is still a 400; a harmless `%25` on a free page is not).
+- `protect` and `prices` patterns must not end with a trailing slash
+  (except `/` itself). `/docs/` never matches a request, because trailing
+  slashes are stripped before matching. Use `/docs` or `/docs/**`.
+  Patterns that cannot match after this normalisation are also refused.
 - Patterns are matched ignoring letter case (unless `protect_case_sensitive`),
   `;parameters` in a segment (`/premium;x/a`, `/x/..;/premium`), trailing dots
   and spaces in a segment (`/premium./a`) and a trailing slash. All of these

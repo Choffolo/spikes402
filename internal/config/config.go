@@ -31,11 +31,14 @@ const (
 )
 
 // checkPathPattern is the syntax rule shared by "protect" and "prices".
-func checkPathPattern(what, p string) error {
+func checkPathPattern(what, p string, caseSensitive bool) error {
 	if !strings.HasPrefix(p, "/") {
 		return fmt.Errorf(`%s %q must start with "/"`, what, p)
 	}
 	if _, err := path.Match(strings.TrimSuffix(p, "/**"), "/"); err != nil {
+		return fmt.Errorf("%s %q: %w", what, p, err)
+	}
+	if err := gate.UsablePattern(p, caseSensitive); err != nil {
 		return fmt.Errorf("%s %q: %w", what, p, err)
 	}
 	return nil
@@ -247,7 +250,7 @@ func (c *Config) complete() error {
 		return errors.New(`"protect" needs at least one path pattern, e.g. "/premium/**"`)
 	}
 	for _, p := range c.Protect {
-		if err := checkPathPattern("protect pattern", p); err != nil {
+		if err := checkPathPattern("protect pattern", p, c.ProtectCaseSensitive); err != nil {
 			return err
 		}
 	}
@@ -255,7 +258,7 @@ func (c *Config) complete() error {
 		return fmt.Errorf(`"prices" can list at most %d rules`, maxPriceRules)
 	}
 	for i, r := range c.Prices {
-		if err := checkPathPattern("prices pattern", r.Pattern); err != nil {
+		if err := checkPathPattern("prices pattern", r.Pattern, c.ProtectCaseSensitive); err != nil {
 			return err
 		}
 		if r.PriceSats < 1 || r.PriceSats > maxPriceSats {

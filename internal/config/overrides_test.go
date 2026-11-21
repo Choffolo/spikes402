@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -13,8 +14,10 @@ func TestOverridesPath(t *testing.T) {
 	if got := OverridesPath("config.json"); got != "config.overrides.json" {
 		t.Fatalf("got %q", got)
 	}
-	if got := OverridesPath("/etc/spikes402/config.json"); got != "/etc/spikes402/config.overrides.json" {
-		t.Fatalf("got %q", got)
+	in := filepath.FromSlash("/etc/spikes402/config.json")
+	want := filepath.FromSlash("/etc/spikes402/config.overrides.json")
+	if got := OverridesPath(in); got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 
@@ -47,7 +50,7 @@ func TestOverridesRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %o", st.Mode().Perm())
 	}
 	raw, _ := os.ReadFile(file)

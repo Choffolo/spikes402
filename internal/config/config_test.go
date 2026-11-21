@@ -49,6 +49,7 @@ func TestInvalid(t *testing.T) {
 		"huge path price":     `{"origin":"http://o","price_sats":5,"protect":["/x"],"prices":[{"pattern":"/x","price_sats":1000001}],"lightning":{"backend":"fake"}}`,
 		"no patterns":         `{"origin":"http://o","price_sats":5,"lightning":{"backend":"fake"}}`,
 		"bad pattern":         `{"origin":"http://o","price_sats":5,"protect":["x"],"lightning":{"backend":"fake"}}`,
+		"trailing slash":      `{"origin":"http://o","price_sats":5,"protect":["/docs/"],"lightning":{"backend":"fake"}}`,
 		"short secret":        `{"origin":"http://o","price_sats":5,"protect":["/x"],"secret_key":"short","lightning":{"backend":"fake"}}`,
 		"typo":                `{"origin":"http://o","price_sat":5,"protect":["/x"],"lightning":{"backend":"fake"}}`,
 		"no backend":          `{"origin":"http://o","price_sats":5,"protect":["/x"]}`,
@@ -229,5 +230,12 @@ func TestStateDirDefaultAndRelative(t *testing.T) {
 	}
 	if c.StateDir != filepath.Join(dir, "data") {
 		t.Fatalf("relative state_dir: %s", c.StateDir)
+	}
+}
+
+func TestTrailingSlashProtectPattern(t *testing.T) {
+	_, err := load(t, `{"origin":"http://o","price_sats":5,"protect":["/docs/"],"lightning":{"backend":"fake"}}`)
+	if err == nil || !strings.Contains(err.Error(), "trailing slash") {
+		t.Fatalf("got %v", err)
 	}
 }
