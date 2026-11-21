@@ -47,6 +47,11 @@ func TestInvalid(t *testing.T) {
 		"bad prices pattern":  `{"origin":"http://o","price_sats":5,"protect":["/x"],"prices":[{"pattern":"x","price_sats":2}],"lightning":{"backend":"fake"}}`,
 		"zero path price":     `{"origin":"http://o","price_sats":5,"protect":["/x"],"prices":[{"pattern":"/x","price_sats":0}],"lightning":{"backend":"fake"}}`,
 		"huge path price":     `{"origin":"http://o","price_sats":5,"protect":["/x"],"prices":[{"pattern":"/x","price_sats":1000001}],"lightning":{"backend":"fake"}}`,
+		"preview bad mode":    `{"origin":"http://o","price_sats":5,"protect":["/x"],"previews":[{"pattern":"/x","mode":"full"}],"lightning":{"backend":"fake"}}`,
+		"preview no mode":     `{"origin":"http://o","price_sats":5,"protect":["/x"],"previews":[{"pattern":"/x"}],"lightning":{"backend":"fake"}}`,
+		"preview huge chars":  `{"origin":"http://o","price_sats":5,"protect":["/x"],"previews":[{"pattern":"/x","mode":"excerpt","max_chars":1001}],"lightning":{"backend":"fake"}}`,
+		"preview chars/title": `{"origin":"http://o","price_sats":5,"protect":["/x"],"previews":[{"pattern":"/x","mode":"title","max_chars":10}],"lightning":{"backend":"fake"}}`,
+		"preview bad pattern": `{"origin":"http://o","price_sats":5,"protect":["/x"],"previews":[{"pattern":"x","mode":"title"}],"lightning":{"backend":"fake"}}`,
 		"no patterns":         `{"origin":"http://o","price_sats":5,"lightning":{"backend":"fake"}}`,
 		"bad pattern":         `{"origin":"http://o","price_sats":5,"protect":["x"],"lightning":{"backend":"fake"}}`,
 		"trailing slash":      `{"origin":"http://o","price_sats":5,"protect":["/docs/"],"lightning":{"backend":"fake"}}`,
@@ -201,6 +206,22 @@ func TestPriceRuleLimits(t *testing.T) {
 	}
 	if _, err := load(t, `{"origin":"http://o","price_sats":5,"protect":["/x"],"prices":[{"pattern":"/[","price_sats":2}],"lightning":{"backend":"fake"}}`); err == nil {
 		t.Fatal("accepted a bad prices glob")
+	}
+}
+
+func TestPreviewsConfig(t *testing.T) {
+	c, err := load(t, `{"origin":"http://o","price_sats":5,"protect":["/x/**"],"previews":[{"pattern":"/x/free/**","mode":"none"},{"pattern":"/x/**","mode":"excerpt","max_chars":200}],"lightning":{"backend":"fake"}}`)
+	if err != nil || len(c.Previews) != 2 || c.Previews[1].MaxChars != 200 {
+		t.Fatalf("%+v, %v", c.Previews, err)
+	}
+	if c, err = load(t, `{"origin":"http://o","price_sats":5,"protect":["/x/**"],"lightning":{"backend":"fake"}}`); err != nil || len(c.Previews) != 0 {
+		t.Fatalf("previews must be off by default: %+v, %v", c.Previews, err)
+	}
+	raw := `{"origin":"http://o","price_sats":5,"protect":["/x"],"previews":[` +
+		strings.Repeat(`{"pattern":"/x","mode":"title"},`, maxPriceRules) +
+		`{"pattern":"/x","mode":"title"}],"lightning":{"backend":"fake"}}`
+	if _, err := load(t, raw); err == nil {
+		t.Fatal("accepted too many preview rules")
 	}
 }
 

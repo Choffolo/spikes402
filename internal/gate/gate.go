@@ -62,6 +62,10 @@ type Options struct {
 	// that needs more than this is refused (see config).
 	Argon2MaxMemoryMiB int
 
+	// Previews show a teaser of the protected page on the 402 page. The
+	// first matching rule wins; no match (or mode "none") shows no teaser.
+	Previews []PreviewRule
+
 	// SpentStore, if set, records spent tokens on disk. SpentRecords is
 	// the already-loaded contents (so New does not fail on a bad store).
 	SpentStore   SpentStore
@@ -93,6 +97,8 @@ type Gate struct {
 	// argon limits memory used by concurrent Argon2id checks.
 	argon *argonBudget
 
+	preview *previewer // nil: no teasers
+
 	nodeLog  rateLog // why no invoice was offered
 	classLog rateLog // bot classifications
 }
@@ -116,6 +122,7 @@ func New(opt Options) *Gate {
 		node:    newNodeGuard(opt.Lightning, opt.MaxInvoicesPerMinute),
 		now:     time.Now,
 
+		preview:  newPreviewer(opt),
 		argon:    newArgonBudget(opt.Argon2MaxMemoryMiB),
 		nodeLog:  rateLog{perMinute: 1},
 		classLog: rateLog{perMinute: 60},
@@ -132,6 +139,10 @@ func New(opt Options) *Gate {
 func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if len(r.URL.RequestURI()) > MaxURIBytes {
 		http.Error(w, "URI too long", http.StatusRequestURITooLong)
+		return
+	}
+	if r.URL.Path == WorkerPath {
+		serveWorker(w, r)
 		return
 	}
 	passes := takePassCookies(r) // read before session() removes them
@@ -497,6 +508,7 @@ type challengeBody struct {
 	ExpiresAt time.Time  `json:"expires_at"`
 	L402      *l402Offer `json:"l402,omitempty"`
 	PoW       powOffer   `json:"pow"`
+	Preview   *Preview   `json:"preview,omitempty"` // teaser, if the site configured one
 }
 
 type l402Offer struct {
@@ -632,6 +644,7 @@ func (g *Gate) writeChallenge(w http.ResponseWriter, r *http.Request, o offer, p
 		powHeader = fmt.Sprintf(`PoW challenge=%q, difficulty="%d", algorithm="argon2id", memory-mib="%d"`, o.token, o.pow.Difficulty, o.pow.MemoryMiB)
 	}
 
+	body.Preview = g.preview.get(r)
 	h := w.Header()
 	if o.invoice != "" {
 		h.Add("WWW-Authenticate", fmt.Sprintf(`L402 macaroon=%q, invoice=%q`, o.token, o.invoice))
@@ -646,7 +659,7 @@ func (g *Gate) writeChallenge(w http.ResponseWriter, r *http.Request, o offer, p
 
 	if strings.Contains(r.Header.Get("Accept"), "text/html") {
 		h.Set("Content-Type", "text/html; charset=utf-8")
-		h.Set("Content-Security-Policy", "default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'sha256-"+weblnHash+"'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+		h.Set("Content-Security-Policy", pageCSP)
 		w.WriteHeader(http.StatusPaymentRequired)
 		writeHTML(w, body, template.URL(o.qr))
 		return

@@ -109,6 +109,7 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `origin` | The website to protect (`http://` or `https://` URL) | required |
 | `price_sats` | Default price of one request, in satoshis (used when no `prices` rule matches) | required, ≥ 1, at most 1,000,000 |
 | `prices` | Optional list of `{ "pattern", "price_sats" }` rules. Same pattern syntax and canonical path as `protect`. **The first matching rule wins**; put more specific patterns first. Unmatched protected paths use `price_sats`. | `[]` |
+| `previews` | Optional list of `{ "pattern", "mode", "max_chars" }` rules that show a teaser of the page on its 402 page, see [The 402 page](#the-402-page-for-people). `mode`: `"none"`, `"title"` (title and meta description) or `"excerpt"` (also the first `max_chars` characters, default 300, at most 1000). Same patterns as `protect`; **the first matching rule wins**. Config file only | `[]` = no teaser |
 | `protect` | Path patterns that require payment. `"/premium/**"` = everything under `/premium`; other patterns use [glob syntax](https://pkg.go.dev/path#Match), e.g. `"/*.pdf"`. See [Path matching](#path-matching) | required |
 | `protect_case_sensitive` | Match `protect` patterns with exact letter case. Off by default, because many websites serve `/Premium` like `/premium` | `false` |
 | `pow_seconds_per_sat` | How much work replaces one sat: seconds of one CPU core (see [Proof-of-work pricing](#proof-of-work-pricing)). Values below 1 are refused unless `unsafe_allow_dangerous_config` is set | `10` |
@@ -274,6 +275,72 @@ cheaper ones.
 **Future option:** [RandomX](https://github.com/tevador/RandomX) (Monero's
 CPU-oriented PoW) narrows the gap to specialised hardware even further, but
 it needs ~256 MiB per verifier and a C library. Not implemented.
+
+## The 402 page (for people)
+
+A browser (a request that accepts `text/html`) gets a page instead of JSON:
+"This page is protected by an invisible energy wall built with Bitcoin. Pay a
+few sats with the Spikes402 extension, or solve a math puzzle with your
+computer's power." It shows the Lightning invoice (QR code, and a one-click
+button if a WebLN wallet is present) and a **Solve the puzzle** button.
+
+The button runs the same sha256d puzzle as bots do, in Web Workers (one per
+core, at most 8), and shows the work: a progress bar against the expected
+number of attempts, attempts so far, hashes per second, elapsed time. When
+a worker finds the nonce, the page redeems it exactly like a bot would
+(`Authorization: PoW token:nonce`) and reloads into the content. Nothing is
+loaded from outside; the page's Content-Security-Policy allows two hashed
+inline scripts and workers from the proxy itself (`worker-src 'self'`). The
+worker is served by the proxy at `/.spikes402/pow-worker.js`; that path is
+reserved and never reaches your website. With `argon2id` the button is
+hidden (the browser solver is sha256d only); bots and the extension work as before.
+
+**Difficulty.** The page uses the same difficulty as everyone. A lower
+"interactive" difficulty would only be safe if the server could tell people
+from bots, and it cannot (`Accept: text/html` costs a bot nothing), so it
+would just be a cheaper price for scrapers. The knob stays `pow_seconds_per_sat`.
+The in-browser solver does about 1 million attempts per second per thread
+(about half of the Go reference core) and scales with cores: 8 threads
+measured ~7–10 million per second in Chrome. So difficulty 24 (the default
+for 1 sat) takes a few seconds on a laptop, 26 about 10 s, and 28 (10 sats)
+roughly a minute. If you want visitors to wait about 10 s, price pages so
+the difficulty is 25–26 or set `pow_difficulty`.
+
+**Teaser.** To tempt visitors (and search engines) you can show a few words of
+the page itself. It is off by default; turn it on per path pattern:
+
+```json
+"previews": [
+  { "pattern": "/premium/free-sample/**", "mode": "none" },
+  { "pattern": "/premium/**", "mode": "excerpt", "max_chars": 300 }
+]
+```
+
+The proxy fetches the page from your website as an anonymous visitor (GET,
+path only, no cookies, no credentials), reads the title, the meta
+description and, in `excerpt` mode, the first paragraphs, and shows that on
+the 402 page and in a `preview` field of the JSON answer. Everybody sees the
+same teaser, bots included. The text is plain: markup, scripts, control and
+invisible characters and angle brackets are removed, and it is escaped again
+on output. It is capped (title 150, description 300, excerpt `max_chars`) and cut
+at a word. Your website is protected from the feature: only a 200 `text/html` answer
+counts, at most 256 KiB are read, a fetch times out after 3 s, results are
+cached for 5 minutes (failures for 1 minute, 256 pages at most), at most 2
+fetches run at once and 60 per minute in total; beyond that the page has no teaser.
+Only the paths and the length you configure are ever shown for free.
+The page also carries schema.org `isAccessibleForFree: false` markup for the
+`.paywall` block, as Google recommends for paywalled content.
+
+**Search engines.** The 402 answer is not indexed. Google does not index URLs
+that answer with a 4xx status, and drops those already indexed, ignoring
+their content ([Google's documentation](https://developers.google.com/search/docs/crawling-indexing/http-network-errors));
+so the teaser and the markup help people and AI agents, not Google
+search. Spikes402 keeps `402` on purpose, because clients depend on it. If you want
+Google to index a page, the existing options are: a bot policy `free` for
+verified Googlebot (Google's own paywall model, which is not cloaking when the
+page carries the paywall markup), or leaving that page unprotected. Serving the teaser
+with status 200 to everyone would be indexable, but changes what a 402 means
+for bots; it is not implemented.
 
 ## Bot identification
 
@@ -653,6 +720,9 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
 - **Dangerous settings are refused** unless `unsafe_allow_dangerous_config`
   is set: trusting every address as a proxy, opening the dashboard to the
   whole internet, or exposing the fake backend (with it, anyone can "pay").
+- **Teasers show page text for free.** Only for the patterns and the length you
+  set (default: nothing). The fetch is anonymous, path-only, capped and cached; see
+  [The 402 page](#the-402-page-for-people).
 - **Only receiving:** use phoenixd's limited-access password, never the full one.
 - **Proof-of-work is cheaper on special hardware.** The difficulty is
   calibrated for a CPU core (see [Proof-of-work pricing](#proof-of-work-pricing));
