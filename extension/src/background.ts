@@ -1,5 +1,6 @@
 import { applyTabBadge, type TabPrice } from "./badge";
 import {
+  adjustSpend,
   decidePayment,
   paymentCost,
   recordSpend,
@@ -7,6 +8,7 @@ import {
   todayLocal,
   withSiteAllowance,
   type ConfirmChoice,
+  type Decision,
 } from "./budget";
 import { encryptMnemonic, generateMnemonic, isValidMnemonic, normalizeMnemonic } from "./crypto";
 import { InvoiceError, isBolt11, parseBolt11AmountSats } from "./invoice";
@@ -16,28 +18,27 @@ import { maxFeeSatsFor } from "./spark-util";
 import {
   appendHistory,
   loadState,
+  pushHistory,
   saveSettings,
-  saveSpend,
   saveVault,
-  setPending,
   truncateDestination,
+  updateState,
 } from "./storage";
-import type { PaymentRecord, PendingPayment, Settings, WalletInfo } from "./types";
+import type { PaymentRecord, PendingPayment, Reservation, Settings, WalletInfo } from "./types";
 
 const CONFIRM_TTL_MS = 5 * 60 * 1000;
+const MAX_PROMPTS = 10;
+const RECONCILE_EVERY_MS = 30 * 1000;
 const waiters = new Map<string, { resolve: (choice: ConfirmChoice) => void }>();
 const tabPrices = new Map<number, TabPrice>();
 
-/** Serializes budget checks and payments so two pages cannot double-spend a cap. */
-let budgetTail: Promise<void> = Promise.resolve();
-function withBudgetLock<T>(fn: () => Promise<T>): Promise<T> {
-  const run = budgetTail.then(fn, fn);
-  budgetTail = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  return run;
-}
+// A restarted worker has lost the callbacks of every waiting prompt and of
+// every payment that was being sent: drop the prompts, and treat the
+// payments as unconfirmed (they stay counted in the budget).
+void updateState((s) => {
+  s.prompts = [];
+  s.reservations = s.reservations.map((r) => (r.state === "in_flight" ? { ...r, state: "uncertain" } : r));
+}).catch(() => undefined);
 
 type PopupMsg =
   | { type: "getState" }
@@ -109,7 +110,14 @@ async function handle(msg: PopupMsg | PageMsg | PagePriceMsg, sender: chrome.run
   }
 }
 
-async function snapshot(): Promise<{ info: WalletInfo; settings: Settings; history: PaymentRecord[]; pending?: PendingPayment }> {
+async function snapshot(): Promise<{
+  info: WalletInfo;
+  settings: Settings;
+  history: PaymentRecord[];
+  pending?: PendingPayment;
+  pendingCount: number;
+}> {
+  void reconcile();
   const s = await loadState();
   const host = await walletCall<{ unlocked?: boolean }>("status").catch(() => ({ unlocked: false }));
   const unlocked = !!host.unlocked;
@@ -129,7 +137,7 @@ async function snapshot(): Promise<{ info: WalletInfo; settings: Settings; histo
       info.lightningHint = e instanceof Error ? e.message : String(e);
     }
   }
-  return { info, settings: s.settings, history: [...s.history].reverse(), pending: s.pending };
+  return { info, settings: s.settings, history: [...s.history].reverse(), pending: s.prompts[0], pendingCount: s.prompts.length };
 }
 
 async function createWallet(password: string): Promise<{ mnemonic: string }> {
@@ -161,6 +169,7 @@ async function unlock(password: string): Promise<{ ok: true }> {
     password,
     network: s.settings.network,
   });
+  void reconcile();
   return { ok: true };
 }
 
@@ -216,79 +225,200 @@ async function handleWebln(msg: PageMsg, sender: chrome.runtime.MessageSender): 
     await log(origin, 0, invoice, "refused", reason);
     throw new Error(reason);
   }
+  // One fee rule: the amount we count in every cap is the amount we allow the wallet to spend.
   const feeSats = amountSats === null ? 0 : maxFeeSatsFor(amountSats);
 
-  let confirmReason: string | undefined;
-  const first = await withBudgetLock(async () => decideWebln(origin, amountSats, feeSats));
-  if (first.action === "refuse") {
-    await log(origin, amountSats ?? 0, invoice, "refused", first.reason);
-    throw new Error(first.reason);
+  let reserved = await reserve({ origin, amountSats, feeSats, invoice, force: false });
+  if (reserved.action === "refuse") {
+    await log(origin, amountSats ?? 0, invoice, "refused", reserved.reason);
+    throw new Error(reserved.reason);
   }
-  if (first.action === "confirm") {
-    confirmReason = first.reason;
+  if (reserved.action === "confirm") {
     const choice = await askUser({
       origin,
       invoice,
       amountSats: amountSats ?? 0,
       costSats: paymentCost(amountSats ?? 0, feeSats),
-      reason: first.reason,
+      reason: reserved.reason,
       tabId: sender.tab?.id,
     });
     if (choice === "refuse") {
       await log(origin, amountSats ?? 0, invoice, "refused", "You declined the payment.");
       throw new Error("Payment declined.");
     }
+    reserved = await reserve({ origin, amountSats, feeSats, invoice, force: true });
   }
+  if (reserved.action !== "reserved") throw new Error("The payment could not be reserved.");
+  const reservation = reserved.reservation;
 
-  return withBudgetLock(async () => {
-    if (!confirmReason) {
-      const again = await decideWebln(origin, amountSats, feeSats);
-      if (again.action !== "pay") {
-        await log(origin, amountSats ?? 0, invoice, "refused", again.reason);
-        throw new Error(again.reason);
-      }
+  // The budget is already booked, so the wallet call runs outside any lock:
+  // a slow or hostile invoice cannot hold up other payments.
+  try {
+    const res = await walletCall<{ preimage?: string; detail: string; feeSats?: number }>("send", {
+      destination: invoice,
+      maxFeeSats: feeSats,
+    });
+    if (!res.preimage) throw new WalletCallError("The wallet paid, but did not return a preimage.", true);
+    await finishReservation(reservation.id, { settled: true, feeSats: res.feeSats }, res.detail);
+    markPaid(sender.tab?.id, amountSats ?? 0);
+    return { preimage: res.preimage };
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    if (e instanceof WalletCallError && e.uncertain) {
+      await markUncertain(reservation.id, e.requestId, detail);
+      scheduleReconcile();
+      throw new Error(
+        "The payment has not been confirmed yet. It may still go through, so it stays counted in your budget until it settles or fails. Do not pay this invoice again.",
+      );
     }
-    const s = await loadState();
+    await finishReservation(reservation.id, { settled: false }, detail);
+    throw e;
+  }
+}
+
+type Reserved = Decision | { action: "reserved"; reservation: Reservation };
+
+/**
+ * Check the caps and book the full cost (amount plus fee cap) in one atomic
+ * step. After a user confirmation (force) the caps are not asked again.
+ */
+function reserve(p: {
+  origin: string;
+  amountSats: number | null;
+  feeSats: number;
+  invoice: string;
+  force: boolean;
+}): Promise<Reserved> {
+  return updateState((s): Reserved => {
     const today = todayLocal();
     const spend = spendForToday(s.spend, today);
-    try {
-      const res = await walletCall<{ preimage?: string; detail: string; feeSats?: number }>("send", {
-        destination: invoice,
-      });
-      if (!res.preimage) throw new Error("The wallet paid, but did not return a preimage.");
-      const recorded = paymentCost(amountSats ?? 0, res.feeSats ?? feeSats);
-      await saveSpend(recordSpend(spend, today, origin, recorded));
-      await log(origin, recorded, invoice, "sent", res.detail);
-      markPaid(sender.tab?.id, amountSats ?? recorded);
-      return { preimage: res.preimage };
-    } catch (e) {
-      const detail = e instanceof Error ? e.message : String(e);
-      await log(origin, amountSats ?? 0, invoice, "failed", detail);
-      throw e;
+    const d = decidePayment({
+      amountSats: p.amountSats,
+      origin: p.origin,
+      settings: s.settings,
+      spend,
+      today,
+      feeSats: p.feeSats,
+    });
+    if (d.action === "refuse" || (d.action === "confirm" && !p.force)) return d;
+    const cost = paymentCost(p.amountSats ?? 0, p.feeSats);
+    const reservation: Reservation = {
+      id: crypto.randomUUID(),
+      origin: p.origin,
+      day: today,
+      amountSats: p.amountSats ?? 0,
+      feeSats: p.feeSats,
+      invoice: p.invoice,
+      state: "in_flight",
+      time: new Date().toISOString(),
+    };
+    s.spend = recordSpend(spend, today, p.origin, cost);
+    // A payment without a request id cannot be looked up; its day is over, so is its budget.
+    s.reservations = [...s.reservations.filter((r) => r.requestId || r.day === today), reservation];
+    return { action: "reserved", reservation };
+  });
+}
+
+/** Settle a reservation: count the real cost, or release it on a confirmed failure. */
+function finishReservation(
+  id: string,
+  outcome: { settled: true; feeSats?: number } | { settled: false },
+  detail: string,
+): Promise<void> {
+  return updateState((s) => {
+    const r = s.reservations.find((x) => x.id === id);
+    if (!r) return;
+    s.reservations = s.reservations.filter((x) => x.id !== id);
+    const reserved = paymentCost(r.amountSats, r.feeSats);
+    const actual = outcome.settled ? paymentCost(r.amountSats, outcome.feeSats ?? r.feeSats) : 0;
+    s.spend = adjustSpend(spendForToday(s.spend, todayLocal()), r.day, r.origin, actual - reserved);
+    pushHistory(s, {
+      time: new Date().toISOString(),
+      origin: r.origin,
+      amountSats: outcome.settled ? actual : r.amountSats,
+      destination: truncateDestination(r.invoice),
+      result: outcome.settled ? "sent" : "failed",
+      detail,
+    });
+  });
+}
+
+function markUncertain(id: string, requestId: string | undefined, detail: string): Promise<void> {
+  return updateState((s) => {
+    const r = s.reservations.find((x) => x.id === id);
+    if (!r) return;
+    r.state = "uncertain";
+    if (requestId) r.requestId = requestId;
+    pushHistory(s, {
+      time: new Date().toISOString(),
+      origin: r.origin,
+      amountSats: paymentCost(r.amountSats, r.feeSats),
+      destination: truncateDestination(r.invoice),
+      result: "pending",
+      detail: `${detail} Not confirmed; still counted in the budget.`,
+    });
+  });
+}
+
+let reconciling = false;
+let reconcileTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** Retry the lookup of unconfirmed payments until each is settled or failed. */
+function scheduleReconcile(): void {
+  if (reconcileTimer !== undefined) return;
+  reconcileTimer = setTimeout(() => {
+    reconcileTimer = undefined;
+    void reconcile();
+  }, RECONCILE_EVERY_MS);
+}
+
+/**
+ * Ask the wallet about every unconfirmed payment that has a request id. Only
+ * a confirmed answer changes the budget: settled counts the real cost,
+ * failed releases it, pending leaves it as it is.
+ */
+async function reconcile(): Promise<void> {
+  if (reconciling) return;
+  reconciling = true;
+  try {
+    const todo = (await loadState()).reservations.filter((r) => r.state === "uncertain" && r.requestId);
+    let unresolved = false;
+    for (const r of todo) {
+      try {
+        const res = await walletCall<{ state: "settled" | "failed" | "pending"; feeSats?: number }>("lookupSend", {
+          requestId: r.requestId,
+          invoice: r.invoice,
+        });
+        if (res.state === "settled") {
+          await finishReservation(r.id, { settled: true, feeSats: res.feeSats }, "Confirmed later: the payment settled.");
+        } else if (res.state === "failed") {
+          await finishReservation(r.id, { settled: false }, "Confirmed later: the payment failed; the amount is free again.");
+        } else {
+          unresolved = true;
+        }
+      } catch {
+        unresolved = true; // wallet locked or busy: try again later
+      }
     }
-  });
+    if (unresolved) scheduleReconcile();
+  } finally {
+    reconciling = false;
+  }
 }
 
-async function decideWebln(origin: string, amountSats: number | null, feeSats: number) {
-  const s = await loadState();
-  const today = todayLocal();
-  return decidePayment({
-    amountSats,
-    origin,
-    settings: s.settings,
-    spend: spendForToday(s.spend, today),
-    today,
-    feeSats,
-  });
-}
-
+/**
+ * Queue a confirmation for the user. Each prompt has its own id and timer;
+ * an expired or answered prompt is gone and cannot be answered again.
+ */
 function askUser(p: Omit<PendingPayment, "id" | "createdAt">): Promise<ConfirmChoice> {
   const id = crypto.randomUUID();
   const pending: PendingPayment = { ...p, id, createdAt: Date.now() };
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
-      waiters.delete(id);
-      void setPending(undefined);
+      if (!waiters.delete(id)) return; // already answered
+      void updateState((s) => {
+        s.prompts = s.prompts.filter((x) => x.id !== id);
+      });
       markConfirm(pending.tabId, false);
       resolve("refuse");
     }, CONFIRM_TTL_MS);
@@ -298,24 +428,45 @@ function askUser(p: Omit<PendingPayment, "id" | "createdAt">): Promise<ConfirmCh
         resolve(choice);
       },
     });
-    void setPending(pending).then(() => {
-      markConfirm(pending.tabId, true);
-      void openPopup(pending);
-    });
+    updateState((s) => {
+      if (s.prompts.length >= MAX_PROMPTS) return false;
+      s.prompts = [...s.prompts, pending];
+      return true;
+    }).then(
+      (queued) => {
+        if (!queued) {
+          clearTimeout(timer);
+          waiters.delete(id);
+          resolve("refuse");
+          return;
+        }
+        markConfirm(pending.tabId, true);
+        void openPopup(pending);
+      },
+      () => {
+        clearTimeout(timer);
+        waiters.delete(id);
+        resolve("refuse");
+      },
+    );
   });
 }
 
 async function resolvePending(id: string, choice: ConfirmChoice): Promise<{ ok: true }> {
-  const s = await loadState();
-  if (!s.pending || s.pending.id !== id) throw new Error("This confirmation has expired.");
-  const pending = s.pending;
-  if (choice === "always") {
-    await saveSettings(withSiteAllowance(s.settings, pending.origin, pending.costSats));
-  }
-  await setPending(undefined);
-  markConfirm(pending.tabId, false);
-  waiters.get(id)?.resolve(choice);
-  waiters.delete(id);
+  let answered: { pending: PendingPayment; waiter: { resolve: (c: ConfirmChoice) => void } } | undefined;
+  await updateState((s) => {
+    const pending = s.prompts.find((x) => x.id === id);
+    const waiter = waiters.get(id);
+    // No waiter means it expired or the worker restarted: drop it and store nothing.
+    s.prompts = s.prompts.filter((x) => x.id !== id);
+    if (!pending || !waiter) return;
+    waiters.delete(id); // same synchronous step as the check: the timer cannot slip in
+    if (choice === "always") s.settings = { ...s.settings, ...withSiteAllowance(s.settings, pending.origin, pending.costSats) };
+    answered = { pending, waiter };
+  });
+  if (!answered) throw new Error("This confirmation has expired.");
+  markConfirm(answered.pending.tabId, false);
+  answered.waiter.resolve(choice);
   return { ok: true };
 }
 
@@ -398,15 +549,31 @@ async function openPopup(pending?: { origin: string; amountSats: number }) {
   }
 }
 
+/** A wallet call failed. `uncertain` means the payment may still have gone out. */
+class WalletCallError extends Error {
+  constructor(
+    message: string,
+    readonly uncertain = false,
+    readonly requestId?: string,
+  ) {
+    super(message);
+  }
+}
+
+// The message never reached the wallet host, so nothing was sent.
+const NOT_DELIVERED = /receiving end does not exist|could not establish connection/i;
+
 function walletCall<T = unknown>(type: string, extra?: Record<string, unknown>): Promise<T> {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage({ target: "wallet", type, ...extra }, (res) => {
       if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
+        const m = chrome.runtime.lastError.message ?? "The wallet host did not answer.";
+        reject(new WalletCallError(m, type === "send" && !NOT_DELIVERED.test(m)));
         return;
       }
       if (res && typeof res === "object" && "error" in res && res.error) {
-        reject(new Error(String(res.error)));
+        const r = res as { error: unknown; uncertain?: boolean; requestId?: string };
+        reject(new WalletCallError(String(r.error), !!r.uncertain, r.requestId));
         return;
       }
       resolve(res as T);

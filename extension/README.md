@@ -30,6 +30,20 @@ On mainnet, use only tiny amounts. To try it in your browser, see
   more, the popup asks whether to pay once, always allow this price on
   this site, or decline. "Always allow" raises the per-page cap for that
   origin only; later visits still respect the daily caps.
+- How a payment is booked: the full cost (invoice amount plus the fee cap)
+  is counted in the budget **before** the payment is sent, and the same
+  fee cap is given to the wallet. When the payment settles, the real cost
+  replaces it; when it is confirmed failed, it is released. If the wallet
+  does not answer in 60 seconds the payment is **unconfirmed**, not failed:
+  it stays counted, the page gets an error, and the extension asks the
+  wallet again (on unlock, when the popup opens, and every 30 seconds
+  while the worker is awake) until it settles or fails. A payment that
+  could not be looked up (for example the browser was closed mid-send)
+  stays counted until the end of that day. A slow invoice does not hold
+  up other payments.
+- Confirmations queue up (up to 10 waiting); the popup shows the oldest
+  and how many more wait. Each one expires after 5 minutes on its own; an
+  expired or answered confirmation cannot be answered again.
 - Toolbar badge: the number of sats the current tab's page costs to open
   (read from the 402 invoice on the page). The badge is cleared when you
   navigate away. Colour is muted for the price, teal after a successful
@@ -53,9 +67,10 @@ On mainnet, use only tiny amounts. To try it in your browser, see
   access (those ideas are parked).
 - On-chain Bitcoin addresses are not a send target in this prototype (use
   a Lightning invoice or a Spark address).
-- Firefox has no `chrome.offscreen` API. The extension opens a small host
-  window instead, so the wallet can keep running. Chrome uses a hidden
-  offscreen document. See [Firefox](#firefox).
+- Firefox is **experimental and untested** (nobody has run the wallet in a
+  real Firefox yet). It has no `chrome.offscreen` API, so the extension
+  would open a small host window instead of Chrome's hidden offscreen
+  document. See [Firefox](#firefox).
 
 The Spark SDK is bundled into the extension at build time (including its
 local WASM for Spark signing). Nothing in that package is fetched from the
@@ -120,7 +135,14 @@ Spikes402 proxy such as `http://127.0.0.1:8402/...` is fine.
 
 ## Load in Firefox
 
-Firefox 128 or newer is required (`world: "MAIN"` content scripts).
+**Experimental and untested.** The manifest lists `background.scripts`
+next to `background.service_worker` (Firefox ignores the service worker and
+runs the scripts as an event page; Chrome 121+ ignores the scripts), and
+the code has a fallback for the missing offscreen API, but the wallet has
+not been run in a real Firefox. Firefox 128 or newer is required
+(`world: "MAIN"` content scripts). Event pages can be unloaded when idle,
+which may drop a waiting confirmation; treat Firefox as a way to help test,
+not as a supported browser.
 
 1. Build as above.
 2. Open `about:debugging#/runtime/this-firefox`.
@@ -160,7 +182,10 @@ Gaps compared to Chrome:
 
 ## Tests
 
-Unit tests cover budget decisions (silent pay when a page fits, confirm
+Unit tests cover the storage write queue, budget reservations (unconfirmed
+payments, release and settle, fee cap shared with the wallet, no stalling
+behind a slow invoice), the confirmation queue and its expiry, the
+manifest, and budget decisions (silent pay when a page fits, confirm
 when it does not, site allowances, refuse amountless invoices, day reset,
 fees on every cap), toolbar badge text, BOLT11 amount, checksum and
 payment-hash parsing, local preimage checks, mnemonic generation and

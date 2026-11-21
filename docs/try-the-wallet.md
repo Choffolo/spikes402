@@ -1,6 +1,6 @@
 # Try the Spikes402 wallet
 
-A short guide to the prototype browser extension (version 0.1.1). **This is
+A short guide to the prototype browser extension (version 0.1.2). **This is
 unreviewed prototype software. On mainnet, use only tiny amounts. Do not
 store more than you can afford to lose.**
 
@@ -28,9 +28,10 @@ into a folder and use that folder in the steps below).
    that contains `manifest.json`).
 4. Pin the extension.
 
-## Load in Firefox
+## Load in Firefox (experimental, untested)
 
-Firefox 128 or newer is required.
+Nobody has run this wallet in a real Firefox yet, so treat it as a way to
+help test, not as a supported browser. Firefox 128 or newer is required.
 
 1. Open `about:debugging#/runtime/this-firefox`.
 2. Click **Load Temporary Add-on…** and select
@@ -72,6 +73,11 @@ wallet is unlocked and the price fits all three caps, the page is paid
 automatically. If it would go over a cap, the popup asks you to **pay
 once**, **always allow this price on this site**, or **decline**. "Always
 allow" raises the per-page cap for that site only; daily caps still apply.
+If several pages ask at once, the popup shows them one at a time.
+
+If a payment is slow (no answer after 60 seconds) it is not counted as
+failed: it stays in your budget until the wallet confirms that it settled
+or failed, and the page shows an error. Do not pay the same invoice again.
 
 The toolbar badge shows the price of the current page, in sats, and clears
 when you leave. Colour: muted for the price, teal after a successful

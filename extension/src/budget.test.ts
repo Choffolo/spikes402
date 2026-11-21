@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  adjustSpend,
   decidePayment,
   defaultBudget,
   effectivePaymentCap,
@@ -94,5 +95,21 @@ describe("withSiteAllowance", () => {
     expect(twice.siteAllowances[origin]).toBe(15);
     const up = withSiteAllowance(once, origin, 20);
     expect(up.siteAllowances[origin]).toBe(20);
+  });
+});
+
+describe("adjustSpend", () => {
+  it("releases or tops up today's counters", () => {
+    const spent = recordSpend(emptySpend(today), today, origin, 10);
+    expect(adjustSpend(spent, today, origin, -10)).toEqual({ day: today, globalSats: 0, perSite: { [origin]: 0 } });
+    const up = adjustSpend(spent, today, origin, 3);
+    expect(up.globalSats).toBe(13);
+    expect(up.perSite[origin]).toBe(13);
+  });
+
+  it("does nothing for another day and never goes below zero", () => {
+    const spent = recordSpend(emptySpend(today), today, origin, 10);
+    expect(adjustSpend(spent, "2026-11-19", origin, -10)).toBe(spent);
+    expect(adjustSpend(spent, today, origin, -50).globalSats).toBe(0);
   });
 });
