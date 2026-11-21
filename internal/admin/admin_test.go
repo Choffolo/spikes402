@@ -51,7 +51,7 @@ func newEnv(t *testing.T, extra string) *env {
 	e := &env{ln: lightning.NewFake(), now: time.Unix(1_800_000_000, 0)}
 	e.mon = NewMonitor(cfg.Admin.VisitorIPs, e.now)
 	e.gate = gate.New(gate.Options{
-		PriceSats: cfg.PriceSats, Protect: cfg.Protect, PoW: cfg.PoW, ChallengeTTL: cfg.ChallengeTTL(),
+		PriceSats: cfg.PriceSats, Protect: cfg.Protect, Prices: cfg.Prices, PoW: cfg.PoW, ChallengeTTL: cfg.ChallengeTTL(),
 		SecretKey: []byte(strings.Repeat("s", 32)), Lightning: e.ln, Next: http.NotFoundHandler(),
 		ChallengesPerMinute: cfg.ChallengesPerMinute, MaxInvoicesPerMinute: 1000, MaxPendingInvoices: 1000,
 		Observer: e.mon.Observe,
@@ -481,5 +481,71 @@ func TestWithdrawUnknownOutcome(t *testing.T) {
 	// Unblocked: the next attempt reaches the node again.
 	if rec, _ := send(); rec.Code != 504 || u.calls != 2 {
 		t.Fatalf("%d, %d calls", rec.Code, u.calls)
+	}
+}
+
+func TestPathPriceSettings(t *testing.T) {
+	e := newEnv(t, "")
+	rules := []any{
+		map[string]any{"pattern": "/premium/special/**", "price_sats": 1},
+		map[string]any{"pattern": "/premium/**", "price_sats": 20},
+	}
+	if rec, _ := e.call("PUT", "/api/settings", aiKey, map[string]any{"prices": rules}); rec.Code != 403 {
+		t.Fatalf("AI applied prices: %d", rec.Code)
+	}
+	if rec, _ := e.call("PUT", "/api/settings", adminKey, map[string]any{"prices": []any{map[string]any{"pattern": "premium", "price_sats": 2}}}); rec.Code != 400 {
+		t.Fatalf("bad pattern: %d", rec.Code)
+	}
+	if rec, _ := e.call("PUT", "/api/settings", adminKey, map[string]any{"prices": []any{map[string]any{"pattern": "/premium/**", "price_sats": 0}}}); rec.Code != 400 {
+		t.Fatalf("zero price: %d", rec.Code)
+	}
+	rec, out := e.call("PUT", "/api/settings", adminKey, map[string]any{"prices": rules})
+	if rec.Code != 200 {
+		t.Fatalf("admin apply: %d %v", rec.Code, out)
+	}
+	got, _ := out["prices"].([]any)
+	if len(got) != 2 {
+		t.Fatalf("public prices: %v", out["prices"])
+	}
+	if s := e.gate.Settings(); len(s.Prices) != 2 || s.Prices[0].PriceSats != 1 || s.Prices[1].Pattern != "/premium/**" {
+		t.Fatalf("gate: %+v", s.Prices)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/premium/a", nil)
+	wr := httptest.NewRecorder()
+	e.gate.ServeHTTP(wr, req)
+	if wr.Code != http.StatusPaymentRequired {
+		t.Fatalf("challenge: %d", wr.Code)
+	}
+	var body struct {
+		PriceSats int64 `json:"price_sats"`
+	}
+	if err := json.NewDecoder(wr.Body).Decode(&body); err != nil || body.PriceSats != 20 {
+		t.Fatalf("live price %d (%v), want 20", body.PriceSats, err)
+	}
+
+	rec, out = e.call("PUT", "/api/settings", adminKey, map[string]any{"prices": []any{}})
+	if rec.Code != 200 || len(e.gate.Settings().Prices) != 0 {
+		t.Fatalf("clear: %d %+v", rec.Code, e.gate.Settings().Prices)
+	}
+
+	e = newEnv(t, `,"ai_can_apply":true`)
+	if rec, _ := e.call("PUT", "/api/settings", aiKey, map[string]any{"prices": rules}); rec.Code != 200 || len(e.gate.Settings().Prices) != 2 {
+		t.Fatalf("AI with ai_can_apply: %d", rec.Code)
+	}
+
+	e = newEnv(t, "")
+	rec, p := e.call("POST", "/api/proposals", aiKey, map[string]any{"changes": map[string]any{"prices": rules}, "reason": "section prices"})
+	if rec.Code != 200 || len(e.gate.Settings().Prices) != 0 {
+		t.Fatalf("proposal applied early: %d %+v", rec.Code, e.gate.Settings().Prices)
+	}
+	id := p["id"].(string)
+	if rec, _ := e.call("POST", "/api/proposals/"+id+"/approve", aiKey, nil); rec.Code != 403 {
+		t.Fatalf("AI approved prices: %d", rec.Code)
+	}
+	if rec, _ := e.call("POST", "/api/proposals/"+id+"/approve", adminKey, nil); rec.Code != 200 {
+		t.Fatalf("approve: %d", rec.Code)
+	}
+	if len(e.gate.Settings().Prices) != 2 {
+		t.Fatalf("approved proposal not applied: %+v", e.gate.Settings().Prices)
 	}
 }

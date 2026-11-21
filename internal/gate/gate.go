@@ -70,8 +70,7 @@ const ClassHeader = "Spikes402-Class"
 // Gate is the pay-or-PoW http.Handler.
 type Gate struct {
 	opt      Options
-	patterns []string    // Protect, lower-cased unless CaseSensitive
-	prices   []priceRule // same canonicalisation as patterns
+	patterns []string // Protect, lower-cased unless CaseSensitive
 	sign     signer
 	spent    *spentSet
 	limiter  *rateLimiter
@@ -115,15 +114,7 @@ func New(opt Options) *Gate {
 		}
 		g.patterns[i] = p
 	}
-	g.prices = make([]priceRule, len(opt.Prices))
-	for i, r := range opt.Prices {
-		pat := r.Pattern
-		if !opt.CaseSensitive {
-			pat = strings.ToLower(pat)
-		}
-		g.prices[i] = priceRule{pattern: pat, price: r.PriceSats}
-	}
-	g.live.Store(&Settings{PriceSats: opt.PriceSats, PoW: opt.PoW, Policies: opt.Policies, ChallengesPerMinute: opt.ChallengesPerMinute})
+	g.live.Store(&Settings{PriceSats: opt.PriceSats, Prices: append([]PriceRule(nil), opt.Prices...), PoW: opt.PoW, Policies: opt.Policies, ChallengesPerMinute: opt.ChallengesPerMinute})
 	return g
 }
 
@@ -160,7 +151,7 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.opt.Next.ServeHTTP(w, r)
 		return
 	}
-	price := pol.price(g.pathPrice(r.URL.Path, set.PriceSats))
+	price := pol.price(g.pathPrice(r.URL.Path, set))
 	if session == "" {
 		session = newSession(w, g.scheme(r) == "https")
 	}
@@ -237,22 +228,21 @@ func (g *Gate) protected(p string) bool {
 	return false
 }
 
-type priceRule struct {
-	pattern string
-	price   int64
-}
-
 // pathPrice is the sats price for a request path: the first matching
-// rule in Prices, or defaultPrice if none match. Matching uses the same
-// canonical path as protected().
-func (g *Gate) pathPrice(p string, defaultPrice int64) int64 {
+// rule in set.Prices, or set.PriceSats if none match. Matching uses the
+// same canonical path as protected().
+func (g *Gate) pathPrice(p string, set *Settings) int64 {
 	key := matchKey(p, g.opt.CaseSensitive)
-	for _, r := range g.prices {
-		if matchPattern(r.pattern, key) {
-			return r.price
+	for _, r := range set.Prices {
+		pat := r.Pattern
+		if !g.opt.CaseSensitive {
+			pat = strings.ToLower(pat)
+		}
+		if matchPattern(pat, key) {
+			return r.PriceSats
 		}
 	}
-	return defaultPrice
+	return set.PriceSats
 }
 
 // resource is what a token is bound to (as a hash): the method and the
