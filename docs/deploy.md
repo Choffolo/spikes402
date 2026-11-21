@@ -1,0 +1,150 @@
+# Deploying Spikes402
+
+A short guide for running the proxy in Docker, with TLS in front of it.
+For flags and every config key, see the [README](../README.md).
+
+## Docker and Compose
+
+The repository has a multi-stage `Dockerfile` (static binary, distroless
+non-root runtime, no shell) and an example `docker-compose.yml`: Spikes402
+plus the official [ACINQ phoenixd](https://hub.docker.com/r/acinq/phoenixd)
+image, pinned by digest.
+
+1. Copy the example config and edit the `origin` (the site you are
+   protecting). Leave passwords out of the file; they come from the
+   environment.
+
+   ```sh
+   cp config.docker.example.json config.json
+   ```
+
+2. Create a `.env` next to `docker-compose.yml` (do not commit it):
+
+   ```sh
+   printf 'SPIKES402_SECRET_KEY=%s\n' "$(openssl rand -hex 32)" >> .env
+   printf 'SPIKES402_ADMIN_KEY=%s\n' "$(openssl rand -hex 32)" >> .env
+   ```
+
+   The two keys must be different and at least 32 characters.
+
+3. Start **phoenixd first**, once, so it can write its data directory:
+
+   ```sh
+   docker compose up -d phoenixd
+   ```
+
+   On first start it creates `seed.dat` and `phoenix.conf` in the
+   `phoenixd-data` volume. **Back up `seed.dat` now** (see [Backups](#backups)).
+   Copy `http-password-limited-access` from `phoenix.conf` into `.env` as
+   `PHOENIXD_PASSWORD`. That password can create invoices but cannot spend.
+
+   ```sh
+   docker compose exec phoenixd cat /phoenix/.phoenix/phoenix.conf
+   ```
+
+4. Start the proxy:
+
+   ```sh
+   docker compose up --build -d
+   ```
+
+   The public proxy listens on port 8402. The admin dashboard is published
+   only on the host's loopback interface (`127.0.0.1:8404`). phoenixd's
+   HTTP API is on the compose network only; it is not published.
+
+The example `origin` is `http://host.docker.internal:8080` (a process on
+the Docker host). Point it at your real site, or add that site as another
+Compose service and use its service name.
+
+The fake Lightning backend is for local development without Docker (see
+the README quick start). It refuses to listen on a non-localhost address,
+so it is not used in this Compose file.
+
+## TLS in front
+
+Do not expose port 8402 to the internet as plain HTTP. Put a TLS reverse
+proxy in front, on the same host or the same Docker network, for example
+[Caddy](https://caddyserver.com/) or nginx.
+
+A minimal Caddyfile, if Caddy runs on the host:
+
+```
+example.com {
+    reverse_proxy 127.0.0.1:8402
+}
+```
+
+If Caddy runs in Compose, attach it to the `spikes402` network, proxy to
+`spikes402:8402`, and do not publish 8402 on the host.
+
+When Spikes402 is behind your proxy, set `client_ip_header` (for example
+`X-Forwarded-For`) and `trusted_proxies` to that proxy's addresses, so rate
+limits and bot checks see the visitor, not the proxy. Never set
+`trusted_proxies` to the whole internet.
+
+## Config basics
+
+- Mount a JSON file at `/etc/spikes402/config.json` (the image default).
+  The process runs as uid 65532; the file must be readable by that user.
+- Set secrets with environment variables, not in the file:
+  `SPIKES402_SECRET_KEY`, `SPIKES402_ADMIN_KEY`, `PHOENIXD_PASSWORD`.
+- Leave `withdraw.enabled` false unless you are actively withdrawing.
+  Withdrawals need phoenixd's *full-access* password, which can spend all
+  funds. Prefer phoenixd's own tools (`phoenix-cli`) for that.
+- `identify_bots` (on by default) fetches the crawlers' published IP lists
+  over HTTPS, so the Spikes402 container needs outbound internet.
+
+## Backups
+
+The Compose volume `phoenixd-data` is the Lightning node. It contains
+**`seed.dat`**: anyone with that file can spend the funds, and if you lose
+it the funds are gone.
+
+- Back up `seed.dat` (and `phoenix.conf`) as soon as phoenixd has started,
+  to offline storage you control. Restrict permissions (mode 600).
+- Test that you can restore the volume before you put real money on the
+  node.
+- The Spikes402 `secret_key` signs visitor tokens. If you lose it, existing
+  tokens stop working; the Lightning funds are unaffected. Keep a copy of
+  `.env` with the same care as other server secrets (not next to `seed.dat`
+  on a public disk).
+
+To copy `seed.dat` out of the volume (example; store the result safely and
+delete leftover copies on the server):
+
+```sh
+docker compose cp phoenixd:/phoenix/.phoenix/seed.dat ./seed.dat.bak
+```
+
+## Upgrading
+
+1. Back up `seed.dat` and your `.env` / `config.json`.
+2. Pull the new Spikes402 source (or rebuild from the tag you want).
+3. Refresh image digests in the `Dockerfile` and `docker-compose.yml` if
+   you bump Go, the distroless runtime, or phoenixd.
+4. `docker compose up --build -d`.
+5. Check the logs: `docker compose logs -f spikes402`.
+
+phoenixd and Spikes402 can be upgraded independently. Read the phoenixd
+release notes before bumping that image; keep the volume.
+
+There is no image registry for Spikes402 yet. Build from this repository.
+
+## Security checklist
+
+- [ ] phoenixd has **no** `ports:` mapping and is not otherwise reachable
+      from the public internet.
+- [ ] The admin port is bound to `127.0.0.1` on the host (the example
+      Compose file does this). Reach it via SSH if the host is remote:
+      `ssh -L 8404:127.0.0.1:8404 you@server`.
+- [ ] TLS terminates in front of the proxy. `trusted_proxies` lists only
+      your reverse proxy.
+- [ ] Secrets are in the environment (or a secret store), not in the image
+      and not in git. `.env` and `config.json` are untracked.
+- [ ] `PHOENIXD_PASSWORD` is the *limited-access* password, not the full
+      one. Withdrawals stay off.
+- [ ] `seed.dat` is backed up offline; you have tested a restore.
+- [ ] The image runs as the distroless non-root user (uid 65532). Do not
+      run it as root.
+- [ ] Use tiny amounts until you have paid a real invoice end-to-end and
+      restored a backup.
