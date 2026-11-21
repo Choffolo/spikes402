@@ -2,6 +2,7 @@ package lightning
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -17,8 +18,9 @@ import (
 // phoenixd is a non-custodial Lightning node by ACINQ: the keys stay on
 // the machine that runs it.
 //
-// Spikes402 only calls POST /createinvoice, which phoenixd allows with the
-// limited-access password: that password can receive but not spend.
+// Spikes402 only calls endpoints the limited-access password allows:
+// POST /createinvoice and GET /payments/incoming/{paymentHash}. That
+// password can receive and look up payments, but not spend.
 type Phoenixd struct {
 	URL      string // e.g. "http://127.0.0.1:9740"
 	Password string // http-password-limited-access from phoenix.conf
@@ -78,10 +80,10 @@ func (p *Phoenixd) CreateInvoice(ctx context.Context, amountSat int64, memo stri
 	return inv, nil
 }
 
-func (p *Phoenixd) get(ctx context.Context, path string, out any) error {
+func (p *Phoenixd) doGET(ctx context.Context, path string) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(p.URL, "/")+path, nil)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	req.SetBasicAuth("", p.Password)
 	client := p.HTTP
@@ -90,17 +92,72 @@ func (p *Phoenixd) get(ctx context.Context, path string, out any) error {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("phoenixd: %w", err)
+		return 0, nil, fmt.Errorf("phoenixd: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return fmt.Errorf("phoenixd: %w", err)
+		return 0, nil, fmt.Errorf("phoenixd: %w", err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("phoenixd: HTTP %d", resp.StatusCode)
+	return resp.StatusCode, body, nil
+}
+
+func (p *Phoenixd) get(ctx context.Context, path string, out any) error {
+	status, body, err := p.doGET(ctx, path)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("phoenixd: HTTP %d", status)
 	}
 	return json.Unmarshal(body, out)
+}
+
+// LookupIncoming implements IncomingLookup: GET /payments/incoming/{paymentHash}.
+// A 204 or 404 means the node has no such invoice (ErrNotFound).
+func (p *Phoenixd) LookupIncoming(ctx context.Context, paymentHash [32]byte) (IncomingPayment, error) {
+	status, body, err := p.doGET(ctx, "/payments/incoming/"+hex.EncodeToString(paymentHash[:]))
+	if err != nil {
+		return IncomingPayment{}, err
+	}
+	if status == http.StatusNoContent || status == http.StatusNotFound {
+		return IncomingPayment{}, ErrNotFound
+	}
+	if status != http.StatusOK {
+		return IncomingPayment{}, fmt.Errorf("phoenixd: HTTP %d: %.200s", status, body)
+	}
+	var out struct {
+		PaymentHash string `json:"paymentHash"`
+		Preimage    string `json:"preimage"`
+		IsPaid      bool   `json:"isPaid"`
+		IsExpired   bool   `json:"isExpired"`
+		ReceivedSat int64  `json:"receivedSat"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return IncomingPayment{}, fmt.Errorf("phoenixd: bad response: %w", err)
+	}
+	got, err := hex.DecodeString(out.PaymentHash)
+	if err != nil || len(got) != 32 {
+		return IncomingPayment{}, fmt.Errorf("phoenixd: bad payment hash: %q", out.PaymentHash)
+	}
+	pay := IncomingPayment{Expired: out.IsExpired, ReceivedSat: out.ReceivedSat}
+	copy(pay.PaymentHash[:], got)
+	if !out.IsPaid {
+		return pay, nil
+	}
+	pre, err := hex.DecodeString(out.Preimage)
+	if err != nil || len(pre) != 32 {
+		return IncomingPayment{}, fmt.Errorf("phoenixd: paid invoice missing preimage")
+	}
+	copy(pay.Preimage[:], pre)
+	// Trust the preimage only if it actually pays this hash.
+	sum := sha256.Sum256(pre)
+	if sum != pay.PaymentHash {
+		return IncomingPayment{}, fmt.Errorf("phoenixd: preimage does not match payment hash")
+	}
+	pay.Paid = true
+	pay.Expired = false
+	return pay, nil
 }
 
 // NodeInfo implements Inspector with GET /getinfo and GET /getbalance,

@@ -45,8 +45,10 @@ var page = template.Must(template.New("402").Parse(`<!doctype html>
  .paywall{border-top:1px solid #ddd;margin-top:.6rem;padding-top:.4rem}
  .ways{display:flex;gap:1.25rem;align-items:flex-start;margin:.4rem 0}
  .ways>div{flex:1;min-width:0}
- #wallet-box,#pow-box{margin:.4rem 0 0}
- #wallet-box button,#pow-box button{font:inherit;padding:.35rem .7rem}
+ #wallet-box,#pow-box,#pay-wait{margin:.4rem 0 0}
+ #wallet-box button,#pow-box button,a.btn{font:inherit;padding:.35rem .7rem}
+ a.btn{display:inline-block;border:1px solid #888;border-radius:4px;background:#f6f6f6;color:inherit;text-decoration:none}
+ a.btn:hover{background:#eee}
  #pow-bar{display:block;width:100%;height:.85rem;margin:.45rem 0 .2rem}#pow-bar[hidden]{display:none}
  .err{color:#a00}
  @media (max-width:40rem){.ways{flex-direction:column;gap:.5rem}}
@@ -84,6 +86,10 @@ Or pay this invoice with any Lightning wallet:</p>
 {{with .L402}}
 <a href="lightning:{{.Invoice}}"><img src="{{$.QR}}" alt="QR code of the Lightning invoice" width="160" height="160"></a>
 <p><code>{{.Invoice}}</code></p>
+<p><a class="btn" id="open-wallet" href="lightning:{{.Invoice}}">Open in wallet</a></p>
+<p id="pay-wait" hidden data-token="{{.Token}}" data-expires="{{$.ExpiresAt.Unix}}" data-claim="{{.Claim}}">
+  <small id="pay-msg" role="status"></small>
+</p>
 <p id="wallet-box" hidden>
   <button type="button" id="webln-pay" data-invoice="{{.Invoice}}" data-token="{{.Token}}">Pay with one click</button>
   <small id="webln-msg"></small>
@@ -143,10 +149,13 @@ var weblnHash = base64.StdEncoding.EncodeToString(sha256Sum([]byte(weblnJS)))
 var (
 	//go:embed assets/wall.js
 	wallJS string
+	//go:embed assets/invoice.js
+	invoiceJS string
 	//go:embed assets/pow-worker.js
 	powWorkerJS string
 
-	wallHash = base64.StdEncoding.EncodeToString(sha256Sum([]byte(wallJS)))
+	wallHash    = base64.StdEncoding.EncodeToString(sha256Sum([]byte(wallJS)))
+	invoiceHash = base64.StdEncoding.EncodeToString(sha256Sum([]byte(invoiceJS)))
 
 	// workerSrc carries a content hash so a new release is never served
 	// from an old cached copy.
@@ -154,14 +163,27 @@ var (
 
 	// pageCSP: nothing from outside, two known inline scripts, and workers
 	// only from this origin.
-	pageCSP = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'sha256-" + weblnHash + "' 'sha256-" + wallHash +
+	pageCSP = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'sha256-" + weblnHash + "' 'sha256-" + invoiceHash + "' 'sha256-" + wallHash +
 		"'; connect-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 )
 
-// WorkerPath is where the proxy serves the puzzle worker. It is reserved:
-// it is answered before any protect rule is looked at, and never reaches
-// the origin.
-const WorkerPath = "/.spikes402/pow-worker.js"
+// ReservedPrefix is the path prefix the proxy answers itself. Nothing
+// under it is subject to protect rules or forwarded to the origin.
+const (
+	ReservedPrefix = "/.spikes402/"
+	WorkerPath     = "/.spikes402/pow-worker.js"
+)
+
+func (g *Gate) serveReserved(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case WorkerPath:
+		serveWorker(w, r)
+	case ClaimPath:
+		g.serveClaim(w, r)
+	default:
+		http.NotFound(w, r)
+	}
+}
 
 func serveWorker(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -230,10 +252,12 @@ func writeHTML(w io.Writer, b challengeBody, qr template.URL) {
 		Solve     bool   // the browser can solve this puzzle (not Argon2id)
 		Attempts  string // expected attempts, for the page text
 		WorkerSrc string
-	}{challengeBody: b, QR: qr, LD: ldJSON(b.Preview), WorkerSrc: workerSrc}
+		Claim     string
+	}{challengeBody: b, QR: qr, LD: ldJSON(b.Preview), WorkerSrc: workerSrc, Claim: ClaimPath}
 	var scripts string
 	if b.L402 != nil {
 		scripts += "<script>" + weblnJS + "</script>\n"
+		scripts += "<script>" + invoiceJS + "</script>\n"
 	}
 	if data.Solve = b.PoW.Algorithm != pow.Argon2id; data.Solve {
 		data.Attempts = humanCount(math.Exp2(float64(b.PoW.Difficulty)))

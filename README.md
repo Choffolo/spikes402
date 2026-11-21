@@ -57,9 +57,13 @@ website sets.
    paying, the page swaps the proof for a **pass**: a cookie (HttpOnly,
    SameSite=Strict, one page, 60 seconds) and then loads the page for real, so
    its CSS, images and scripts work, files download normally, and a reload
-   within a minute does not pay again. Without WebLN the page is unchanged.
-   (Paying with a QR code and an external wallet does not unlock the page yet;
-   see "Known limits".)
+   within a minute does not pay again. The same page also shows an **Open in
+   wallet** link (`lightning:`) and, after you pay with any Lightning wallet
+   (a phone scanning the QR code, for example), unlocks on its own: it asks
+   `/.spikes402/claim` every 1.5 seconds whether that invoice is paid, then
+   sets the pass and reloads. The claim request carries the signed token from
+   the 402 page, so a third party who only sees the invoice cannot take the
+   page.
 2. **Pay:** paying the invoice reveals its *preimage*. The bot repeats the
    request with `Authorization: L402 <token>:<preimage>`. Spikes402 checks
    that `sha256(preimage)` equals the payment hash inside the token.
@@ -281,17 +285,22 @@ it needs ~256 MiB per verifier and a C library. Not implemented.
 A browser (a request that accepts `text/html`) gets a page instead of JSON:
 "This page is protected by an invisible energy wall built with Bitcoin. Pay a
 few sats with the Spikes402 extension, or solve a math puzzle with your
-computer's power." It shows the Lightning invoice (QR code, and a one-click
-button if a WebLN wallet is present) and a **Solve the puzzle** button.
+computer's power." It shows the Lightning invoice (QR code, an **Open in wallet** link for a
+phone or desktop wallet, and a one-click button if a WebLN wallet is present)
+and a **Solve the puzzle** button. After you pay with any wallet the page
+shows "Waiting for payment…", then "Paid — unlocking", and reloads into the
+content. It learns that the invoice is paid by polling `/.spikes402/claim`
+(see below); the preimage never has to be typed in.
 
 The button runs the same sha256d puzzle as bots do, in Web Workers (one per
 core, at most 8), and shows the work: a progress bar against the expected
 number of attempts, attempts so far, hashes per second, elapsed time. When
 a worker finds the nonce, the page redeems it exactly like a bot would
 (`Authorization: PoW token:nonce`) and reloads into the content. Nothing is
-loaded from outside; the page's Content-Security-Policy allows two hashed
-inline scripts and workers from the proxy itself (`worker-src 'self'`). The
-worker is served by the proxy at `/.spikes402/pow-worker.js`; that path is
+loaded from outside; the page's Content-Security-Policy allows only hashed
+inline scripts, `connect-src 'self'` (for the claim polls and the redeem
+request) and workers from the proxy itself (`worker-src 'self'`). The
+worker and the claim endpoint live under `/.spikes402/`; that prefix is
 reserved and never reaches your website. With `argon2id` the button is
 hidden (the browser solver is sha256d only); bots and the extension work as before.
 
@@ -703,6 +712,28 @@ Paying needs a `client.Payer` (your wallet). Only a fake payer exists so far.
 The client solves both `sha256d` and `argon2id` puzzles and refuses ones
 that are too hard (`MaxDifficulty`, `MaxArgonDifficulty`, `MaxArgonMemoryMiB`).
 
+**Waiting for an external payment.** If you pay the invoice with a wallet
+that does not give you the preimage in the same process, poll the claim
+endpoint advertised as `l402.claim` (always `/.spikes402/claim`):
+
+```
+GET /.spikes402/claim
+Authorization: Bearer <token>     # the token from the 402 body, no preimage
+```
+
+A 202 body `{"status":"unpaid"}` means not yet (honour `Retry-After`, about 2
+seconds). A 200 body `{"status":"paid","preimage":"<hex>"}` is the preimage;
+redeem the page as usual with `Authorization: L402 <token>:<preimage>`. The
+same token is also accepted with `Spikes402-Redeem: cookie` on a POST to the
+claim path: the response is 204 and a 60-second pass cookie for that
+resource, so a browser can reload the page without handling the preimage.
+A 410 means the offer expired; a 401 means the token was missing or not
+ours. Only the holder of the HMAC-signed token can claim; knowing the
+invoice or the QR code is not enough. Polls are rate-limited per client,
+and lookups of the same payment hash are coalesced and cached so many
+tabs do not become many calls to the Lightning node.
+
+
 **Signing your requests (Web Bot Auth).** Set `client.Signer` to a
 `webbotauth.Signer` with your Ed25519 key and the https URL where you
 publish your key directory (`webbotauth.DirectoryHandler` serves it). The
@@ -756,9 +787,6 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
 
 - Pricing does not yet move between a min and a max with load. Today you
   set a default `price_sats` and, optionally, fixed per-path prices.
-- Paying the invoice with a QR code and a wallet that is not in the browser
-  does not unlock the page: the server cannot see the payment, and a person
-  cannot send the `Authorization` header. Bots and WebLN wallets are fine.
 - If your website fails to answer (a 5xx status or no answer) for a GET or HEAD
   that carried a valid proof, the same proof can be sent again: up to 3 times
   within 30 seconds, and it is delivered at most once. Other methods get no

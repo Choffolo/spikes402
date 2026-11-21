@@ -143,8 +143,8 @@ func TestPreviewOnThe402Page(t *testing.T) {
 			t.Errorf("page contains %q", bad)
 		}
 	}
-	if got := len(inlineScripts(body)); got != 2 {
-		t.Errorf("%d executable inline scripts, want 2", got)
+	if got := len(inlineScripts(body)); got != 3 {
+		t.Errorf("%d executable inline scripts, want 3", got)
 	}
 	// The origin's cookies are not passed on to the visitor.
 	for _, c := range rec.Header().Values("Set-Cookie") {
