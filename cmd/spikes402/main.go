@@ -179,8 +179,8 @@ func main() {
 		log.Printf("bot policies: %v", cfg.BotPolicies)
 	}
 	if cfg.Surge.Active() {
-		log.Printf("surge pricing on: up to %.2g× if a rule group stays above %.0f 402s/min (step +%.2g every %.3g min, half-life 3 min)",
-			cfg.Surge.MaxMultiplier, cfg.Surge.ThresholdPerMinute, cfg.Surge.Step, cfg.Surge.StepIntervalMinutes)
+		log.Printf("surge pricing on: up to %.2g× when 402s/min are ≥ %.2g× the 24h baseline and at least %.0f/min (step +%.2g every %.3g min)",
+			cfg.Surge.MaxMultiplier, cfg.Surge.SurgeRatio, cfg.Surge.MinPerMinute, cfg.Surge.Step, cfg.Surge.StepIntervalMinutes)
 	}
 	if cfg.Paused {
 		log.Print("protection is paused: protected paths are served free and no invoices will be created")

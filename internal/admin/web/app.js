@@ -168,8 +168,10 @@ function formatSurge(live, cfg) {
     return (cfg && cfg.enabled) ? "on (no groups yet)" : "off (config file only)";
   }
   return live.map((g) => {
-    const demand = Number(g.demand_per_minute || 0).toFixed(1);
-    return `${g.group}: ${g.multiplier}× → ${g.price_sats} sats (${demand}/min)`;
+    const short = Number(g.demand_per_minute || 0).toFixed(1);
+    const base = Number(g.baseline_per_minute || 0).toFixed(1);
+    const ratio = g.warmed ? Number(g.ratio || 0).toFixed(2) + "×" : "warming up";
+    return `${g.group}: ${g.multiplier}× → ${g.price_sats} sats (short ${short}/min, baseline ${base}/min, ${ratio})`;
   }).join("; ");
 }
 

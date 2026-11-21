@@ -79,7 +79,8 @@ func TestInvalid(t *testing.T) {
 		"dev mode in prod":    `{"origin":"http://o","price_sats":5,"protect":["/x"],"web_bot_auth_dev_mode":true,"secret_key":"` + strings.Repeat("k", 32) + `","lightning":{"backend":"phoenixd","phoenixd_password":"p"}}`,
 		"surge cap":           `{"origin":"http://o","price_sats":5,"protect":["/x"],"surge":{"enabled":true,"max_multiplier":11},"lightning":{"backend":"fake"}}`,
 		"surge step":          `{"origin":"http://o","price_sats":5,"protect":["/x"],"surge":{"enabled":true,"step":-1},"lightning":{"backend":"fake"}}`,
-		"surge threshold":     `{"origin":"http://o","price_sats":5,"protect":["/x"],"surge":{"enabled":true,"threshold_per_minute":-5},"lightning":{"backend":"fake"}}`,
+		"surge floor":         `{"origin":"http://o","price_sats":5,"protect":["/x"],"surge":{"enabled":true,"min_per_minute":-5},"lightning":{"backend":"fake"}}`,
+		"surge ratio":         `{"origin":"http://o","price_sats":5,"protect":["/x"],"surge":{"enabled":true,"surge_ratio":1},"lightning":{"backend":"fake"}}`,
 		"surge interval":      `{"origin":"http://o","price_sats":5,"protect":["/x"],"surge":{"enabled":true,"step_interval_minutes":0.01},"lightning":{"backend":"fake"}}`,
 		"surge unknown group": `{"origin":"http://o","price_sats":5,"protect":["/x"],"surge":{"enabled":true,"groups":{"/nope/**":{"enabled":true}}},"lightning":{"backend":"fake"}}`,
 	}
@@ -280,7 +281,7 @@ func TestSurgeConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c.Surge.Active() || c.Surge.MaxMultiplier != 3 || c.Surge.ThresholdPerMinute != 60 || c.Surge.Step != 0.25 || c.Surge.StepIntervalMinutes != 2 {
+	if !c.Surge.Active() || c.Surge.MaxMultiplier != 3 || c.Surge.MinPerMinute != 60 || c.Surge.SurgeRatio != 2 || c.Surge.Step != 0.25 || c.Surge.StepIntervalMinutes != 2 {
 		t.Fatalf("defaults: %+v", c.Surge)
 	}
 	if pub := c.Public(); !pub.Surge.Active() || pub.Surge.MaxMultiplier != 3 {

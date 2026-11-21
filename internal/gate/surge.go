@@ -15,15 +15,27 @@ import (
 const (
 	MaxSurgeMultiplier = 10.0
 
-	DefaultSurgeMaxMultiplier      = 3.0
-	DefaultSurgeThresholdPerMinute = 60.0
-	DefaultSurgeStep               = 0.25
-	DefaultSurgeStepIntervalMin    = 2.0
+	DefaultSurgeMaxMultiplier   = 3.0
+	DefaultSurgeMinPerMinute    = 60.0
+	DefaultSurgeRatio           = 2.0
+	DefaultSurgeStep            = 0.25
+	DefaultSurgeStepIntervalMin = 2.0
+
+	// surgeBaselineHalfLife is the long moving average of the same 402
+	// rate. A day is long enough that a surge does not raise the baseline
+	// quickly, and short enough that a new normal is accepted.
+	surgeBaselineHalfLife = 24 * time.Hour
 
 	// surgeHalfLife is how fast a burst of 402s is forgotten. A short
-	// spike barely moves the measured rate; a few minutes of sustained
-	// demand does.
+	// spike barely moves the measured (short-term) rate; a few minutes
+	// of sustained demand does.
 	surgeHalfLife = 3 * time.Minute
+
+	// surgeWarmup is how long a group is observed before its baseline is
+	// trusted. Until then, demand will not raise the price (the floor is
+	// not used as a standalone trigger). After a restart the warm-up
+	// runs again; baselines are not persisted.
+	surgeWarmup = time.Hour
 
 	// surgePressureFrac is "near full" for pending invoices and the
 	// Argon2id memory budget (global pressure can raise the multiplier
@@ -40,7 +52,8 @@ type SurgeSettings struct {
 	// off ("enabled": false) or on without confusing "omitted" with off.
 	Enabled             *bool   `json:"enabled,omitempty"`
 	MaxMultiplier       float64 `json:"max_multiplier,omitempty"`
-	ThresholdPerMinute  float64 `json:"threshold_per_minute,omitempty"`
+	MinPerMinute        float64 `json:"min_per_minute,omitempty"`
+	SurgeRatio          float64 `json:"surge_ratio,omitempty"`
 	Step                float64 `json:"step,omitempty"`
 	StepIntervalMinutes float64 `json:"step_interval_minutes,omitempty"`
 }
@@ -73,14 +86,18 @@ func (c SurgeConfig) Active() bool {
 	return false
 }
 
+func (c SurgeConfig) blank() bool {
+	return !c.Active() && c.MaxMultiplier == 0 && c.MinPerMinute == 0 && c.SurgeRatio == 0 &&
+		c.Step == 0 && c.StepIntervalMinutes == 0 && len(c.Groups) == 0
+}
+
 // Normalize fills defaults and checks ranges. A completely empty (off)
 // config is valid and left alone.
 func (c *SurgeConfig) Normalize() error {
 	if c == nil {
 		return nil
 	}
-	// Leave a completely empty block alone so "surge" omitted stays omitted.
-	if !c.Active() && c.MaxMultiplier == 0 && c.ThresholdPerMinute == 0 && c.Step == 0 && c.StepIntervalMinutes == 0 && len(c.Groups) == 0 {
+	if c.blank() {
 		return nil
 	}
 	if err := c.SurgeSettings.validate("surge"); err != nil {
@@ -104,8 +121,11 @@ func (s *SurgeSettings) fill() {
 	if s.MaxMultiplier == 0 {
 		s.MaxMultiplier = DefaultSurgeMaxMultiplier
 	}
-	if s.ThresholdPerMinute == 0 {
-		s.ThresholdPerMinute = DefaultSurgeThresholdPerMinute
+	if s.MinPerMinute == 0 {
+		s.MinPerMinute = DefaultSurgeMinPerMinute
+	}
+	if s.SurgeRatio == 0 {
+		s.SurgeRatio = DefaultSurgeRatio
 	}
 	if s.Step == 0 {
 		s.Step = DefaultSurgeStep
@@ -116,12 +136,15 @@ func (s *SurgeSettings) fill() {
 }
 
 func (s SurgeSettings) validate(what string) error {
-	m, th, step, iv := s.MaxMultiplier, s.ThresholdPerMinute, s.Step, s.StepIntervalMinutes
+	m, floor, ratio, step, iv := s.MaxMultiplier, s.MinPerMinute, s.SurgeRatio, s.Step, s.StepIntervalMinutes
 	if m == 0 {
 		m = DefaultSurgeMaxMultiplier
 	}
-	if th == 0 {
-		th = DefaultSurgeThresholdPerMinute
+	if floor == 0 {
+		floor = DefaultSurgeMinPerMinute
+	}
+	if ratio == 0 {
+		ratio = DefaultSurgeRatio
 	}
 	if step == 0 {
 		step = DefaultSurgeStep
@@ -132,8 +155,11 @@ func (s SurgeSettings) validate(what string) error {
 	if math.IsNaN(m) || m <= 1 || m > MaxSurgeMultiplier {
 		return fmt.Errorf(`%s.max_multiplier must be greater than 1 and at most %g`, what, MaxSurgeMultiplier)
 	}
-	if math.IsNaN(th) || th <= 0 || th > 1e6 {
-		return fmt.Errorf(`%s.threshold_per_minute must be above 0 and at most 1,000,000`, what)
+	if math.IsNaN(floor) || floor <= 0 || floor > 1e6 {
+		return fmt.Errorf(`%s.min_per_minute must be above 0 and at most 1,000,000`, what)
+	}
+	if math.IsNaN(ratio) || ratio < 1.2 || ratio > 20 {
+		return fmt.Errorf(`%s.surge_ratio must be between 1.2 and 20`, what)
 	}
 	if math.IsNaN(step) || step <= 0 || step > m-1 {
 		return fmt.Errorf(`%s.step must be above 0 and at most max_multiplier-1`, what)
@@ -143,6 +169,10 @@ func (s SurgeSettings) validate(what string) error {
 	}
 	return nil
 }
+
+func (s SurgeSettings) warmup() time.Duration { return surgeWarmup }
+
+func (s SurgeSettings) baselineHalfLife() time.Duration { return surgeBaselineHalfLife }
 
 // forGroup returns the effective settings for a rule group.
 func (c SurgeConfig) forGroup(pattern string) (SurgeSettings, bool) {
@@ -181,8 +211,11 @@ func overlay(base, over SurgeSettings) SurgeSettings {
 	if over.MaxMultiplier != 0 {
 		out.MaxMultiplier = over.MaxMultiplier
 	}
-	if over.ThresholdPerMinute != 0 {
-		out.ThresholdPerMinute = over.ThresholdPerMinute
+	if over.MinPerMinute != 0 {
+		out.MinPerMinute = over.MinPerMinute
+	}
+	if over.SurgeRatio != 0 {
+		out.SurgeRatio = over.SurgeRatio
 	}
 	if over.Step != 0 {
 		out.Step = over.Step
@@ -201,20 +234,28 @@ func cloneSurge(c SurgeConfig) SurgeConfig {
 // SurgeGroupStatus is the live multiplier and price of one rule group,
 // for the dashboard and admin JSON.
 type SurgeGroupStatus struct {
-	Group           string  `json:"group"`
-	Enabled         bool    `json:"enabled"`
-	BaseSats        int64   `json:"base_sats"`
-	Multiplier      float64 `json:"multiplier"`
-	PriceSats       int64   `json:"price_sats"`
-	DemandPerMinute float64 `json:"demand_per_minute"`
-	MaxMultiplier   float64 `json:"max_multiplier"`
+	Group             string  `json:"group"`
+	Enabled           bool    `json:"enabled"`
+	BaseSats          int64   `json:"base_sats"`
+	Multiplier        float64 `json:"multiplier"`
+	PriceSats         int64   `json:"price_sats"`
+	DemandPerMinute   float64 `json:"demand_per_minute"`
+	BaselinePerMinute float64 `json:"baseline_per_minute"`
+	Ratio             float64 `json:"ratio,omitempty"`
+	Warmed            bool    `json:"warmed"`
+	MaxMultiplier     float64 `json:"max_multiplier"`
 }
 
 type surgeGroup struct {
-	weight   float64
+	weight   float64 // short-term decaying event count
 	last     time.Time
 	lastStep time.Time
 	mult     float64
+
+	first  time.Time // first 402 observed
+	hits   float64   // raw 402s during warm-up, for the seed average
+	baseW  float64   // long-term decaying event count
+	warmed bool
 }
 
 // surger tracks demand and multipliers per rule group.
@@ -239,11 +280,14 @@ func (s *surger) setConfig(cfg SurgeConfig, keep map[string]struct{}) {
 	}
 }
 
-func (s *surger) getLocked(name string) *surgeGroup {
+func (s *surger) getLocked(name string, now time.Time) *surgeGroup {
 	g, ok := s.groups[name]
 	if !ok {
-		g = &surgeGroup{mult: 1}
+		g = &surgeGroup{mult: 1, first: now}
 		s.groups[name] = g
+	}
+	if g.first.IsZero() {
+		g.first = now
 	}
 	return g
 }
@@ -258,9 +302,15 @@ func (s *surger) hit(name string, now time.Time, pressure bool) {
 	if !on {
 		return
 	}
-	g := s.getLocked(name)
-	s.decayLocked(g, now)
+	g := s.getLocked(name, now)
+	s.decayLocked(g, cfg, now)
 	g.weight++
+	if !g.warmed {
+		g.hits++
+		s.maybeWarmLocked(g, cfg, now)
+	} else {
+		g.baseW++
+	}
 	s.stepLocked(g, cfg, now, pressure)
 }
 
@@ -274,8 +324,9 @@ func (s *surger) multiplier(name string, now time.Time, pressure bool) float64 {
 	if !on {
 		return 1
 	}
-	g := s.getLocked(name)
-	s.decayLocked(g, now)
+	g := s.getLocked(name, now)
+	s.decayLocked(g, cfg, now)
+	s.maybeWarmLocked(g, cfg, now)
 	s.stepLocked(g, cfg, now, pressure)
 	return g.mult
 }
@@ -284,7 +335,7 @@ func (s *surger) price(name string, base int64, now time.Time, pressure bool) in
 	return applySurge(base, s.multiplier(name, now, pressure))
 }
 
-func (s *surger) decayLocked(g *surgeGroup, now time.Time) {
+func (s *surger) decayLocked(g *surgeGroup, cfg SurgeSettings, now time.Time) {
 	if g.last.IsZero() {
 		g.last = now
 		if g.lastStep.IsZero() {
@@ -295,12 +346,57 @@ func (s *surger) decayLocked(g *surgeGroup, now time.Time) {
 	dt := now.Sub(g.last).Seconds()
 	if dt > 0 {
 		g.weight *= math.Exp(-surgeLn2 * dt / surgeHalfLife.Seconds())
+		if g.warmed {
+			g.baseW *= math.Exp(-surgeLn2 * dt / cfg.baselineHalfLife().Seconds())
+		}
 		g.last = now
 	}
 }
 
 func (s *surger) rateLocked(g *surgeGroup) float64 {
 	return g.weight * surgeLn2 / surgeHalfLife.Minutes()
+}
+
+func (s *surger) baselineRateLocked(g *surgeGroup, cfg SurgeSettings) float64 {
+	if !g.warmed {
+		return 0
+	}
+	return g.baseW * surgeLn2 / cfg.baselineHalfLife().Minutes()
+}
+
+func (s *surger) maybeWarmLocked(g *surgeGroup, cfg SurgeSettings, now time.Time) {
+	if g.warmed || g.first.IsZero() {
+		return
+	}
+	if now.Sub(g.first) < cfg.warmup() {
+		return
+	}
+	elapsed := now.Sub(g.first).Minutes()
+	if elapsed < 1e-9 {
+		return
+	}
+	avg := g.hits / elapsed
+	if avg < 0 {
+		avg = 0
+	}
+	g.baseW = avg * cfg.baselineHalfLife().Minutes() / surgeLn2
+	g.warmed = true
+	g.lastStep = now // do not inherit the warm-up clock
+}
+
+func (s *surger) demandBusy(g *surgeGroup, cfg SurgeSettings) bool {
+	if !g.warmed {
+		return false
+	}
+	short := s.rateLocked(g)
+	if short < cfg.MinPerMinute {
+		return false
+	}
+	base := s.baselineRateLocked(g, cfg)
+	if base <= 0 {
+		return false
+	}
+	return short >= cfg.SurgeRatio*base
 }
 
 func (s *surger) stepLocked(g *surgeGroup, cfg SurgeSettings, now time.Time, pressure bool) {
@@ -312,8 +408,7 @@ func (s *surger) stepLocked(g *surgeGroup, cfg SurgeSettings, now time.Time, pre
 	if now.Sub(g.lastStep) < interval {
 		return
 	}
-	rate := s.rateLocked(g)
-	busy := rate >= cfg.ThresholdPerMinute || pressure
+	busy := s.demandBusy(g, cfg) || pressure
 	switch {
 	case busy && g.mult < cfg.MaxMultiplier:
 		g.mult = min(cfg.MaxMultiplier, g.mult+cfg.Step)
@@ -432,8 +527,9 @@ func (s *surger) snapshot(names []string, baseOf func(string) int64, now time.Ti
 		if !on && !s.cfg.Active() {
 			continue
 		}
-		g := s.getLocked(name)
-		s.decayLocked(g, now)
+		g := s.getLocked(name, now)
+		s.decayLocked(g, cfg, now)
+		s.maybeWarmLocked(g, cfg, now)
 		if on {
 			s.stepLocked(g, cfg, now, pressure)
 		}
@@ -441,12 +537,17 @@ func (s *surger) snapshot(names []string, baseOf func(string) int64, now time.Ti
 		if on {
 			mult = g.mult
 		}
-		base := baseOf(name)
-		out = append(out, SurgeGroupStatus{
-			Group: name, Enabled: on, BaseSats: base, Multiplier: mult,
-			PriceSats: applySurge(base, mult), DemandPerMinute: s.rateLocked(g),
-			MaxMultiplier: cfg.MaxMultiplier,
-		})
+		short := s.rateLocked(g)
+		baseLine := s.baselineRateLocked(g, cfg)
+		st := SurgeGroupStatus{
+			Group: name, Enabled: on, BaseSats: baseOf(name), Multiplier: mult,
+			PriceSats: applySurge(baseOf(name), mult), DemandPerMinute: short,
+			BaselinePerMinute: baseLine, Warmed: g.warmed, MaxMultiplier: cfg.MaxMultiplier,
+		}
+		if baseLine > 0 {
+			st.Ratio = short / baseLine
+		}
+		out = append(out, st)
 	}
 	return out
 }

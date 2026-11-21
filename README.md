@@ -196,75 +196,54 @@ web server sits behind Spikes402. So:
 
 ## Dynamic pricing (optional, off by default)
 
-When `surge` is enabled, the price of a **rule group** can rise above its
-base (`price_sats` or a matching `prices` rule) if that group is seeing
-sustained demand, then fall back to 1× when traffic drops. A rule group is
-a `prices` pattern if one matches, otherwise the matching `protect`
-pattern — never a raw URL, so memory stays bounded by the size of the
-config. The effective price is `ceil(base × multiplier)` whole sats, and
-proof-of-work difficulty is derived from that same price (pay-vs-PoW
-parity stays the same). The HMAC token still records the price that was
-quoted; a paid invoice is honoured at that quote if the multiplier later
-moves.
+When `surge` is enabled, the price of a **rule group** (a `prices`
+pattern if one matches, otherwise the matching `protect` pattern — never
+a raw URL) can rise above its base under unusually high 402 demand, then
+step back to 1× when traffic returns to normal. The effective price is
+`ceil(base × multiplier)` whole sats; proof-of-work uses that same
+price. The HMAC token still records the quoted price.
 
-Demand is an exponentially decaying count of requests that received a 402
-(after the per-client rate limit). Free, paused, blocked and static paths
-are not counted, and a successful payment or pass cookie is not either.
-The half-life is **3 minutes**, so a short burst barely moves the measured
-rate. The multiplier steps up by `step` when the rate stays at or above
-`threshold_per_minute` for one `step_interval_minutes`, up to
-`max_multiplier` (hard cap **10**), and steps back down by the same amount
-when the rate falls below the threshold.
+Each group keeps a short-term 402 rate (half-life **3 minutes**) and a
+slow baseline of the same rate (half-life **24 hours**). The multiplier
+steps up when the short rate is at least `surge_ratio` times the
+baseline **and** at least `min_per_minute`, for one
+`step_interval_minutes`, up to `max_multiplier` (hard cap 10). It steps
+down by the same `step` when that is no longer true. A short spike
+barely moves the short rate; a site with steady traffic, even a busy
+one, does not surge, because the two rates stay in line.
 
-If it stays simple, one more signal can step the multiplier up the same
-way: **global pressure** — pending invoices at or above 90% of
-`max_pending_invoices`, the Argon2id memory budget at or above 90%, or
-the Lightning node circuit breaker open.
+Until a group has been observed for **one hour**, demand will not raise
+the price (the baseline is still being seeded from a simple average).
+After a restart the warm-up runs again; baselines are not written to
+disk. Global pressure (pending invoices or the Argon2id budget at or
+above 90%, or the node breaker open) can still step the multiplier up
+the same way. The slow baseline keeps updating during a surge, so a new
+normal is accepted over a day rather than frozen.
 
-Defaults (used when a field is omitted but surge is on):
-
-| Key | Default |
-|---|---|
-| `enabled` | `false` |
-| `max_multiplier` | `3` (hard cap 10) |
-| `threshold_per_minute` | `60` |
-| `step` | `0.25` (+25 percentage points) |
-| `step_interval_minutes` | `2` |
-
-Site-wide, or only on some patterns:
+Defaults when surge is on and a field is omitted: `max_multiplier` 3,
+`surge_ratio` 2, `min_per_minute` 60, `step` 0.25,
+`step_interval_minutes` 2.
 
 ```json
 "surge": {
   "enabled": true,
   "max_multiplier": 3,
-  "threshold_per_minute": 60,
-  "step": 0.25,
-  "step_interval_minutes": 2,
-  "groups": {
-    "/premium/**": { "max_multiplier": 5 },
-    "/articles/**": { "enabled": false }
-  }
+  "surge_ratio": 2,
+  "min_per_minute": 60,
+  "groups": { "/articles/**": { "enabled": false } }
 }
 ```
 
-`groups` keys must be a `protect` or `prices` pattern. A group may set
-`"enabled": true` to opt in when the site-wide switch is off, or
-`"enabled": false` to keep that pattern at 1×. Other omitted knobs
-inherit the top-level values.
+`groups` keys must be a `protect` or `prices` pattern. A group may opt
+in or out with `enabled`; omitted knobs inherit the site-wide values.
+The live short rate, baseline, ratio and multiplier appear in the
+dashboard and `GET /api/status` (`gate.surge`), read-only. Surge
+settings stay in the config file.
 
-The current multiplier, effective price and demand of each group appear
-in the dashboard status and in `GET /api/status` (`gate.surge`),
-read-only. Surge settings themselves stay in the config file: the
-dashboard cannot change them, and the AI admin cannot either.
-
-**Griefing:** we count every 402, not unique visitors. A competitor (or
-a botnet) can raise a group's price by sending many 402s. The cap, the
-step interval, the 3-minute half-life and `challenges_per_minute` (30
-per IP by default) limit how far and how fast that goes; the default
-threshold of 60/min is above one IP's usual 402 budget, so a single
-address cannot do it alone. Unique-client counting is not implemented
-(it would need extra per-group state). You can raise the threshold or
-lower `max_multiplier` if this is a concern.
+We count every 402, not unique visitors. A competitor can try to raise a
+group's price; `min_per_minute` (default 60, above one IP's usual 402
+budget), the ratio against that group's own baseline, the cap and the
+step interval limit how far that goes.
 
 ## Proof-of-work pricing
 
@@ -859,9 +838,9 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
 
 ## Known limits / not done yet
 
-- Surge pricing is off until you enable it; there is no unique-client
-  filter against a competitor pumping a group's 402 rate (the multiplier
-  cap, decay and per-IP 402 limit still apply). See [Dynamic pricing](#dynamic-pricing-optional-off-by-default).
+- Surge pricing is off until you enable it; baselines start a one-hour
+  warm-up after each restart (they are not saved to disk). See
+  [Dynamic pricing](#dynamic-pricing-optional-off-by-default).
 - If your website fails to answer (a 5xx status or no answer) for a GET or HEAD
   that carried a valid proof, the same proof can be sent again: up to 3 times
   within 30 seconds, and it is delivered at most once. Other methods get no
