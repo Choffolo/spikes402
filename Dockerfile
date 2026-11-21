@@ -28,6 +28,10 @@ FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c
 COPY --from=build --chown=nonroot:nonroot /out/spikes402 /spikes402
 COPY --from=build /src/LICENSE /LICENSE
 USER nonroot:nonroot
+# Soft heap target for the Go runtime. Override at run time if the host
+# has more (or less) memory, e.g. docker compose environment GOMEMLIMIT=512MiB.
+# See docs/deploy.md.
+ENV GOMEMLIMIT=256MiB
 EXPOSE 8402
 ENTRYPOINT ["/spikes402"]
 CMD ["-config", "/etc/spikes402/config.json"]

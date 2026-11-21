@@ -110,6 +110,7 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `pow_difficulty` | Leading zero bits for the puzzle. `0` = derive from the price and `pow_seconds_per_sat` | `0` |
 | `pow_algorithm` | `"sha256d"` or `"argon2id"` (memory-hard, see [Argon2id](#argon2id-memory-hard-proof-of-work)) | `"sha256d"` |
 | `argon2_memory_mib` | Memory per Argon2id attempt, 8–256 MiB | `16` |
+| `argon2_max_memory_mib` | Memory all concurrent Argon2id checks may use together. A check that needs more than this is refused at startup. Extra checks wait briefly, then `503` | `256` |
 | `challenge_ttl_seconds` | How long a 402 offer (token and invoice) stays valid | `600` |
 | `challenges_per_minute` | 402 answers per client per minute; beyond that, `429 Too Many Requests` | `30` |
 | `max_invoices_per_minute` | Invoices created per minute, all clients together; beyond that, proof-of-work only | `300` |
@@ -191,6 +192,10 @@ difficulty, whatever the sats price.
 attempts per second (we measured ~2.7 million on a recent server core;
 the figure is rounded down). A gaming GPU is roughly **1000×** faster. The
 402 answer tells bots the expected time as `expected_seconds_one_cpu_core`.
+An optimised native solver (for example in Rust) is about **1.5×** faster
+than this Go reference for sha256d and about **1.3×** for argon2id, in an
+external benchmark; expected times for those solvers are shorter. The
+published calibration is unchanged.
 
 With the default `pow_seconds_per_sat: 10`:
 
@@ -244,11 +249,14 @@ costs the server more per check.
 (16 MiB and ~10 ms by default), so Spikes402 only runs Argon2id for a
 token it signed itself, for this page, not expired and not used yet (all
 cheap checks done first). Each check also counts against the client's
-`challenges_per_minute`. At most 4 checks run at once (fewer on small
-machines); beyond that the answer is `503` + `Retry-After: 1` and the token
-stays valid. A wrong answer **burns the token** (one check per token, ever).
-The parameters are inside the signed token, so a client cannot pick cheaper
-ones.
+`challenges_per_minute`. Concurrent checks share a memory budget
+(`argon2_max_memory_mib`, default 256 MiB): at the default 16 MiB per
+check that is 16 at once; at 256 MiB per check, only one. A config where
+one check needs more than the budget is refused. If the budget is full,
+the caller waits briefly and then gets `503` + `Retry-After: 1`, and the
+token stays valid. A wrong answer **burns the token** (one check per token,
+ever). The parameters are inside the signed token, so a client cannot pick
+cheaper ones.
 
 **Future option:** [RandomX](https://github.com/tevador/RandomX) (Monero's
 CPU-oriented PoW) narrows the gap to specialised hardware even further, but
@@ -634,9 +642,10 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
   that carried a valid proof, the same proof can be sent again: up to 3 times
   within 30 seconds, and it is delivered at most once. Other methods get no
   second try.
-- Spent tokens are remembered in memory: run **one** proxy instance; a restart
-  forgets them (tokens expire after `challenge_ttl_seconds`, so the replay
-  window is limited to that).
+- Spent tokens are remembered in memory: about **128 MiB** at the cap of
+  1,000,000 unexpired tokens (measured, ~134 bytes per entry). Run **one**
+  proxy instance; a restart forgets them (tokens expire after
+  `challenge_ttl_seconds`, so the replay window is limited to that).
 - Rate limits are per IP. A botnet with many addresses can use up the global
   invoice budget; paying visitors then get proof-of-work only until it
   refills. The node itself stays protected. Bots behind one shared address

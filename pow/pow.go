@@ -91,19 +91,36 @@ func (p Params) Validate() error {
 // ErrTooHard is returned for parameters out of range.
 var ErrTooHard = errors.New("pow: parameters out of range")
 
-func input(challenge string, nonce uint64) []byte {
-	buf := make([]byte, 0, len(challenge)+21)
-	buf = append(buf, challenge...)
+var argonSaltBytes = []byte(argonSalt)
+
+// appendInput writes challenge + ":" + nonce into buf, reusing its storage.
+func appendInput(buf []byte, challenge string, nonce uint64) []byte {
+	buf = append(buf[:0], challenge...)
 	buf = append(buf, ':')
 	return strconv.AppendUint(buf, nonce, 10)
 }
 
+var inputPool = sync.Pool{New: func() any {
+	b := make([]byte, 0, 512)
+	return &b
+}}
+
 // Hash computes the puzzle hash. p must be valid.
 func (p Params) Hash(challenge string, nonce uint64) [32]byte {
-	in := input(challenge, nonce)
+	bp := inputPool.Get().(*[]byte)
+	buf := appendInput(*bp, challenge, nonce)
+	out := p.hashInput(buf)
+	if cap(buf) <= 4096 {
+		*bp = buf[:0]
+		inputPool.Put(bp)
+	}
+	return out
+}
+
+func (p Params) hashInput(in []byte) [32]byte {
 	if p.Algorithm == Argon2id {
 		var out [32]byte
-		copy(out[:], argon2.IDKey(in, []byte(argonSalt), 1, uint32(p.MemoryMiB)*1024, 1, 32))
+		copy(out[:], argon2.IDKey(in, argonSaltBytes, 1, uint32(p.MemoryMiB)*1024, 1, 32))
 		return out
 	}
 	first := sha256.Sum256(in)
@@ -148,11 +165,13 @@ func (p Params) Solve(ctx context.Context, challenge string) (uint64, error) {
 		wg.Add(1)
 		go func(nonce uint64) { // worker w tries w, w+workers, w+2*workers, ...
 			defer wg.Done()
+			buf := make([]byte, 0, len(challenge)+21)
 			for i := uint64(0); ; i++ {
 				if i%check == 0 && (found.Load() || ctx.Err() != nil) {
 					return
 				}
-				if LeadingZeroBits(p.Hash(challenge, nonce)) >= p.Difficulty {
+				buf = appendInput(buf, challenge, nonce)
+				if LeadingZeroBits(p.hashInput(buf)) >= p.Difficulty {
 					once.Do(func() { result = nonce; found.Store(true) })
 					return
 				}

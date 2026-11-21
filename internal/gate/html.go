@@ -94,17 +94,23 @@ func sha256Sum(b []byte) []byte {
 	return s[:]
 }
 
-func writeHTML(w io.Writer, b challengeBody) {
+// invoiceQR is a data URI of the Lightning invoice as a QR code.
+// Wallets expect upper-case BOLT11 in QR codes (smaller code).
+func invoiceQR(invoice string) template.URL {
+	png, err := qrcode.Encode(strings.ToUpper("lightning:"+invoice), qrcode.Medium, 256)
+	if err != nil {
+		return ""
+	}
+	return template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(png))
+}
+
+func writeHTML(w io.Writer, b challengeBody, qr template.URL) {
 	data := struct {
 		challengeBody
 		QR     template.URL
 		Script template.HTML
-	}{challengeBody: b}
+	}{challengeBody: b, QR: qr}
 	if b.L402 != nil {
-		// Wallets expect upper-case BOLT11 in QR codes (smaller code).
-		if png, err := qrcode.Encode(strings.ToUpper("lightning:"+b.L402.Invoice), qrcode.Medium, 256); err == nil {
-			data.QR = template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(png))
-		}
 		data.Script = template.HTML("<script>" + weblnJS + "</script>")
 	}
 	page.Execute(w, data)

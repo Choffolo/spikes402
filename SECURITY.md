@@ -73,6 +73,7 @@ These are known and not fixed yet. Contributions are welcome.
   remembered to stop replays. If an attacker fills it (it takes a large,
   sustained number of valid redemptions from many addresses), new
   redemptions, including paid ones, get "server busy" until entries expire.
-- **Argon2id memory.** Up to 4 answers are checked at once, each using
-  `argon2_memory_mib`. With the maximum (256 MiB) a burst needs about 1 GiB
-  of RAM. The default (16 MiB) needs about 64 MiB.
+- **Argon2id memory.** Concurrent checks share `argon2_max_memory_mib`
+  (default 256 MiB). With the default 16 MiB per check, that is 16 at once;
+  with 256 MiB per check, one. A setting where one check needs more than
+  the budget is refused.

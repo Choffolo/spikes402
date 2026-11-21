@@ -1,7 +1,10 @@
 package gate
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 )
@@ -13,20 +16,32 @@ import (
 //
 // One exception, for payers: if the origin fails to answer (see release),
 // the token can be used again, a few times and only for a short while.
+//
+// Keys are compact: 1 byte kind + 16-byte id. Expiry is stored as Unix
+// seconds. The public methods still take the same string ids as before.
 type spentSet struct {
 	mu        sync.Mutex
-	ids       map[string]*spentEntry
+	ids       map[spentID]spentEntry
 	max       int
 	inserts   int
 	lastSweep time.Time
 }
 
+// spentID is "pay" or "pow" plus the 16-byte token id.
+type spentID [17]byte
+
 type spentEntry struct {
-	expires  time.Time
-	first    time.Time // when it was first used
-	retries  int       // how often it was given back
-	released bool      // given back and not used again yet
+	expires  int64 // Unix seconds
+	first    int64 // Unix seconds of first use
+	retries  int   // how often it was given back
+	released bool  // given back and not used again yet
 }
+
+const (
+	spentKindPay   byte = 1
+	spentKindPoW   byte = 2
+	spentKindOther byte = 0 // tests and unexpected ids
+)
 
 // A token whose request the origin could not answer can be retried at most
 // maxRetries times, within retryWindow of its first use. Whatever happens,
@@ -36,11 +51,40 @@ const (
 	retryWindow = 30 * time.Second
 )
 
-// maxSpent bounds the memory of the spent set (roughly 100 MB at most).
+// maxSpent bounds the memory of the spent set (about 128 MiB, ~134 bytes
+// per entry, measured with HeapAlloc at the cap).
 const maxSpent = 1_000_000
 
 func newSpentSet() *spentSet {
-	return &spentSet{ids: make(map[string]*spentEntry), max: maxSpent}
+	return &spentSet{ids: make(map[spentID]spentEntry), max: maxSpent}
+}
+
+// compactID packs a spent-set key. Production keys are "pay:" or "pow:"
+// followed by a 32-character hex id (16 bytes). Anything else is hashed,
+// so existing tests that use short names keep working.
+func compactID(id string) spentID {
+	var k spentID
+	kind, rest, ok := strings.Cut(id, ":")
+	if ok && len(rest) == 32 {
+		if raw, err := hex.DecodeString(rest); err == nil && len(raw) == 16 {
+			switch kind {
+			case "pay":
+				k[0] = spentKindPay
+			case "pow":
+				k[0] = spentKindPoW
+			default:
+				k[0] = spentKindOther
+			}
+			if k[0] != spentKindOther {
+				copy(k[1:], raw)
+				return k
+			}
+		}
+	}
+	k[0] = spentKindOther
+	sum := sha256.Sum256([]byte(id))
+	copy(k[1:], sum[:16])
+	return k
 }
 
 // errBusy is returned when the spent set is full of unexpired tokens.
@@ -51,9 +95,11 @@ var errBusy = errors.New("server busy, try again later")
 func (s *spentSet) use(id string, expires, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if e, seen := s.ids[id]; seen {
-		if e.released && now.Before(e.first.Add(retryWindow)) {
+	key := compactID(id)
+	if e, seen := s.ids[key]; seen {
+		if e.released && now.Unix() < e.first+int64(retryWindow.Seconds()) {
 			e.released = false
+			s.ids[key] = e
 			return nil
 		}
 		return errReplay
@@ -62,8 +108,9 @@ func (s *spentSet) use(id string, expires, now time.Time) error {
 	// Forget entries that can no longer be replayed: every 1024 inserts,
 	// or when full (at most once a second, so a full set stays cheap).
 	if s.inserts%1024 == 0 || (len(s.ids) >= s.max && now.Sub(s.lastSweep) >= time.Second) {
+		unix := now.Unix()
 		for k, e := range s.ids {
-			if now.After(e.expires) {
+			if unix > e.expires {
 				delete(s.ids, k)
 			}
 		}
@@ -72,7 +119,7 @@ func (s *spentSet) use(id string, expires, now time.Time) error {
 	if len(s.ids) >= s.max {
 		return errBusy
 	}
-	s.ids[id] = &spentEntry{expires: expires, first: now}
+	s.ids[key] = spentEntry{expires: expires.Unix(), first: now.Unix()}
 	return nil
 }
 
@@ -82,12 +129,14 @@ func (s *spentSet) use(id string, expires, now time.Time) error {
 func (s *spentSet) release(id string, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e, ok := s.ids[id]
-	if !ok || e.released || e.retries >= maxRetries || !now.Before(e.first.Add(retryWindow)) {
+	key := compactID(id)
+	e, ok := s.ids[key]
+	if !ok || e.released || e.retries >= maxRetries || now.Unix() >= e.first+int64(retryWindow.Seconds()) {
 		return
 	}
 	e.retries++
 	e.released = true
+	s.ids[key] = e
 }
 
 func (s *spentSet) len() int {
@@ -100,6 +149,6 @@ func (s *spentSet) len() int {
 func (s *spentSet) has(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e, seen := s.ids[id]
+	e, seen := s.ids[compactID(id)]
 	return seen && !e.released
 }

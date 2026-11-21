@@ -60,6 +60,15 @@ The fake Lightning backend is for local development without Docker (see
 the README quick start). It refuses to listen on a non-localhost address,
 so it is not used in this Compose file.
 
+The image sets `GOMEMLIMIT=256MiB`, a soft heap target for the Go runtime
+(it is not a hard cap). Override it when you run the container if the host
+has more or less memory, for example `GOMEMLIMIT=512MiB` in Compose
+`environment`.
+
+The proxy keeps up to 256 idle connections to your origin and waits 15
+seconds for origin response headers; if the origin hangs or cannot be
+reached, the client gets a short 502.
+
 ## TLS in front
 
 Do not expose port 8402 to the internet as plain HTTP. Put a TLS reverse
