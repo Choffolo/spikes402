@@ -108,6 +108,18 @@ keep the origin's cache headers.
   directory (for example `./config:/etc/spikes402`) that contains
   `config.json` and is writable by uid 65532, so the sidecar can be written
   and kept.
+- Spent tokens and withdrawal intents are written under `state_dir`
+  (in the example, `/var/lib/spikes402`). The directory is mode 0700,
+  the files 0600, and each record is HMAC-sealed with `secret_key`
+  (no secrets are stored in the files). The example Compose file mounts
+  a named volume `spikes402-state` there; it must stay writable by
+  uid 65532. If you bind-mount a host directory instead, create it
+  first and `chown 65532:65532` it. A missing or unreadable `state_dir`
+  prevents the process from starting. A tampered or unreadable spent
+  store also refuses to start (so a restart cannot “forget” spent
+  tokens). An unreadable withdrawal intent starts the process but
+  blocks withdrawals until you check the node and resolve the intent
+  in the dashboard.
 - Set secrets with environment variables, not in the file:
   `SPIKES402_SECRET_KEY`, `SPIKES402_ADMIN_KEY`, `PHOENIXD_PASSWORD`.
 - Leave `withdraw.enabled` false unless you are actively withdrawing.
@@ -136,8 +148,15 @@ it the funds are gone.
   to offline storage you control. Restrict permissions (mode 600).
 - Test that you can restore the volume before you put real money on the
   node.
-- The Spikes402 `secret_key` signs visitor tokens. If you lose it, existing
-  tokens stop working; the Lightning funds are unaffected. Keep a copy of
+- The `spikes402-state` volume holds spent tokens and withdrawal intents.
+  It is not a secret, but losing it lets old tokens be spent again until
+  they expire, and an interrupted withdrawal may need a manual resolve.
+  Changing `secret_key` makes existing state unreadable (the process
+  fails safe: it will not start with an empty spent list, and withdrawals
+  stay blocked until you resolve or remove the files).
+- The Spikes402 `secret_key` signs visitor tokens and seals the state
+  files. If you lose it, existing tokens stop working; the Lightning
+  funds are unaffected. Keep a copy of
   `.env` with the same care as other server secrets (not next to `seed.dat`
   on a public disk).
 

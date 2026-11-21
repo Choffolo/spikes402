@@ -210,3 +210,76 @@ func TestPhoenixdWithdrawUncertain(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestPhoenixdOutgoingLookup(t *testing.T) {
+	paidAt := int64(1_800_000_000_000)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, pw, _ := r.BasicAuth()
+		if pw != "full" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch {
+		case r.URL.Path == "/payments/outgoing/missing":
+			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/payments/outgoing/paid-1":
+			w.Write([]byte(`{"paymentId":"paid-1","isPaid":true,"sent":100,"completedAt":1800000000000,"createdAt":1800000000000}`))
+		case r.URL.Path == "/payments/outgoing/pending-1":
+			w.Write([]byte(`{"paymentId":"pending-1","isPaid":false,"sent":100,"completedAt":null,"createdAt":1800000000000}`))
+		case r.URL.Path == "/payments/outgoing/failed-1":
+			w.Write([]byte(`{"paymentId":"failed-1","isPaid":false,"sent":100,"completedAt":1800000000000}`))
+		case r.URL.Path == "/payments/outgoing":
+			w.Write([]byte(`[
+				{"paymentId":"paid-1","isPaid":true,"sent":100,"completedAt":1800000000000,"createdAt":1800000000000},
+				{"paymentId":"failed-1","isPaid":false,"sent":50,"completedAt":1800000000000,"createdAt":1800000000000}
+			]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	p := &PhoenixdWithdrawer{URL: srv.URL, FullPassword: "full"}
+	ctx := context.Background()
+
+	if _, err := p.LookupOutgoing(ctx, "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing: %v", err)
+	}
+	got, err := p.LookupOutgoing(ctx, "paid-1")
+	if err != nil || !got.Paid || !got.Completed || got.AmountSat != 100 {
+		t.Fatalf("paid: %+v %v", got, err)
+	}
+	got, err = p.LookupOutgoing(ctx, "pending-1")
+	if err != nil || got.Paid || got.Completed {
+		t.Fatalf("pending: %+v %v", got, err)
+	}
+	got, err = p.LookupOutgoing(ctx, "failed-1")
+	if err != nil || got.Paid || !got.Completed {
+		t.Fatalf("failed: %+v %v", got, err)
+	}
+	list, err := p.ListOutgoing(ctx, time.UnixMilli(paidAt-1000), time.UnixMilli(paidAt+1000))
+	if err != nil || len(list) != 2 {
+		t.Fatalf("list: %v %v", list, err)
+	}
+}
+
+func TestFakeOutgoingLookup(t *testing.T) {
+	f := NewFake()
+	inv, _ := f.CreateInvoice(context.Background(), 80, "", time.Minute)
+	if _, err := f.Pay(inv.PaymentRequest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Withdraw(context.Background(), "me@x.y", 30); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.LookupOutgoing(context.Background(), "fake-1")
+	if err != nil || got.AmountSat != 30 || !got.Paid || !got.Completed {
+		t.Fatalf("%+v %v", got, err)
+	}
+	if _, err := f.LookupOutgoing(context.Background(), "nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing: %v", err)
+	}
+	list, err := f.ListOutgoing(context.Background(), time.Time{}, time.Time{})
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list: %v %v", list, err)
+	}
+}

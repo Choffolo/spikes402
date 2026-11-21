@@ -23,6 +23,7 @@ import (
 	"github.com/Choffolo/spikes402/internal/gate"
 	"github.com/Choffolo/spikes402/internal/lightning"
 	"github.com/Choffolo/spikes402/internal/netlimit"
+	"github.com/Choffolo/spikes402/internal/persist"
 	"github.com/Choffolo/spikes402/webbotauth"
 )
 
@@ -44,6 +45,7 @@ func main() {
 		ClientIPHeader: cfg.ClientIPHeader,
 	})
 
+	secretConfigured := cfg.SecretKey != ""
 	secret := []byte(cfg.SecretKey)
 	if len(secret) == 0 { // only allowed with the fake backend
 		secret = make([]byte, 32)
@@ -51,6 +53,36 @@ func main() {
 			log.Fatal(err)
 		}
 		log.Print("no secret_key set: using a random one (tokens will not survive a restart)")
+	}
+
+	if err := persist.Prepare(cfg.StateDir); err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("state directory %s", cfg.StateDir)
+
+	var spentStore gate.SpentStore
+	var spentRecords []persist.SpentRecord
+	var intentStore admin.IntentStore
+	if secretConfigured {
+		st, err := persist.OpenSpent(cfg.StateDir, secret)
+		if err != nil {
+			log.Fatal(err)
+		}
+		spentRecords, err = st.Load(time.Now())
+		if err != nil {
+			log.Fatalf("spent tokens: %v", err)
+		}
+		spentStore = st
+		intents, err := persist.OpenIntents(cfg.StateDir, secret)
+		if err != nil {
+			log.Fatal(err)
+		}
+		intentStore = intents
+		if n := len(spentRecords); n > 0 {
+			log.Printf("loaded %d spent token(s) from disk", n)
+		}
+	} else {
+		log.Print("no secret_key set: spent tokens and withdrawal intents are not saved to disk")
 	}
 
 	mux := http.NewServeMux()
@@ -109,11 +141,14 @@ func main() {
 		Policies:           cfg.BotPolicies,
 		Observer:           observer,
 		Argon2MaxMemoryMiB: cfg.Argon2MaxMemoryMiB,
+
+		SpentStore:   spentStore,
+		SpentRecords: spentRecords,
 	})
 	mux.Handle("/", g)
 
 	if cfg.AdminEnabled() {
-		startAdmin(cfg, *configFile, g, monitor, backend)
+		startAdmin(cfg, *configFile, g, monitor, backend, intentStore)
 	}
 
 	srv := &http.Server{
@@ -154,8 +189,8 @@ const maxHeaderBytes = 32 << 10
 
 // startAdmin serves the admin API and dashboard on their own address
 // (localhost by default), separate from the public proxy.
-func startAdmin(cfg *config.Config, configFile string, g *gate.Gate, monitor *admin.Monitor, backend lightning.Backend) {
-	opt := admin.Options{Config: cfg, ConfigFile: configFile, Gate: g, Monitor: monitor}
+func startAdmin(cfg *config.Config, configFile string, g *gate.Gate, monitor *admin.Monitor, backend lightning.Backend, intent admin.IntentStore) {
+	opt := admin.Options{Config: cfg, ConfigFile: configFile, Gate: g, Monitor: monitor, IntentStore: intent}
 	if insp, ok := backend.(lightning.Inspector); ok {
 		opt.Node = insp
 	}
@@ -174,9 +209,11 @@ func startAdmin(cfg *config.Config, configFile string, g *gate.Gate, monitor *ad
 			log.Printf("WARNING: withdrawals are enabled and the admin dashboard listens beyond localhost (%s): anyone who gets the admin key and the withdraw password on that network can move your sats", cfg.Admin.Listen)
 		}
 	}
+	adm := admin.New(opt)
+	adm.ReconcileWithdrawals(context.Background())
 	srv := &http.Server{
 		Addr:              cfg.Admin.Listen,
-		Handler:           admin.New(opt).Handler(),
+		Handler:           adm.Handler(),
 		MaxHeaderBytes:    maxHeaderBytes,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,

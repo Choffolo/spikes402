@@ -45,6 +45,8 @@ type Options struct {
 	Monitor    *Monitor
 	Node       lightning.Inspector  // may be nil
 	Withdrawer lightning.Withdrawer // nil unless withdrawals are enabled
+	// IntentStore records withdrawal intents on disk (optional; tests may omit it).
+	IntentStore IntentStore
 }
 
 // Server is the admin API and dashboard.
@@ -87,7 +89,8 @@ func New(o Options) *Server {
 		s.aiHash = sha256.Sum256([]byte(o.Config.Admin.AIKey))
 	}
 	if o.Config.Withdraw.Enabled && o.Withdrawer != nil {
-		s.wd = newWithdrawals(o.Config.Withdraw.Destination, o.Config.Withdraw.Password)
+		s.wd = newWithdrawals(o.Config.Withdraw.Destination, o.Config.Withdraw.Password, o.IntentStore)
+		s.loadIntent()
 	}
 	return s
 }

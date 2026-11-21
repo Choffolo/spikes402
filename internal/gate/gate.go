@@ -21,6 +21,7 @@ import (
 
 	"github.com/Choffolo/spikes402/internal/botid"
 	"github.com/Choffolo/spikes402/internal/lightning"
+	"github.com/Choffolo/spikes402/internal/persist"
 	"github.com/Choffolo/spikes402/pow"
 )
 
@@ -60,6 +61,11 @@ type Options struct {
 	// use together. 0 means DefaultArgonMaxMemoryMiB (256). A single check
 	// that needs more than this is refused (see config).
 	Argon2MaxMemoryMiB int
+
+	// SpentStore, if set, records spent tokens on disk. SpentRecords is
+	// the already-loaded contents (so New does not fail on a bad store).
+	SpentStore   SpentStore
+	SpentRecords []persist.SpentRecord
 }
 
 // PriceRule maps a path pattern (same syntax as Protect) to a price.
@@ -98,10 +104,13 @@ func New(opt Options) *Gate {
 		opt.ChallengeTTL <= 0 || opt.PoW == nil || opt.ChallengesPerMinute < 1 || opt.MaxPendingInvoices < 1 || opt.MaxInvoicesPerMinute < 1 {
 		panic("gate: invalid options")
 	}
+	spent := newSpentSet()
+	spent.store = opt.SpentStore
+	spent.load(opt.SpentRecords)
 	g := &Gate{
 		opt:     opt,
 		sign:    signer{opt.SecretKey},
-		spent:   newSpentSet(),
+		spent:   spent,
 		limiter: newRateLimiter(opt.ChallengesPerMinute),
 		pending: newPendingOffers(opt.MaxPendingInvoices),
 		node:    newNodeGuard(opt.Lightning, opt.MaxInvoicesPerMinute),
@@ -571,9 +580,12 @@ func (g *Gate) newOffer(r *http.Request, now time.Time, key string, p pow.Params
 	// called: not too many open invoices, within the global rate, node
 	// healthy, and the policy for this client allows it.
 	var invoice string
-	if !powOnly && g.pending.reserve(now) {
+	gotSlot := !powOnly && g.pending.reserve(now)
+	if gotSlot {
 		inv, err := g.node.createInvoice(now, price, memo(resource(r)), g.opt.ChallengeTTL)
 		if err != nil {
+			g.pending.cancelReserve()
+			gotSlot = false
 			g.nodeLog.printf(now, "spikes402: no invoice, offering proof-of-work only: %v", err)
 		} else {
 			c.PaymentHash = hex.EncodeToString(inv.PaymentHash[:])
@@ -583,12 +595,17 @@ func (g *Gate) newOffer(r *http.Request, now time.Time, key string, p pow.Params
 
 	token, err := g.sign.sign(c)
 	if err != nil {
+		if gotSlot {
+			g.pending.cancelReserve()
+		}
 		return offer{}, err
 	}
 	o := offer{id: c.ID, token: token, invoice: invoice, expires: time.Unix(c.Expires, 0), price: price, pow: p}
 	if invoice != "" {
 		o.qr = string(invoiceQR(invoice))
 		g.pending.put(key, o)
+	} else if gotSlot {
+		g.pending.cancelReserve()
 	}
 	return o, nil
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/Choffolo/spikes402/internal/gate"
 	"github.com/Choffolo/spikes402/internal/lightning"
 	"github.com/Choffolo/spikes402/pow"
+	"path/filepath"
 )
 
 const (
@@ -56,6 +57,7 @@ type Config struct {
 	TrustedProxies       []string         `json:"trusted_proxies"`         // IPs/CIDRs allowed to set forwarding and client_ip_header
 	PreserveHost         bool             `json:"preserve_host"`           // send the public Host to the origin (trusted proxies only)
 	SecretKey            string           `json:"secret_key"`              // or env SPIKES402_SECRET_KEY
+	StateDir             string           `json:"state_dir"`               // spent tokens and withdrawal intents; default "<config dir>/state"
 	Lightning            Lightning        `json:"lightning"`
 
 	Paused bool `json:"paused,omitempty"` // serve protected paths free; no invoices (dashboard toggle)
@@ -150,7 +152,30 @@ func Load(file string) (*Config, error) {
 	if err := c.complete(); err != nil {
 		return nil, fmt.Errorf("%s: %w", file, err)
 	}
-	return applyOverridesFile(&c, OverridesPath(file))
+	cfg, err := applyOverridesFile(&c, OverridesPath(file))
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.resolveStateDir(file); err != nil {
+		return nil, fmt.Errorf("%s: %w", file, err)
+	}
+	return cfg, nil
+}
+
+func (c *Config) resolveStateDir(configFile string) error {
+	abs, err := filepath.Abs(configFile)
+	if err != nil {
+		return err
+	}
+	base := filepath.Dir(abs)
+	if c.StateDir == "" {
+		c.StateDir = filepath.Join(base, "state")
+		return nil
+	}
+	if !filepath.IsAbs(c.StateDir) {
+		c.StateDir = filepath.Join(base, c.StateDir)
+	}
+	return nil
 }
 
 func (c *Config) complete() error {

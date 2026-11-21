@@ -36,6 +36,10 @@ type fakeInvoice struct {
 type FakeWithdrawal struct {
 	Destination string
 	AmountSat   int64
+	PaymentID   string
+	Time        time.Time
+	Paid        bool
+	Completed   bool
 }
 
 // NewFake returns an empty fake backend.
@@ -108,11 +112,48 @@ func (f *Fake) Withdraw(_ context.Context, destination string, amountSat int64) 
 		return "", fmt.Errorf("fake lightning: insufficient balance (%d sat)", f.balance)
 	}
 	f.balance -= amountSat
-	f.withdrawals = append(f.withdrawals, FakeWithdrawal{destination, amountSat})
+	id := fmt.Sprintf("fake-%d", len(f.withdrawals)+1)
+	f.withdrawals = append(f.withdrawals, FakeWithdrawal{
+		Destination: destination, AmountSat: amountSat,
+		PaymentID: id, Time: f.now(), Paid: true, Completed: true,
+	})
 	if len(f.withdrawals) > 100 {
 		f.withdrawals = f.withdrawals[1:]
 	}
 	return fmt.Sprintf("fake withdrawal #%d", len(f.withdrawals)), nil
+}
+
+// LookupOutgoing implements OutgoingLookup.
+func (f *Fake) LookupOutgoing(_ context.Context, paymentID string) (OutgoingPayment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, w := range f.withdrawals {
+		if w.PaymentID == paymentID {
+			return fakeOutgoing(w), nil
+		}
+	}
+	return OutgoingPayment{}, ErrNotFound
+}
+
+// ListOutgoing implements OutgoingLookup.
+func (f *Fake) ListOutgoing(_ context.Context, from, to time.Time) ([]OutgoingPayment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []OutgoingPayment
+	for _, w := range f.withdrawals {
+		if !from.IsZero() && w.Time.Before(from) {
+			continue
+		}
+		if !to.IsZero() && w.Time.After(to) {
+			continue
+		}
+		out = append(out, fakeOutgoing(w))
+	}
+	return out, nil
+}
+
+func fakeOutgoing(w FakeWithdrawal) OutgoingPayment {
+	return OutgoingPayment{PaymentID: w.PaymentID, AmountSat: w.AmountSat, Paid: w.Paid, Completed: w.Completed}
 }
 
 // Withdrawals returns the recorded withdrawals.

@@ -142,3 +142,105 @@ func (p *PhoenixdWithdrawer) Withdraw(ctx context.Context, destination string, a
 	}
 	return fmt.Sprintf("payment %s (routing fee %d sat)", sent.PaymentID, sent.FeeSat), nil
 }
+
+// LookupOutgoing implements OutgoingLookup: GET /payments/outgoing/{paymentId}.
+// A 204 means the node has no such payment (ErrNotFound).
+func (p *PhoenixdWithdrawer) LookupOutgoing(ctx context.Context, paymentID string) (OutgoingPayment, error) {
+	if paymentID == "" {
+		return OutgoingPayment{}, ErrNotFound
+	}
+	status, body, err := p.get(ctx, "/payments/outgoing/"+url.PathEscape(paymentID), nil)
+	if err != nil {
+		return OutgoingPayment{}, err
+	}
+	if status == http.StatusNoContent {
+		return OutgoingPayment{}, ErrNotFound
+	}
+	if status != http.StatusOK {
+		return OutgoingPayment{}, fmt.Errorf("phoenixd: HTTP %d: %.200s", status, body)
+	}
+	return parseOutgoing(body)
+}
+
+// ListOutgoing implements OutgoingLookup: GET /payments/outgoing?all=true
+// in the time window (Unix milliseconds).
+func (p *PhoenixdWithdrawer) ListOutgoing(ctx context.Context, from, to time.Time) ([]OutgoingPayment, error) {
+	var out []OutgoingPayment
+	const page = 50
+	for offset := 0; offset < 500; offset += page {
+		q := url.Values{
+			"all":    {"true"},
+			"limit":  {strconv.Itoa(page)},
+			"offset": {strconv.Itoa(offset)},
+		}
+		if !from.IsZero() {
+			q.Set("from", strconv.FormatInt(from.UnixMilli(), 10))
+		}
+		if !to.IsZero() {
+			q.Set("to", strconv.FormatInt(to.UnixMilli(), 10))
+		}
+		status, body, err := p.get(ctx, "/payments/outgoing", q)
+		if err != nil {
+			return nil, err
+		}
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("phoenixd: HTTP %d: %.200s", status, body)
+		}
+		var raw []json.RawMessage
+		if err := json.Unmarshal(body, &raw); err != nil {
+			return nil, fmt.Errorf("phoenixd: unexpected answer: %.200s", body)
+		}
+		for _, item := range raw {
+			pay, err := parseOutgoing(item)
+			if err != nil {
+				continue
+			}
+			out = append(out, pay)
+		}
+		if len(raw) < page {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (p *PhoenixdWithdrawer) get(ctx context.Context, path string, query url.Values) (int, []byte, error) {
+	u := strings.TrimRight(p.URL, "/") + path
+	if len(query) > 0 {
+		u += "?" + query.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	req.SetBasicAuth("", p.FullPassword)
+	client := p.HTTP
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("phoenixd: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, body, nil
+}
+
+func parseOutgoing(body []byte) (OutgoingPayment, error) {
+	var raw struct {
+		PaymentID   string `json:"paymentId"`
+		IsPaid      bool   `json:"isPaid"`
+		Sent        int64  `json:"sent"`
+		CompletedAt *int64 `json:"completedAt"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil || raw.PaymentID == "" {
+		return OutgoingPayment{}, fmt.Errorf("phoenixd: unexpected answer: %.200s", body)
+	}
+	return OutgoingPayment{
+		PaymentID: raw.PaymentID,
+		AmountSat: raw.Sent,
+		Paid:      raw.IsPaid,
+		Completed: raw.CompletedAt != nil && *raw.CompletedAt > 0,
+	}, nil
+}

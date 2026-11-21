@@ -7,6 +7,7 @@ package lightning
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -42,4 +43,23 @@ type Inspector interface {
 // only built when withdrawals are enabled in the config file.
 type Withdrawer interface {
 	Withdraw(ctx context.Context, destination string, amountSat int64) (reference string, err error)
+}
+
+// OutgoingPayment is one payment already sent (or attempted) by the node.
+type OutgoingPayment struct {
+	PaymentID string
+	AmountSat int64
+	Paid      bool // true once the money has left
+	Completed bool // true once the node has a final outcome (paid or failed)
+}
+
+// ErrNotFound is returned by LookupOutgoing when the node has no such payment.
+var ErrNotFound = errors.New("outgoing payment not found")
+
+// OutgoingLookup looks up outgoing payments, used to reconcile a withdrawal
+// whose outcome was not saved (a crash mid-pay). Implemented by phoenixd
+// and the fake backend.
+type OutgoingLookup interface {
+	LookupOutgoing(ctx context.Context, paymentID string) (OutgoingPayment, error)
+	ListOutgoing(ctx context.Context, from, to time.Time) ([]OutgoingPayment, error)
 }

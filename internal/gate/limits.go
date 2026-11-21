@@ -83,18 +83,21 @@ type offer struct {
 
 // pendingOffers remembers the invoices handed out and not yet expired,
 // per client and resource. A client asking again for the same page gets
-// the same offer instead of a new invoice, and the total number of open
-// invoices is capped.
+// the same offer instead of a new invoice. The cap counts invoices until
+// they expire (a PoW redeem drops the offer, but the invoice stays open
+// on the node). reserve holds a slot until put or cancelReserve.
 type pendingOffers struct {
 	mu        sync.Mutex
 	max       int
-	offers    map[string]offer  // key: see Gate.pendingKey
-	ids       map[string]string // token ID -> key
+	offers    map[string]offer     // key: see Gate.pendingKey
+	ids       map[string]string    // token ID -> key
+	invoices  map[string]time.Time // token ID -> invoice expiry; counted until expiry
+	reserved  int
 	lastSweep time.Time
 }
 
 func newPendingOffers(max int) *pendingOffers {
-	return &pendingOffers{max: max, offers: make(map[string]offer), ids: make(map[string]string)}
+	return &pendingOffers{max: max, offers: make(map[string]offer), ids: make(map[string]string), invoices: make(map[string]time.Time)}
 }
 
 func (p *pendingOffers) len() int {
@@ -115,27 +118,47 @@ func (p *pendingOffers) get(key string, now time.Time, minLeft time.Duration) (o
 	return o, true
 }
 
-// reserve reports whether there is room for one more open invoice.
+// reserve holds one invoice slot. The caller must put or cancelReserve.
 func (p *pendingOffers) reserve(now time.Time) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.sweepLocked(now)
-	return len(p.offers) < p.max
+	if len(p.invoices)+p.reserved >= p.max {
+		return false
+	}
+	p.reserved++
+	return true
 }
 
-// put stores an offer with an invoice. It may exceed max by the few
-// requests that raced past reserve at the same moment, never more.
+// cancelReserve frees a slot taken by reserve when no invoice was stored.
+func (p *pendingOffers) cancelReserve() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.reserved > 0 {
+		p.reserved--
+	}
+}
+
+// put stores an offer with an invoice and consumes a reserved slot.
 func (p *pendingOffers) put(key string, o offer) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.reserved > 0 {
+		p.reserved--
+	}
 	if old, ok := p.offers[key]; ok {
 		delete(p.ids, old.id)
+		// the previous invoice stays in invoices until it expires
 	}
 	p.offers[key] = o
 	p.ids[o.id] = key
+	if o.invoice != "" {
+		p.invoices[o.id] = o.expires
+	}
 }
 
-// drop forgets the offer with this token ID, if any.
+// drop forgets the offer with this token ID, if any. The invoice, if
+// any, is still counted until it expires.
 func (p *pendingOffers) drop(id string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -154,6 +177,11 @@ func (p *pendingOffers) sweepLocked(now time.Time) {
 		if !now.Before(o.expires) {
 			delete(p.offers, k)
 			delete(p.ids, o.id)
+		}
+	}
+	for id, exp := range p.invoices {
+		if !now.Before(exp) {
+			delete(p.invoices, id)
 		}
 	}
 	p.lastSweep = now
