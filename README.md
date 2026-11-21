@@ -595,8 +595,8 @@ Everything else sits behind the discreet **Settings** link:
   the perimeter stays in the config file on purpose: passwords and keys,
   the Lightning node, the withdraw destination, node anti-flood limits
   (`max_invoices_per_minute`, `max_pending_invoices`), surge pricing,
-  ports, trusted proxies / IP header, and admin allowed IPs. The live
-  multiplier and price of each surge group are shown in status (read-only). A stolen admin key can change
+  ports, trusted proxies / IP header, and admin allowed IPs. The live short rate, baseline, ratio and multiplier of each surge group are shown in status (read-only).
+  A stolen admin key can change
   prices, protection and pause, but cannot drain or flood the node.
   **Pause** serves protected paths free and creates no invoices at all
   (no load on the node). Only the human admin can toggle pause (on or
