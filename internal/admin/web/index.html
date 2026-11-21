@@ -8,6 +8,7 @@
 <script src="app.js" defer></script>
 </head>
 <body>
+<p id="pause-banner" hidden>Protection is paused: protected paths are served free and no invoices are created.</p>
 <header>
   <h1>⚡ Spikes402</h1>
   <span id="node" class="node" hidden><i></i><span id="node-text">Lightning</span></span>
@@ -57,19 +58,34 @@
   <p><a href="#">← Back to the monitor</a></p>
   <div class="card">
     <h2>Settings</h2>
-    <p class="note">Changes apply immediately and last until restart. Edit the config file to keep them.</p>
+    <p class="note">Changes apply immediately and are saved next to the config file (config.json itself is never rewritten). Secrets, the Lightning node, withdrawals, ports, proxies and node invoice limits stay in the config file on purpose.</p>
     <form id="set-form">
+      <label class="pause"><input id="f-pause" type="checkbox"> Pause protection (serve protected paths free, create no invoices)</label>
       <label>Price (sats) <input id="f-price" type="number" min="1" max="1000000"></label>
+      <p class="note">Protected paths: same matching as the config file. At least one pattern is required.</p>
+      <table id="protect-rules" class="rules">
+        <thead><tr><th>Pattern</th><th></th></tr></thead>
+        <tbody id="f-protect"></tbody>
+      </table>
+      <p><button type="button" id="f-protect-add">Add a path</button></p>
       <p class="note">Per-path prices: first matching rule wins, so list more specific patterns first. Unmatched protected paths use the price above.</p>
-      <table id="price-rules">
+      <table id="price-rules" class="rules">
         <thead><tr><th>Pattern</th><th>Sats</th><th></th></tr></thead>
         <tbody id="f-prices"></tbody>
       </table>
       <p><button type="button" id="f-price-add">Add a rule</button></p>
       <label>Proof-of-work seconds per sat <input id="f-sps" type="number" min="0.001" max="3600" step="any"></label>
       <label>402 answers per visitor per minute <input id="f-cpm" type="number" min="1" max="100000"></label>
-      <label>Bot policies (JSON, <code>{}</code> = everyone pays the same)
-        <textarea id="f-pol" rows="3" spellcheck="false"></textarea></label>
+      <p class="note">Bot policies for the four visitor classes. Named-bot rules in the config file are left alone. Pay is the default.</p>
+      <table id="policy-rules" class="rules">
+        <thead><tr><th>Class</th><th>Action</th></tr></thead>
+        <tbody>
+          <tr><td>Unknown</td><td><select id="pol-unknown"></select></td></tr>
+          <tr><td>Impostor</td><td><select id="pol-impostor"></select></td></tr>
+          <tr><td>Verified</td><td><select id="pol-verified"></select></td></tr>
+          <tr><td>Verified (signed)</td><td><select id="pol-verified-signed"></select></td></tr>
+        </tbody>
+      </table>
       <button type="submit">Apply</button>
       <p id="set-msg" class="msg"></p>
     </form>

@@ -86,6 +86,13 @@ limits and bot checks see the visitor, not the proxy. Never set
 
 - Mount a JSON file at `/etc/spikes402/config.json` (the image default).
   The process runs as uid 65532; the file must be readable by that user.
+  Dashboard changes are saved next to it as `config.overrides.json` (mode
+  `0600`); `config.json` is never rewritten. The example Compose file mounts
+  a single file read-only, so those overrides would be lost when the
+  container is recreated. For a durable dashboard, bind-mount a writable
+  directory (for example `./config:/etc/spikes402`) that contains
+  `config.json` and is writable by uid 65532, so the sidecar can be written
+  and kept.
 - Set secrets with environment variables, not in the file:
   `SPIKES402_SECRET_KEY`, `SPIKES402_ADMIN_KEY`, `PHOENIXD_PASSWORD`.
 - Leave `withdraw.enabled` false unless you are actively withdrawing.

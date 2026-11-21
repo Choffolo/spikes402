@@ -117,6 +117,7 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `secret_key` | Signs tokens, ≥ 32 characters. Better set via `SPIKES402_SECRET_KEY` | random with `fake`, required otherwise |
 | `identify_bots` | Classify clients (Web Bot Auth, published IP lists, reverse DNS); see [Bot identification](#bot-identification) | `true` |
 | `known_bots` | Replace the built-in list of crawlers: `[{"name", "user_agent", "ip_ranges_url", "reverse_dns": [...]}]` | built-in list |
+| `paused` | Serve protected paths free and create no invoices (dashboard toggle; also honoured in the file / overrides) | `false` |
 | `bot_policies` | Optional per-class treatment (see [Policies](#policies-off-by-default-open-for-discussion)) | `{}` = everyone pays the same |
 | `web_bot_auth_trusted_agents` | Domains whose Web Bot Auth key directories you trust, e.g. `["chatgpt.com"]` (subdomains included). Only those signatures make a request `verified-signed`; see [Web Bot Auth](#web-bot-auth) | `[]` = none |
 | `public_hosts` | Your site's host names, e.g. `["example.com", "www.example.com"]`. Signatures made for any other host are refused. Required with `web_bot_auth_trusted_agents` | `[]` |
@@ -410,13 +411,26 @@ It is **one page**: the siege monitor (below), four numbers and a small
 Lightning light (green = fine, red = a problem; hover it for details).
 Everything else sits behind the discreet **Settings** link:
 
-- the few **safe settings** that can change while running: `price_sats`,
-  `prices` (per-path rules; first match wins), `pow_seconds_per_sat`,
-  `challenges_per_minute` and `bot_policies`. They are validated like the
-  config file, apply immediately and **last until restart**; edit the file
-  to keep them. Everything else (addresses,
-  secrets, the Lightning backend, withdrawal destination) is config-file only.
-  A collapsed list shows all current settings (no secrets) and node details;
+- the few **webmaster settings** that can change while running: `price_sats`,
+  `prices` (per-path rules; first match wins), `protect`, `pow_seconds_per_sat`,
+  `challenges_per_minute`, `bot_policies` (the four visitor classes as
+  dropdowns) and `paused`. They are validated like the config file, apply
+  immediately, and are saved to a sidecar file next to the config
+  (`config.overrides.json` when the config is `config.json`). `config.json`
+  itself is never rewritten. The overrides file is written atomically, mode
+  `0600`, and contains only those dashboard fields (unknown keys, including
+  secrets or Lightning settings, are refused on load). On start, overrides
+  win over the same fields in `config.json`. Delete the overrides file if you
+  want the config file values back. Everything about money or the perimeter
+  stays in the config file on purpose: passwords and keys, the Lightning
+  node, the withdraw destination, node anti-flood limits
+  (`max_invoices_per_minute`, `max_pending_invoices`), ports, trusted
+  proxies / IP header, and admin allowed IPs. A stolen admin key can change
+  prices, protection and pause, but cannot drain or flood the node.
+  **Pause** serves protected paths free and creates no invoices at all
+  (no load on the node). Only the human admin can toggle it; the AI key
+  may propose a pause but cannot apply it, even when `admin.ai_can_apply`
+  is on. A collapsed list shows all current settings (no secrets) and node details;
 - **AI proposals**: changes suggested by the AI admin, to approve or reject;
 - **Withdraw**, in its own red box at the bottom, only if enabled.
 
@@ -626,8 +640,9 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
   required by the gate (the draft allows that).
 - Argon2id speed figures for GPUs are not measured by us.
 - Dashboard: one admin key (no user accounts, no audit log beyond the
-  process log); settings changed live are lost on restart; the siege
-  monitor shows this process only and resets on restart.
+  process log); webmaster settings persist in a sidecar overrides file
+  (`config.json` is never rewritten); the siege monitor shows this process
+  only and resets on restart.
 - Withdrawals: tested against the fake backend and a mock of phoenixd's API,
   not yet against a real phoenixd node. Fee estimation is up to you
   (`feerate_sat_vbyte`); Lightning-address payments may fail if no route is

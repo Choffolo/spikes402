@@ -31,6 +31,10 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
+      # Dashboard overrides are written next to config.json. For a durable
+      # dashboard, bind-mount a writable directory instead, e.g.
+      #   ./config:/etc/spikes402
+      # with config.json inside it, writable by uid 65532.
       - ./config.json:/etc/spikes402/config.json:ro
     environment:
       SPIKES402_SECRET_KEY: ${SPIKES402_SECRET_KEY:?set a 32+ character secret (openssl rand -hex 32)}

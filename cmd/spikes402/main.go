@@ -91,6 +91,7 @@ func main() {
 		PriceSats:    cfg.PriceSats,
 		Protect:      cfg.Protect,
 		Prices:       cfg.Prices,
+		Paused:       cfg.Paused,
 		PoW:          cfg.PoW,
 		ChallengeTTL: cfg.ChallengeTTL(),
 		SecretKey:    secret,
@@ -111,7 +112,7 @@ func main() {
 	mux.Handle("/", g)
 
 	if cfg.AdminEnabled() {
-		startAdmin(cfg, g, monitor, backend)
+		startAdmin(cfg, *configFile, g, monitor, backend)
 	}
 
 	srv := &http.Server{
@@ -132,6 +133,9 @@ func main() {
 	if len(cfg.BotPolicies) > 0 {
 		log.Printf("bot policies: %v", cfg.BotPolicies)
 	}
+	if cfg.Paused {
+		log.Print("protection is paused: protected paths are served free and no invoices will be created")
+	}
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		log.Fatal(err)
@@ -145,8 +149,8 @@ const maxHeaderBytes = 32 << 10
 
 // startAdmin serves the admin API and dashboard on their own address
 // (localhost by default), separate from the public proxy.
-func startAdmin(cfg *config.Config, g *gate.Gate, monitor *admin.Monitor, backend lightning.Backend) {
-	opt := admin.Options{Config: cfg, Gate: g, Monitor: monitor}
+func startAdmin(cfg *config.Config, configFile string, g *gate.Gate, monitor *admin.Monitor, backend lightning.Backend) {
+	opt := admin.Options{Config: cfg, ConfigFile: configFile, Gate: g, Monitor: monitor}
 	if insp, ok := backend.(lightning.Inspector); ok {
 		opt.Node = insp
 	}

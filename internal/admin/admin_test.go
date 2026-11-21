@@ -34,13 +34,18 @@ type env struct {
 	ln   *lightning.Fake
 	mon  *Monitor
 	now  time.Time
+	file string
 }
 
 func newEnv(t *testing.T, extra string) *env {
+	return newEnvJSON(t, extra, "")
+}
+
+func newEnvJSON(t *testing.T, adminExtra, rootExtra string) *env {
 	t.Helper()
 	file := filepath.Join(t.TempDir(), "c.json")
-	js := `{"origin":"http://o","price_sats":10,"protect":["/premium/**"],"pow_difficulty":4,
-		"admin":{"key":"` + adminKey + `","ai_key":"` + aiKey + `"` + extra + `},"lightning":{"backend":"fake"}}`
+	js := `{"origin":"http://o","price_sats":10,"protect":["/premium/**"],"pow_difficulty":4,` + rootExtra + `
+		"admin":{"key":"` + adminKey + `","ai_key":"` + aiKey + `"` + adminExtra + `},"lightning":{"backend":"fake"}}`
 	if err := os.WriteFile(file, []byte(js), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -48,15 +53,15 @@ func newEnv(t *testing.T, extra string) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &env{ln: lightning.NewFake(), now: time.Unix(1_800_000_000, 0)}
+	e := &env{ln: lightning.NewFake(), now: time.Unix(1_800_000_000, 0), file: file}
 	e.mon = NewMonitor(cfg.Admin.VisitorIPs, e.now)
 	e.gate = gate.New(gate.Options{
-		PriceSats: cfg.PriceSats, Protect: cfg.Protect, Prices: cfg.Prices, PoW: cfg.PoW, ChallengeTTL: cfg.ChallengeTTL(),
+		PriceSats: cfg.PriceSats, Protect: cfg.Protect, Prices: cfg.Prices, Paused: cfg.Paused, PoW: cfg.PoW, ChallengeTTL: cfg.ChallengeTTL(),
 		SecretKey: []byte(strings.Repeat("s", 32)), Lightning: e.ln, Next: http.NotFoundHandler(),
 		ChallengesPerMinute: cfg.ChallengesPerMinute, MaxInvoicesPerMinute: 1000, MaxPendingInvoices: 1000,
 		Observer: e.mon.Observe,
 	})
-	opt := Options{Config: cfg, Gate: e.gate, Monitor: e.mon, Node: e.ln}
+	opt := Options{Config: cfg, ConfigFile: file, Gate: e.gate, Monitor: e.mon, Node: e.ln}
 	if cfg.Withdraw.Enabled {
 		opt.Withdrawer = e.ln
 	}
@@ -547,5 +552,117 @@ func TestPathPriceSettings(t *testing.T) {
 	}
 	if len(e.gate.Settings().Prices) != 2 {
 		t.Fatalf("approved proposal not applied: %+v", e.gate.Settings().Prices)
+	}
+}
+
+func TestWebmasterSettings(t *testing.T) {
+	e := newEnvJSON(t, "", `"bot_policies":{"GPTBot":{"action":"block"},"impostor":{"action":"pow-only"}},`)
+	if rec, _ := e.call("PUT", "/api/settings", adminKey, map[string]any{"protect": []string{"premium"}}); rec.Code != 400 {
+		t.Fatalf("bad protect: %d", rec.Code)
+	}
+	if rec, _ := e.call("PUT", "/api/settings", adminKey, map[string]any{"protect": []string{}}); rec.Code != 400 {
+		t.Fatalf("empty protect: %d", rec.Code)
+	}
+	rec, out := e.call("PUT", "/api/settings", adminKey, map[string]any{"protect": []string{"/articles/**", "/premium/**"}})
+	if rec.Code != 200 {
+		t.Fatalf("protect: %d %v", rec.Code, out)
+	}
+	if got, _ := out["protect"].([]any); len(got) != 2 {
+		t.Fatalf("public protect: %v", out["protect"])
+	}
+	if s := e.gate.Settings(); len(s.Protect) != 2 || s.Protect[0] != "/articles/**" {
+		t.Fatalf("gate protect: %+v", s.Protect)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/articles/a", nil)
+	wr := httptest.NewRecorder()
+	e.gate.ServeHTTP(wr, req)
+	if wr.Code != http.StatusPaymentRequired {
+		t.Fatalf("new path: %d", wr.Code)
+	}
+
+	// Category dropdowns must not wipe named-bot rules from the config file.
+	rec, out = e.call("PUT", "/api/settings", adminKey, map[string]any{"bot_policies": map[string]any{"unknown": map[string]any{"action": "block"}}})
+	if rec.Code != 200 {
+		t.Fatalf("policies: %d %v", rec.Code, out)
+	}
+	pol, _ := out["bot_policies"].(map[string]any)
+	if pol["unknown"].(map[string]any)["action"] != "block" || pol["GPTBot"].(map[string]any)["action"] != "block" {
+		t.Fatalf("merged policies: %v", pol)
+	}
+	if _, ok := pol["impostor"]; ok {
+		t.Fatalf("omitted class should revert to default: %v", pol)
+	}
+}
+
+func TestPausePermissions(t *testing.T) {
+	e := newEnv(t, `,"ai_can_apply":true`)
+	if rec, out := e.call("PUT", "/api/settings", aiKey, map[string]any{"paused": true}); rec.Code != 403 {
+		t.Fatalf("AI applied pause: %d %v", rec.Code, out)
+	}
+	if rec, _ := e.call("PUT", "/api/settings", aiKey, map[string]any{"paused": true, "price_sats": 2}); rec.Code != 403 || e.gate.Settings().PriceSats != 10 || e.gate.Settings().Paused {
+		t.Fatalf("AI pause+price should be rejected as a whole")
+	}
+	rec, p := e.call("POST", "/api/proposals", aiKey, map[string]any{"changes": map[string]any{"paused": true}, "reason": "maintenance"})
+	if rec.Code != 200 || e.gate.Settings().Paused {
+		t.Fatalf("proposal: %d paused=%v", rec.Code, e.gate.Settings().Paused)
+	}
+	if rec, _ := e.call("POST", "/api/proposals/"+p["id"].(string)+"/approve", aiKey, nil); rec.Code != 403 {
+		t.Fatalf("AI approved pause: %d", rec.Code)
+	}
+	if rec, _ := e.call("POST", "/api/proposals/"+p["id"].(string)+"/approve", adminKey, nil); rec.Code != 200 {
+		t.Fatalf("admin approve: %d", rec.Code)
+	}
+	if !e.gate.Settings().Paused {
+		t.Fatal("approved pause not applied")
+	}
+
+	e = newEnv(t, "")
+	if rec, out := e.call("PUT", "/api/settings", adminKey, map[string]any{"paused": true}); rec.Code != 200 || !e.gate.Settings().Paused || out["paused"] != true {
+		t.Fatalf("admin pause: %d %v", rec.Code, out)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/premium/a", nil)
+	wr := httptest.NewRecorder()
+	e.gate.ServeHTTP(wr, req)
+	if wr.Code != http.StatusNotFound {
+		t.Fatalf("paused should be free (origin 404): %d", wr.Code)
+	}
+	if rec, _ := e.call("PUT", "/api/settings", adminKey, map[string]any{"paused": false}); rec.Code != 200 || e.gate.Settings().Paused {
+		t.Fatal("unpause")
+	}
+}
+
+func TestSettingsPersistInOverrides(t *testing.T) {
+	e := newEnv(t, "")
+	before, err := os.ReadFile(e.file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := e.call("PUT", "/api/settings", adminKey, map[string]any{
+		"price_sats":   42,
+		"protect":      []string{"/only/**"},
+		"paused":       true,
+		"bot_policies": map[string]any{"unknown": map[string]any{"action": "free"}},
+	})
+	if rec.Code != 200 {
+		t.Fatalf("apply: %d", rec.Code)
+	}
+	after, _ := os.ReadFile(e.file)
+	if !bytes.Equal(before, after) {
+		t.Fatal("config.json was rewritten")
+	}
+	over := config.OverridesPath(e.file)
+	st, err := os.Stat(over)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o600 {
+		t.Fatalf("overrides mode %o", st.Mode().Perm())
+	}
+	loaded, err := config.Load(e.file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.PriceSats != 42 || !loaded.Paused || len(loaded.Protect) != 1 || loaded.Protect[0] != "/only/**" || loaded.BotPolicies["unknown"].Action != gate.ActionFree {
+		t.Fatalf("reload: %+v policies=%v", loaded, loaded.BotPolicies)
 	}
 }
