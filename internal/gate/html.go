@@ -32,17 +32,24 @@ var page = template.Must(template.New("402").Parse(`<!doctype html>
 {{with .Preview}}{{with .Description}}<meta name="description" content="{{.}}">
 {{end}}{{end}}{{.LD}}
 <style>
- body{font-family:system-ui,sans-serif;max-width:34rem;margin:2rem auto;padding:0 1rem;color:#222;line-height:1.45}
- code{word-break:break-all;background:#f3f3f3;padding:.2rem .3rem;border-radius:4px;font-size:.85rem}
- img{display:block;margin:1rem 0;image-rendering:pixelated}
+ body{font-family:system-ui,sans-serif;max-width:46rem;margin:.75rem auto;padding:0 1rem;color:#222;line-height:1.35}
+ h1{font-size:1.35rem;margin:.2rem 0 .35rem}
+ h2{font-size:1.05rem;margin:.15rem 0 .3rem}
+ p{margin:.3rem 0}
+ code{word-break:break-all;background:#f3f3f3;padding:.15rem .3rem;border-radius:4px;font-size:.8rem}
+ img{display:block;margin:.4rem 0;image-rendering:pixelated}
  small{color:#666}
- article{border-left:4px solid #f7931a;padding:.1rem 1rem;margin:1rem 0;background:#fafafa}
- article h2{margin:.6rem 0 .3rem;font-size:1.1rem}
- .paywall{border-top:1px solid #ddd;margin-top:1.5rem}
- #wallet-box,#pow-box{margin:1.2rem 0}
- #wallet-box button,#pow-box button{font:inherit;padding:.4rem .8rem}
- #pow-bar{display:block;width:100%;height:1.2rem;margin:.8rem 0 .3rem}
+ article{border-left:4px solid #f7931a;padding:.05rem .8rem;margin:.5rem 0;background:#fafafa;font-size:.95rem}
+ article h2{margin:.35rem 0 .15rem;font-size:1.05rem}
+ article p{margin:.2rem 0}
+ .paywall{border-top:1px solid #ddd;margin-top:.6rem;padding-top:.4rem}
+ .ways{display:flex;gap:1.25rem;align-items:flex-start;margin:.4rem 0}
+ .ways>div{flex:1;min-width:0}
+ #wallet-box,#pow-box{margin:.4rem 0 0}
+ #wallet-box button,#pow-box button{font:inherit;padding:.35rem .7rem}
+ #pow-bar{display:block;width:100%;height:.85rem;margin:.45rem 0 .2rem}#pow-bar[hidden]{display:none}
  .err{color:#a00}
+ @media (max-width:40rem){.ways{flex-direction:column;gap:.5rem}}
 </style>
 </head>
 <body>
@@ -58,7 +65,9 @@ or solve a math puzzle with your computer&rsquo;s power.</p>
 </article>
 {{end}}<div class="paywall">
 <p>This page costs <strong>{{.PriceSats}} sats</strong>.</p>
-{{if .Solve}}<h2>Solve the puzzle</h2>
+<div class="ways">
+{{if .Solve}}<div>
+<h2>Solve the puzzle</h2>
 <p>Your browser searches for a number that unlocks this page: about {{.Attempts}} attempts, using your CPU.
 <noscript>This needs JavaScript.</noscript></p>
 <div id="pow-box" hidden data-challenge="{{.PoW.Challenge}}" data-difficulty="{{.PoW.Difficulty}}" data-worker="{{.WorkerSrc}}">
@@ -67,11 +76,13 @@ or solve a math puzzle with your computer&rsquo;s power.</p>
   <small id="pow-stats" aria-live="polite"></small>
   <p id="pow-msg" role="status"></p>
 </div>
-{{end}}<h2>{{if .Solve}}Or pay{{else}}Pay{{end}} with Lightning</h2>
+</div>
+{{end}}<div>
+<h2>{{if .Solve}}Or pay{{else}}Pay{{end}} with Lightning</h2>
 <p>The <a href="https://github.com/Choffolo/spikes402#browser-wallet-extension-prototype">Spikes402 extension</a> pays in one click, with no account.
 Or pay this invoice with any Lightning wallet:</p>
 {{with .L402}}
-<a href="lightning:{{.Invoice}}"><img src="{{$.QR}}" alt="QR code of the Lightning invoice" width="256" height="256"></a>
+<a href="lightning:{{.Invoice}}"><img src="{{$.QR}}" alt="QR code of the Lightning invoice" width="160" height="160"></a>
 <p><code>{{.Invoice}}</code></p>
 <p id="wallet-box" hidden>
   <button type="button" id="webln-pay" data-invoice="{{.Invoice}}" data-token="{{.Token}}">Pay with one click</button>
@@ -80,9 +91,9 @@ Or pay this invoice with any Lightning wallet:</p>
 {{else}}
 <p>Lightning payments are unavailable right now.</p>
 {{end}}
-<p><small>Bots and scripts: the puzzle (difficulty {{.PoW.Difficulty}}, about {{.PoW.ExpectedSeconds}} seconds on one CPU core)
-is described in the <code>WWW-Authenticate</code> headers of this response.
-This offer expires at {{.ExpiresAt.Format "15:04 MST"}}.</small></p>
+</div>
+</div>
+<p><small>Bots: difficulty {{.PoW.Difficulty}} (~{{.PoW.ExpectedSeconds}}s on one core); details in the <code>WWW-Authenticate</code> headers. Expires {{.ExpiresAt.Format "15:04 MST"}}.</small></p>
 </div>
 <p><small>Protected by <a href="https://github.com/Choffolo/spikes402">Spikes402</a>.</small></p>
 {{.Script}}

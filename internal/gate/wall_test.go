@@ -42,6 +42,8 @@ func TestEnergyWallPage(t *testing.T) {
 		`data-worker="` + workerSrc + `"`,
 		`data-difficulty="8"`,
 		`<div class="paywall">`,
+		`class="ways"`,
+		`width="160"`,
 		`id="webln-pay"`, // the Lightning invoice flow is still there
 		"data:image/png;base64,",
 	} {
