@@ -90,6 +90,7 @@ func main() {
 	g := gate.New(gate.Options{
 		PriceSats:    cfg.PriceSats,
 		Protect:      cfg.Protect,
+		Prices:       cfg.Prices,
 		PoW:          cfg.PoW,
 		ChallengeTTL: cfg.ChallengeTTL(),
 		SecretKey:    secret,
@@ -125,6 +126,9 @@ func main() {
 	p := cfg.PoW(cfg.PriceSats)
 	log.Printf("spikes402 listening on %s, protecting %v of %s at %d sats or %s PoW difficulty %d (~%.1f s on one CPU core)",
 		cfg.Listen, cfg.Protect, cfg.Origin, cfg.PriceSats, p.Algorithm, p.Difficulty, p.ExpectedSeconds())
+	if len(cfg.Prices) > 0 {
+		log.Printf("path prices (first matching rule wins; unmatched protected paths use %d sats): %v", cfg.PriceSats, cfg.Prices)
+	}
 	if len(cfg.BotPolicies) > 0 {
 		log.Printf("bot policies: %v", cfg.BotPolicies)
 	}

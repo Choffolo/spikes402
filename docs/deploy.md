@@ -93,6 +93,16 @@ limits and bot checks see the visitor, not the proxy. Never set
   funds. Prefer phoenixd's own tools (`phoenix-cli`) for that.
 - `identify_bots` (on by default) fetches the crawlers' published IP lists
   over HTTPS, so the Spikes402 container needs outbound internet.
+- Optional per-path prices (first matching rule wins; other protected
+  paths use `price_sats`):
+
+  ```json
+  "price_sats": 5,
+  "prices": [
+    {"pattern": "/articles/**", "price_sats": 5},
+    {"pattern": "/premium/**", "price_sats": 20}
+  ]
+  ```
 
 ## Backups
 

@@ -43,6 +43,10 @@ func TestInvalid(t *testing.T) {
 	cases := map[string]string{
 		"no origin":          `{"price_sats":5,"protect":["/x"],"lightning":{"backend":"fake"}}`,
 		"zero price":         `{"origin":"http://o","price_sats":0,"protect":["/x"],"lightning":{"backend":"fake"}}`,
+		"huge price":         `{"origin":"http://o","price_sats":1000001,"protect":["/x"],"lightning":{"backend":"fake"}}`,
+		"bad prices pattern": `{"origin":"http://o","price_sats":5,"protect":["/x"],"prices":[{"pattern":"x","price_sats":2}],"lightning":{"backend":"fake"}}`,
+		"zero path price":    `{"origin":"http://o","price_sats":5,"protect":["/x"],"prices":[{"pattern":"/x","price_sats":0}],"lightning":{"backend":"fake"}}`,
+		"huge path price":    `{"origin":"http://o","price_sats":5,"protect":["/x"],"prices":[{"pattern":"/x","price_sats":1000001}],"lightning":{"backend":"fake"}}`,
 		"no patterns":        `{"origin":"http://o","price_sats":5,"lightning":{"backend":"fake"}}`,
 		"bad pattern":        `{"origin":"http://o","price_sats":5,"protect":["x"],"lightning":{"backend":"fake"}}`,
 		"short secret":       `{"origin":"http://o","price_sats":5,"protect":["/x"],"secret_key":"short","lightning":{"backend":"fake"}}`,
@@ -163,5 +167,32 @@ func TestDangerousConfigRefused(t *testing.T) {
 	if c.Listen != "127.0.0.1:8402" || c.PublicHosts[0] != "mysite.example" || c.WebBotAuthTrustedAgents[0] != "bots.example" ||
 		c.MaxConnections != 10_000 || c.ReadTimeoutSeconds != 60 || c.WriteTimeoutSeconds != 300 || c.ProtectCaseSensitive {
 		t.Fatalf("unexpected: %+v", c)
+	}
+}
+
+func TestPathPrices(t *testing.T) {
+	c, err := load(t, `{"origin":"http://o","price_sats":5,"protect":["/articles/**","/premium/**"],`+
+		`"prices":[{"pattern":"/premium/special/**","price_sats":1},{"pattern":"/premium/**","price_sats":20}],`+
+		`"lightning":{"backend":"fake"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PriceSats != 5 || len(c.Prices) != 2 || c.Prices[0].PriceSats != 1 || c.Prices[1].Pattern != "/premium/**" {
+		t.Fatalf("got %+v", c.Prices)
+	}
+	if pub := c.Public(); len(pub.Prices) != 2 {
+		t.Fatalf("public prices: %+v", pub.Prices)
+	}
+}
+
+func TestPriceRuleLimits(t *testing.T) {
+	raw := `{"origin":"http://o","price_sats":5,"protect":["/x"],"prices":[` +
+		strings.Repeat(`{"pattern":"/x","price_sats":1},`, maxPriceRules) +
+		`{"pattern":"/x","price_sats":1}],"lightning":{"backend":"fake"}}`
+	if _, err := load(t, raw); err == nil {
+		t.Fatal("accepted too many price rules")
+	}
+	if _, err := load(t, `{"origin":"http://o","price_sats":5,"protect":["/x"],"prices":[{"pattern":"/[","price_sats":2}],"lightning":{"backend":"fake"}}`); err == nil {
+		t.Fatal("accepted a bad prices glob")
 	}
 }
