@@ -672,6 +672,22 @@ receives pay for opening its channel, so small amounts may not show up in
 your balance straight away. Read phoenixd's docs on fees before going live.
 
 To run the proxy and phoenixd with Docker, see [Deploying Spikes402](docs/deploy.md).
+Published images are at `ghcr.io/choffolo/spikes402` (linux/amd64 and linux/arm64):
+
+```sh
+docker pull ghcr.io/choffolo/spikes402:v0.1.0   # or :latest
+docker run --rm -p 127.0.0.1:8402:8402 \
+  -v "$PWD/config.json:/etc/spikes402/config.json:ro" \
+  -v spikes402-state:/var/lib/spikes402 \
+  -e SPIKES402_SECRET_KEY -e PHOENIXD_PASSWORD \
+  ghcr.io/choffolo/spikes402:v0.1.0
+```
+
+The example [`docker-compose.yml`](docker-compose.yml) builds locally by default.
+To use a released image, set `image: ghcr.io/choffolo/spikes402:v0.1.0` (or
+`:latest`) on the `spikes402` service and drop `build: .`. How to verify the
+image signature is in the deploy guide.
+
 
 ## For bot authors
 
@@ -760,7 +776,7 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
 - The proof-of-work price is an estimate (see above), not a market price.
 - If the site itself uses the `Authorization` header on protected paths,
   it will conflict with Spikes402.
-- No real wallet in the example bot; no LND backend; no Docker image yet.
+- No real wallet in the example bot; no LND backend.
 - Bot identification is best effort: IP lists and reverse DNS only show that
   a request came from the operator's network, and anyone can stay
   `unknown`. Web Bot Auth is still an IETF draft; the format may change.

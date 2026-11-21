@@ -1,0 +1,132 @@
+name: release
+
+# Publish the multi-arch image to GHCR and create a GitHub Release
+# when a version tag is pushed, or when this workflow is run by hand
+# for an existing tag.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing git tag to publish (e.g. v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # create the GitHub Release and attach SBOM/VEX
+      packages: write     # push to GHCR (this job only)
+      id-token: write     # keyless cosign and provenance
+      attestations: write # buildx SBOM / provenance attestations
+    env:
+      IMAGE: ghcr.io/choffolo/spikes402
+    steps:
+      - name: Resolve tag
+        id: ver
+        env:
+          EVENT: ${{ github.event_name }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT" = workflow_dispatch ]; then
+            TAG=$DISPATCH_TAG
+          else
+            TAG=$REF_NAME
+          fi
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "tag must look like v1.2.3 or v1.2.3-rc.1, got: $TAG" >&2; exit 1 ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if echo "$TAG" | grep -q -- '-'; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.ver.outputs.tag }}
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ steps.ver.outputs.tag }}
+            type=semver,pattern={{raw}},value=${{ steps.ver.outputs.tag }}
+            type=raw,value=latest,enable=${{ steps.ver.outputs.latest }}
+          labels: |
+            org.opencontainers.image.title=Spikes402
+            org.opencontainers.image.description=A reverse proxy that asks visitors to pay a few sats or solve a proof-of-work puzzle.
+            org.opencontainers.image.source=https://github.com/Choffolo/spikes402
+            org.opencontainers.image.licenses=AGPL-3.0
+            org.opencontainers.image.url=https://github.com/Choffolo/spikes402
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # linux/arm64 is cross-compiled in the Dockerfile (GOARCH); QEMU is not needed.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: push
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      - name: Sign the image (keyless)
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.27.4"
+
+      - name: Generate SBOMs and scan
+        run: ./scripts/sbom.sh
+
+      # Creating the release with GITHUB_TOKEN does not trigger sbom.yml
+      # (GitHub does not re-fire workflows from GITHUB_TOKEN events), so
+      # this job attaches the SBOM and VEX itself.
+      - name: Create GitHub Release and attach SBOM
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          PRERELEASE: ${{ steps.ver.outputs.prerelease }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists"
+          else
+            extra=()
+            [ "$PRERELEASE" = true ] && extra+=(--prerelease)
+            gh release create "$TAG" --title "Spikes402 $TAG" --generate-notes "${extra[@]}"
+          fi
+          gh release upload "$TAG" \
+            sbom/spikes402-source.cdx.json \
+            sbom/spikes402-image.cdx.json \
+            vex/spikes402.openvex.json \
+            --clobber

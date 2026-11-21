@@ -30,8 +30,10 @@ jobs:
             vex/spikes402.openvex.json
           if-no-files-found: error
 
-  # There is no separate release workflow; attach the artifact when a GitHub
-  # Release is published.
+  # Attach the artifact when a GitHub Release is published from the UI or
+  # with a personal token. A tag-triggered run of .github/workflows/release.yml
+  # creates the release with GITHUB_TOKEN, which does not fire this event, so
+  # that workflow attaches the SBOM itself.
   attach-release:
     if: github.event_name == 'release'
     needs: sbom

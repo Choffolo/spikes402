@@ -2,13 +2,25 @@
 # the environment. Do not bake passwords, seeds, or a live config.json in.
 #
 # Base images are pinned by digest (recorded 2026-11-21). Refresh the
-# digests when you bump Go or the runtime.
+# digests when you bump Go or the runtime. The digests are multi-arch
+# indexes (linux/amd64 and linux/arm64, among others).
+#
+# The build stage runs on the builder's platform and cross-compiles Go
+# (GOARCH=$TARGETARCH). QEMU is not required to *build* linux/arm64 on
+# an amd64 host. The runtime stage is the target platform's distroless
+# image (no RUN, so no emulation there either).
 #
 #   docker build -t spikes402:local .
+#   docker buildx build --platform linux/amd64,linux/arm64 -t spikes402:local .
 
 # Go 1.27.4 on Debian bookworm (matches the module toolchain).
-FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS build
 WORKDIR /src
+
+# Set automatically by BuildKit. Empty TARGETARCH means "the host" so a
+# plain `docker build` still works (used by scripts/sbom.sh).
+ARG TARGETOS=linux
+ARG TARGETARCH
 
 COPY go.mod go.sum ./
 RUN go mod download
@@ -20,7 +32,7 @@ COPY internal ./internal
 COPY pow ./pow
 COPY webbotauth ./webbotauth
 
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/spikes402 ./cmd/spikes402
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/spikes402 ./cmd/spikes402
 RUN mkdir -p /out/state && chmod 0700 /out/state
 
 # Static, non-root, no shell. Includes CA certificates (needed to fetch
