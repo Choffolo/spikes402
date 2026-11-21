@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -104,7 +105,14 @@ func (c *Client) Get(ctx context.Context, url string) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.do(ctx, url, auth)
+	// Retry the URL we actually landed on (after redirects). A cross-host
+	// redirect on the first request would otherwise send the proof back
+	// to the original host, which would bounce us again without the header.
+	retry := url
+	if resp.Request != nil && resp.Request.URL != nil {
+		retry = resp.Request.URL.String()
+	}
+	return c.do(ctx, retry, auth)
 }
 
 // answer turns a 402 challenge into an Authorization header value.
@@ -140,7 +148,7 @@ func (c *Client) answer(ctx context.Context, challenges []Challenge) (string, er
 		if err != nil {
 			return "", fmt.Errorf("payment failed: %w", err)
 		}
-		c.logf("402: paid, preimage=%s", preimage)
+		c.logf("402: paid")
 		return "L402 " + ch.Params["macaroon"] + ":" + preimage, nil
 	}
 	return "", fmt.Errorf("unknown mode %q", c.Mode)
@@ -201,11 +209,39 @@ func (c *Client) do(ctx context.Context, url, auth string) (*http.Response, erro
 			return nil, err
 		}
 	}
+	return c.httpClient(auth).Do(req)
+}
+
+// httpClient returns c.HTTP (or the default). When a payment proof is
+// attached, cross-host redirects are refused so the token is not sent
+// to another site and so we do not pay twice after the header is stripped.
+func (c *Client) httpClient(auth string) *http.Client {
 	h := c.HTTP
 	if h == nil {
 		h = http.DefaultClient
 	}
-	return h.Do(req)
+	if auth == "" {
+		return h
+	}
+	clone := *h
+	orig := h.CheckRedirect
+	clone.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) > 0 && !sameHost(via[0].URL, req.URL) {
+			return fmt.Errorf("refusing to follow a redirect to a different host (%s → %s) with a payment proof", via[0].URL.Host, req.URL.Host)
+		}
+		if orig != nil {
+			return orig(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &clone
+}
+
+func sameHost(a, b *url.URL) bool {
+	return strings.EqualFold(a.Host, b.Host)
 }
 
 func (c *Client) logf(format string, args ...any) {

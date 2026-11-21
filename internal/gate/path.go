@@ -3,6 +3,7 @@ package gate
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/url"
 	"path"
 	"strings"
@@ -16,15 +17,36 @@ const MaxURIBytes = 8 << 10
 // checkPath refuses request paths that the origin could read differently
 // from us, so that a protected page cannot be reached under another
 // spelling. It returns a short reason, or "" if the path is fine.
-func checkPath(u *url.URL) string {
+// protected reports whether a path is behind the paywall; it is used
+// only for %25 (an encoded percent).
+func checkPath(u *url.URL, protected func(string) bool) string {
 	p := u.Path // decoded once by net/http
 	if p == "" || p[0] != '/' {
 		return "path must start with /"
 	}
 	raw := strings.ToLower(u.EscapedPath())
-	for _, s := range []string{"%2f", "%5c", "%25"} {
+	for _, s := range []string{"%2f", "%5c"} {
 		if strings.Contains(raw, s) {
-			return "encoded slash, backslash or percent sign in path"
+			return "encoded slash or backslash in path"
+		}
+	}
+	// %25 is only refused when a second decode would change whether the
+	// path is protected, so a harmless %25 on a free path is not a 400
+	// for the whole site. Encoded slashes stay forbidden everywhere.
+	if strings.Contains(raw, "%25") && protected != nil {
+		if twice, err := url.PathUnescape(p); err == nil {
+			oncePay := protected(p)
+			if protected(twice) != oncePay || protected(path.Clean(twice)) != oncePay {
+				return "encoded percent sign in path"
+			}
+			for i := 0; i < len(twice); i++ {
+				if c := twice[i]; c < 0x20 || c == 0x7f || c == '\\' {
+					return "encoded percent sign in path"
+				}
+			}
+			if c := path.Clean(twice); c != twice && c+"/" != twice {
+				return "encoded percent sign in path"
+			}
 		}
 	}
 	for i := 0; i < len(p); i++ {
@@ -36,6 +58,42 @@ func checkPath(u *url.URL) string {
 		return "path is not in canonical form (// or dot segments)"
 	}
 	return ""
+}
+
+// UsablePattern reports whether pat can match a request path after the
+// gate normalises spellings. A trailing slash other than "/" would never
+// match, because trailing slashes are stripped.
+func UsablePattern(pat string, caseSensitive bool) error {
+	if strings.HasSuffix(pat, "/") && pat != "/" {
+		base := strings.TrimRight(pat, "/")
+		if base == "" {
+			base = "/"
+		}
+		return fmt.Errorf("must not end with a trailing slash (it would never match); use %q or %q", base, base+"/**")
+	}
+	core := pat
+	if prefix, ok := strings.CutSuffix(pat, "/**"); ok {
+		core = prefix
+		if core == "" {
+			return nil
+		}
+	}
+	key := matchKey(core, caseSensitive)
+	want := key
+	if strings.HasSuffix(pat, "/**") {
+		want = key + "/**"
+	}
+	if caseSensitive {
+		if key != core {
+			return fmt.Errorf("would never match a request path (the gate normalises it to %q)", want)
+		}
+	} else if key != strings.ToLower(core) {
+		return fmt.Errorf("would never match a request path (the gate normalises it to %q)", want)
+	}
+	if !strings.HasSuffix(pat, "/**") && !matchPattern(pat, key) {
+		return fmt.Errorf("would never match a request path (the gate normalises it to %q)", want)
+	}
+	return nil
 }
 
 // matchKey is the form of a path used to match the protect patterns. It
