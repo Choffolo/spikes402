@@ -182,6 +182,7 @@ func TestSignedBeatsUserAgent(t *testing.T) {
 	v := webbotauth.NewVerifier(webbotauth.NewDirectories(true))
 	v.Hosts = []string{"origin.test"}
 	c := New(bots, v)
+	c.resolver = &fakeDNS{}                 // no network: missing PTR is a definite "no" (Impostor)
 	c.TrustedAgents = []string{"127.0.0.1"} // where the test directory is served
 	signed := func(target string) *http.Request {
 		r := httptest.NewRequest(http.MethodGet, target, nil)
