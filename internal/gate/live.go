@@ -15,6 +15,8 @@ import (
 type Settings struct {
 	PriceSats           int64
 	Prices              []PriceRule // first match wins; empty means use PriceSats only
+	Protect             []string    // path patterns that require payment
+	Paused              bool        // protected paths are free; no invoices
 	PoW                 func(priceSats int64) pow.Params
 	Policies            map[string]Policy
 	ChallengesPerMinute int
@@ -26,7 +28,7 @@ func (g *Gate) Settings() Settings { return *g.live.Load() }
 // UpdateSettings replaces the live settings. Validate user input with the
 // config package first; this only rejects values that would break the gate.
 func (g *Gate) UpdateSettings(s Settings) error {
-	if s.PriceSats < 1 || s.PoW == nil || s.ChallengesPerMinute < 1 {
+	if s.PriceSats < 1 || s.PoW == nil || s.ChallengesPerMinute < 1 || len(s.Protect) < 1 {
 		return errors.New("gate: invalid settings")
 	}
 	for _, p := range s.Policies {
@@ -36,6 +38,7 @@ func (g *Gate) UpdateSettings(s Settings) error {
 	}
 	g.limiter.setPerMinute(s.ChallengesPerMinute)
 	s.Prices = append([]PriceRule(nil), s.Prices...)
+	s.Protect = append([]string(nil), s.Protect...)
 	g.live.Store(&s)
 	return nil
 }

@@ -29,6 +29,7 @@ type Options struct {
 	PriceSats    int64                            // default price of one request, in satoshis
 	Protect      []string                         // path patterns that require payment
 	Prices       []PriceRule                      // optional per-path prices; first match wins
+	Paused       bool                             // serve protected paths free; create no invoices
 	PoW          func(priceSats int64) pow.Params // the puzzle for a price
 	ChallengeTTL time.Duration                    // how long a 402 challenge stays valid
 	SecretKey    []byte                           // signs tokens; keep it secret
@@ -69,15 +70,14 @@ const ClassHeader = "Spikes402-Class"
 
 // Gate is the pay-or-PoW http.Handler.
 type Gate struct {
-	opt      Options
-	patterns []string // Protect, lower-cased unless CaseSensitive
-	sign     signer
-	spent    *spentSet
-	limiter  *rateLimiter
-	pending  *pendingOffers
-	node     *nodeGuard
-	now      func() time.Time // replaceable in tests
-	live     atomic.Pointer[Settings]
+	opt     Options
+	sign    signer
+	spent   *spentSet
+	limiter *rateLimiter
+	pending *pendingOffers
+	node    *nodeGuard
+	now     func() time.Time // replaceable in tests
+	live    atomic.Pointer[Settings]
 
 	// argonSlots caps how many Argon2id solutions are checked at once:
 	// each check takes tens of MiB and milliseconds of CPU.
@@ -95,26 +95,23 @@ func New(opt Options) *Gate {
 		panic("gate: invalid options")
 	}
 	g := &Gate{
-		opt:      opt,
-		patterns: make([]string, len(opt.Protect)),
-		sign:     signer{opt.SecretKey},
-		spent:    newSpentSet(),
-		limiter:  newRateLimiter(opt.ChallengesPerMinute),
-		pending:  newPendingOffers(opt.MaxPendingInvoices),
-		node:     newNodeGuard(opt.Lightning, opt.MaxInvoicesPerMinute),
-		now:      time.Now,
+		opt:     opt,
+		sign:    signer{opt.SecretKey},
+		spent:   newSpentSet(),
+		limiter: newRateLimiter(opt.ChallengesPerMinute),
+		pending: newPendingOffers(opt.MaxPendingInvoices),
+		node:    newNodeGuard(opt.Lightning, opt.MaxInvoicesPerMinute),
+		now:     time.Now,
 
 		argonSlots: make(chan struct{}, min(4, max(1, runtime.NumCPU()/2))),
 		nodeLog:    rateLog{perMinute: 1},
 		classLog:   rateLog{perMinute: 60},
 	}
-	for i, p := range opt.Protect {
-		if !opt.CaseSensitive {
-			p = strings.ToLower(p)
-		}
-		g.patterns[i] = p
-	}
-	g.live.Store(&Settings{PriceSats: opt.PriceSats, Prices: append([]PriceRule(nil), opt.Prices...), PoW: opt.PoW, Policies: opt.Policies, ChallengesPerMinute: opt.ChallengesPerMinute})
+	g.live.Store(&Settings{
+		PriceSats: opt.PriceSats, Prices: append([]PriceRule(nil), opt.Prices...),
+		Protect: append([]string(nil), opt.Protect...), Paused: opt.Paused,
+		PoW: opt.PoW, Policies: opt.Policies, ChallengesPerMinute: opt.ChallengesPerMinute,
+	})
 	return g
 }
 
@@ -131,14 +128,20 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session := g.session(r) // our cookie: not the origin's business
-	if !g.protected(r.URL.Path) {
+	set := g.live.Load()    // one consistent snapshot for this request
+	if !g.protected(r.URL.Path, set) {
 		g.opt.Next.ServeHTTP(w, r)
 		return
 	}
 
-	set := g.live.Load() // one consistent snapshot for this request
 	class := g.classify(r)
 	w.Header().Set(ClassHeader, class.String())
+	if set.Paused {
+		g.observe(r, class, OutcomeFree)
+		r.Header.Del("Authorization")
+		g.opt.Next.ServeHTTP(w, r)
+		return
+	}
 	pol := g.policyFor(set, class)
 	switch pol.Action {
 	case ActionBlock:
@@ -218,9 +221,12 @@ func (g *Gate) scheme(r *http.Request) string {
 // protected reports whether p matches one of the configured patterns.
 // Patterns use path.Match syntax ("/a/*.html"); a pattern ending in "/**"
 // matches everything below that prefix ("/premium/**").
-func (g *Gate) protected(p string) bool {
+func (g *Gate) protected(p string, set *Settings) bool {
 	p = matchKey(p, g.opt.CaseSensitive)
-	for _, pat := range g.patterns {
+	for _, pat := range set.Protect {
+		if !g.opt.CaseSensitive {
+			pat = strings.ToLower(pat)
+		}
 		if matchPattern(pat, p) {
 			return true
 		}

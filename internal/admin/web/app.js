@@ -45,6 +45,7 @@ async function login() {
     sessionStorage.setItem("spikes402-key", state.key);
     $("login").hidden = true; $("nav").hidden = false; $("node").hidden = false;
     $("withdraw").hidden = !me.withdraw_enabled;
+    state.role = me.role;
     if (me.role !== "admin") $("login-error").textContent = "This key has the AI role: read and propose only.";
     route();
     state.timers.push(setInterval(pollSiege, 1000), setInterval(refresh, 5000));
@@ -57,6 +58,7 @@ function logout(text) {
   state.timers.forEach(clearInterval); state.timers = [];
   document.querySelectorAll(".page").forEach((s) => (s.hidden = true));
   $("nav").hidden = true; $("node").hidden = true; $("login").hidden = false;
+  $("pause-banner").hidden = true; document.body.classList.remove("paused");
   $("login-error").textContent = text || "";
 }
 function route() {
@@ -157,11 +159,14 @@ async function refresh() {
   if (!$("settings").hidden) renderCurrent(st);
   if (st.node) $("wd-balance").textContent = fmt(st.node.balance_sat);
   $("wd-dest").textContent = s.withdraw_destination || "";
+  $("pause-banner").hidden = !s.paused;
+  document.body.classList.toggle("paused", !!s.paused);
 }
 
 function renderCurrent(st) {
   const s = st.settings, n = st.gate.node, p = s.current_pow;
-  const list = [["Origin", s.origin], ["Protected", s.protect.join(" ")], ["Price", s.price_sats + " sats"],
+  const list = [["Origin", s.origin], ["Paused", s.paused ? "yes (protected paths are free)" : "no"],
+    ["Protected", s.protect.join(" ")], ["Price", s.price_sats + " sats"],
     ["Path prices", (s.prices || []).map((r) => r.pattern + " = " + r.price_sats + " sats").join(", ") || "none (default only)"],
     ["Proof-of-work", `${p.Algorithm} difficulty ${p.Difficulty}` + (p.MemoryMiB ? `, ${p.MemoryMiB} MiB` : "")],
     ["Invoices / min (all)", s.max_invoices_per_minute], ["Bot identification", s.identify_bots ? "on" : "off"],
@@ -178,11 +183,80 @@ async function loadSettings() {
   fillSettings(s);
   if (state.status) renderCurrent(state.status);
 }
+const POLICY_CLASSES = ["unknown", "impostor", "verified", "verified-signed"];
+const POLICY_ACTIONS = [["pay", "Pay"], ["pow-only", "PoW only"], ["free", "Free"], ["block", "Block"]];
+
 function fillSettings(s) {
   $("f-price").value = s.price_sats; $("f-sps").value = s.pow_seconds_per_sat; $("f-cpm").value = s.challenges_per_minute;
-  $("f-pol").value = JSON.stringify(s.bot_policies, null, 2);
+  $("f-pause").checked = !!s.paused;
+  $("f-pause").disabled = state.role !== "admin";
+  fillProtect(s.protect);
   fillPrices(s.prices);
+  fillPolicies(s.bot_policies);
   state.current = s;
+}
+
+function fillPolicies(pol) {
+  pol = pol || {};
+  for (const k of POLICY_CLASSES) {
+    const sel = $("pol-" + k);
+    if (!sel.options.length) {
+      for (const [value, label] of POLICY_ACTIONS) {
+        const o = document.createElement("option");
+        o.value = value; o.textContent = label;
+        sel.append(o);
+      }
+    }
+    sel.value = (pol[k] && pol[k].action) || "pay";
+  }
+}
+function readPolicies() {
+  const out = {};
+  const cur = (state.current && state.current.bot_policies) || {};
+  for (const k of POLICY_CLASSES) {
+    const action = $("pol-" + k).value;
+    const prev = cur[k] || {};
+    const mult = prev.price_multiplier;
+    if (action !== "pay") {
+      out[k] = { action };
+      if (mult && mult !== 1) out[k].price_multiplier = mult;
+    } else if (mult && mult !== 1) {
+      out[k] = { action: "pay", price_multiplier: mult };
+    }
+  }
+  return out;
+}
+function classPolicies(pol) {
+  const out = {};
+  for (const k of POLICY_CLASSES) {
+    if (pol && pol[k]) out[k] = pol[k];
+  }
+  return out;
+}
+
+function fillProtect(list) {
+  $("f-protect").replaceChildren();
+  const paths = list && list.length ? list : [""];
+  paths.forEach((p) => $("f-protect").append(protectRow(p)));
+}
+function protectRow(pattern) {
+  const tr = el("tr");
+  const pat = document.createElement("input");
+  pat.className = "pat"; pat.placeholder = "/premium/**"; pat.value = pattern || "";
+  const actions = el("td", null, "actions");
+  const up = el("button", "↑"); up.type = "button"; up.title = "Move up";
+  const down = el("button", "↓"); down.type = "button"; down.title = "Move down";
+  const del = el("button", "Remove"); del.type = "button";
+  up.addEventListener("click", () => { const prev = tr.previousElementSibling; if (prev) tr.parentNode.insertBefore(tr, prev); });
+  down.addEventListener("click", () => { const next = tr.nextElementSibling; if (next) tr.parentNode.insertBefore(next, tr); });
+  del.addEventListener("click", () => { if ($("f-protect").rows.length > 1) tr.remove(); });
+  actions.append(up, " ", down, " ", del);
+  const tdPat = el("td"); tdPat.append(pat);
+  tr.append(tdPat, actions);
+  return tr;
+}
+function readProtect() {
+  return [...$("f-protect").rows].map((tr) => tr.querySelector(".pat").value.trim()).filter((p) => p);
 }
 
 function fillPrices(list) {
@@ -217,21 +291,25 @@ function readPrices() {
 }
 
 $("f-price-add").addEventListener("click", () => $("f-prices").append(priceRow("", 1)));
+$("f-protect-add").addEventListener("click", () => $("f-protect").append(protectRow("")));
 
 $("set-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const cur = state.current, ch = {};
   try {
+    if ($("f-pause").checked !== !!cur.paused) ch.paused = $("f-pause").checked;
     if (+$("f-price").value !== cur.price_sats) ch.price_sats = +$("f-price").value;
+    const protect = readProtect();
+    if (JSON.stringify(protect) !== JSON.stringify(cur.protect || [])) ch.protect = protect;
     const prices = readPrices();
     if (JSON.stringify(prices) !== JSON.stringify(cur.prices || [])) ch.prices = prices;
     if (+$("f-sps").value !== cur.pow_seconds_per_sat) ch.pow_seconds_per_sat = +$("f-sps").value;
     if (+$("f-cpm").value !== cur.challenges_per_minute) ch.challenges_per_minute = +$("f-cpm").value;
-    const pol = JSON.parse($("f-pol").value || "{}");
-    if (JSON.stringify(pol) !== JSON.stringify(cur.bot_policies)) ch.bot_policies = pol;
+    const pol = readPolicies();
+    if (JSON.stringify(pol) !== JSON.stringify(classPolicies(cur.bot_policies))) ch.bot_policies = pol;
     if (!Object.keys(ch).length) return msg("set-msg", "Nothing changed.");
     fillSettings(await api("PUT", "/api/settings", ch));
-    msg("set-msg", "Applied (until restart).", "ok");
+    msg("set-msg", "Applied and saved.", "ok");
   } catch (err) { msg("set-msg", err.message, "err"); }
 });
 

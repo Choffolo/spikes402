@@ -93,7 +93,9 @@ func (c *AdminClient) checkRole(ctx context.Context) error {
 var changesSchema = map[string]any{
 	"type": "object",
 	"properties": map[string]any{
-		"price_sats":            map[string]any{"type": "integer", "minimum": 1, "description": "price of one request in sats"},
+		"price_sats":            map[string]any{"type": "integer", "minimum": 1, "description": "default price of one request in sats"},
+		"prices":                map[string]any{"type": "array", "description": "per-path prices; first matching rule wins. Unmatched protected paths use price_sats.", "items": map[string]any{"type": "object", "properties": map[string]any{"pattern": map[string]any{"type": "string"}, "price_sats": map[string]any{"type": "integer", "minimum": 1}}, "required": []string{"pattern", "price_sats"}}},
+		"protect":               map[string]any{"type": "array", "description": "path patterns that require payment (at least one). Same matching as the config file.", "items": map[string]any{"type": "string"}, "minItems": 1},
 		"pow_seconds_per_sat":   map[string]any{"type": "number", "exclusiveMinimum": 0, "description": "seconds of one CPU core of proof-of-work per sat"},
 		"challenges_per_minute": map[string]any{"type": "integer", "minimum": 1, "description": "402 answers per client per minute"},
 		"bot_policies": map[string]any{"type": "object", "description": `per class ("unknown", "impostor", "verified", "verified-signed"), bot name or Web Bot Auth URL: {"action": "pay"|"pow-only"|"free"|"block", "price_multiplier": number}. {} means everyone pays the same.`,
@@ -101,6 +103,7 @@ var changesSchema = map[string]any{
 				"action":           map[string]any{"type": "string", "enum": []string{"pay", "pow-only", "free", "block"}},
 				"price_multiplier": map[string]any{"type": "number"},
 			}, "required": []string{"action"}}},
+		"paused": map[string]any{"type": "boolean", "description": "when true, protected paths are served free and no invoices are created. The AI cannot apply this; use propose_settings_change."},
 	},
 	"additionalProperties": false,
 }
@@ -144,7 +147,7 @@ func AdminTools(c *AdminClient) []Tool {
 				}
 				return c.do(ctx, http.MethodPost, "/api/proposals", map[string]any{"changes": a.Changes, "reason": a.Reason})
 			}},
-		{Name: "apply_settings_change", Description: "Apply a settings change immediately (until restart). Only works if the site owner set admin.ai_can_apply in the config file; otherwise use propose_settings_change.",
+		{Name: "apply_settings_change", Description: "Apply a settings change immediately and save it to the overrides file (config.json is not rewritten). Only works if the site owner set admin.ai_can_apply in the config file; otherwise use propose_settings_change. The AI cannot apply 'paused' even then (propose it instead).",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{"changes": changesSchema}, "required": []string{"changes"}},
 			Call: func(ctx context.Context, args json.RawMessage) (string, error) {
 				var a struct {

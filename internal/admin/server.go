@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"maps"
 	"net"
 	"net/http"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Choffolo/spikes402/internal/botid"
 	"github.com/Choffolo/spikes402/internal/config"
 	"github.com/Choffolo/spikes402/internal/gate"
 	"github.com/Choffolo/spikes402/internal/lightning"
@@ -38,6 +40,7 @@ const (
 // Options build a Server.
 type Options struct {
 	Config     *config.Config
+	ConfigFile string // path passed to -config; overrides are written next to it
 	Gate       *gate.Gate
 	Monitor    *Monitor
 	Node       lightning.Inspector  // may be nil
@@ -57,8 +60,9 @@ type Server struct {
 	started    time.Time
 	now        func() time.Time
 
-	mu  sync.Mutex // guards cfg and changes to the gate's settings
-	cfg *config.Config
+	mu         sync.Mutex // guards cfg and changes to the gate's settings
+	cfg        *config.Config
+	configFile string
 
 	nodeMu    sync.Mutex
 	nodeAt    time.Time
@@ -76,7 +80,7 @@ func New(o Options) *Server {
 		gate: o.Gate, mon: o.Monitor, node: o.Node, withdrawer: o.Withdrawer, allowed: allowed,
 		adminHash: sha256.Sum256([]byte(o.Config.Admin.Key)),
 		aiEnabled: o.Config.Admin.AIKey != "",
-		started:   time.Now(), now: time.Now, cfg: o.Config,
+		started:   time.Now(), now: time.Now, cfg: o.Config, configFile: o.ConfigFile,
 		proposals: newProposals(),
 	}
 	if s.aiEnabled {
@@ -310,6 +314,9 @@ func (s *Server) putSettings(_ http.ResponseWriter, r *http.Request, role Role) 
 	if err := decode(r, &ch); err != nil {
 		return nil, err
 	}
+	if ch.Paused != nil && role != RoleAdmin {
+		return nil, fail(http.StatusForbidden, "only the human admin can toggle pause; the AI may propose it")
+	}
 	return s.apply(ch, role)
 }
 
@@ -317,6 +324,10 @@ func (s *Server) putSettings(_ http.ResponseWriter, r *http.Request, role Role) 
 func (s *Server) apply(ch config.Changes, by Role) (config.Public, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if ch.BotPolicies != nil {
+		merged := mergeBotPolicies(s.cfg.BotPolicies, *ch.BotPolicies)
+		ch.BotPolicies = &merged
+	}
 	n, err := s.cfg.Apply(ch)
 	if err != nil {
 		return config.Public{}, err
@@ -326,8 +337,36 @@ func (s *Server) apply(ch config.Changes, by Role) (config.Public, error) {
 	}
 	s.cfg = n
 	b, _ := json.Marshal(ch)
-	log.Printf("admin: settings changed by %s: %s (until restart)", by, b)
+	if s.configFile == "" {
+		log.Printf("admin: settings changed by %s: %s (until restart; no config path to save overrides)", by, b)
+		return n.Public(), nil
+	}
+	path := config.OverridesPath(s.configFile)
+	if err := config.WriteOverrides(path, n); err != nil {
+		log.Printf("admin: settings changed by %s: %s (active until restart, but not saved to %s: %v)", by, b, path, err)
+		return n.Public(), fail(http.StatusInternalServerError, "settings are active until restart but were not saved: %v", err)
+	}
+	log.Printf("admin: settings changed by %s: %s (saved to %s)", by, b, path)
 	return n.Public(), nil
+}
+
+// mergeBotPolicies keeps named-bot and URL policies that the dashboard
+// does not edit. The four class keys in incoming are authoritative
+// (omitting one reverts it to the default "pay").
+func mergeBotPolicies(current, incoming map[string]gate.Policy) map[string]gate.Policy {
+	out := maps.Clone(current)
+	if out == nil {
+		out = map[string]gate.Policy{}
+	}
+	for k, v := range incoming {
+		out[k] = v
+	}
+	for _, k := range []string{string(botid.Unknown), string(botid.Impostor), string(botid.Verified), string(botid.Signed)} {
+		if _, ok := incoming[k]; !ok {
+			delete(out, k)
+		}
+	}
+	return out
 }
 
 func (s *Server) listProposals(_ http.ResponseWriter, _ *http.Request, _ Role) (any, error) {

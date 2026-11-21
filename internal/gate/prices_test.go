@@ -178,3 +178,79 @@ func mustDecodeClaims(t *testing.T, token string) claims {
 	}
 	return c
 }
+
+func TestPauseServesProtectedPathsFree(t *testing.T) {
+	f := newFixture(t)
+	if rec := f.get("/premium/a", "", ""); rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("before pause: %d", rec.Code)
+	}
+	s := f.gate.Settings()
+	s.Paused = true
+	if err := f.gate.UpdateSettings(s); err != nil {
+		t.Fatal(err)
+	}
+	rec := f.get("/premium/a", "", "")
+	if rec.Code != http.StatusOK || rec.Body.String() != "content of /premium/a" {
+		t.Fatalf("paused: %d %q", rec.Code, rec.Body.String())
+	}
+	if rec := f.get("/free", "", ""); rec.Code != http.StatusOK {
+		t.Fatalf("unprotected: %d", rec.Code)
+	}
+	s = f.gate.Settings()
+	s.Paused = false
+	if err := f.gate.UpdateSettings(s); err != nil {
+		t.Fatal(err)
+	}
+	if rec := f.get("/premium/a", "", ""); rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("after unpause: %d", rec.Code)
+	}
+}
+
+func TestProtectLiveUpdate(t *testing.T) {
+	f := newFixture(t)
+	if rec := f.get("/articles/a", "", ""); rec.Code != http.StatusOK {
+		t.Fatalf("unprotected: %d", rec.Code)
+	}
+	s := f.gate.Settings()
+	s.Protect = []string{"/articles/**"}
+	s.Prices = []PriceRule{{Pattern: "/articles/**", PriceSats: 7}}
+	if err := f.gate.UpdateSettings(s); err != nil {
+		t.Fatal(err)
+	}
+	rec := f.get("/articles/a", "", "")
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("newly protected: %d", rec.Code)
+	}
+	var b challengeBody
+	if err := json.NewDecoder(rec.Body).Decode(&b); err != nil || b.PriceSats != 7 {
+		t.Fatalf("price %v err=%v", b.PriceSats, err)
+	}
+	if rec := f.get("/premium/a", "", ""); rec.Code != http.StatusOK {
+		t.Fatalf("no longer protected: %d", rec.Code)
+	}
+}
+
+func TestOldTokenStillBoundAfterProtectChange(t *testing.T) {
+	f := sectionFixture(t)
+	auth := f.pay(t, f.challenge(t, "/articles/hello"))
+	if rec := f.get("/articles/hello", auth, ""); rec.Code != http.StatusOK {
+		t.Fatalf("paid token: %d", rec.Code)
+	}
+
+	s := f.gate.Settings()
+	s.Protect = []string{"/articles/**", "/premium/**", "/new/**"}
+	s.Prices = []PriceRule{
+		{Pattern: "/articles/**", PriceSats: 50},
+		{Pattern: "/premium/**", PriceSats: 20},
+	}
+	if err := f.gate.UpdateSettings(s); err != nil {
+		t.Fatal(err)
+	}
+	rec := f.get("/articles/hello", auth, "")
+	if rec.Code != http.StatusPaymentRequired || !strings.Contains(rec.Body.String(), errWrongPrice.Error()) {
+		t.Fatalf("token issued at 5 sats after price rose: %d %q", rec.Code, rec.Body.String())
+	}
+	if rec := f.get("/premium/secret", auth, ""); rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("cross-path after protect change: %d", rec.Code)
+	}
+}
