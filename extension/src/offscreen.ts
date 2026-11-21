@@ -1,5 +1,5 @@
 import { sparkBackend } from "./spark";
-import { WalletError } from "./backend";
+import { PaymentPendingError, WalletError } from "./backend";
 import { decryptMnemonic, type EncryptedVault } from "./crypto";
 import { isExtensionPage } from "./sender";
 
@@ -9,7 +9,8 @@ type WalletMsg =
   | { target: "wallet"; type: "disconnect" }
   | { target: "wallet"; type: "getInfo" }
   | { target: "wallet"; type: "receive"; amountSats: number }
-  | { target: "wallet"; type: "send"; destination: string; amountSats?: number }
+  | { target: "wallet"; type: "send"; destination: string; amountSats?: number; maxFeeSats?: number }
+  | { target: "wallet"; type: "lookupSend"; requestId: string; invoice: string }
   | { target: "wallet"; type: "status" };
 
 let unlocked = false;
@@ -24,7 +25,13 @@ chrome.runtime.onMessage.addListener((msg: WalletMsg, sender, sendResponse) => {
   }
   handle(msg)
     .then(sendResponse)
-    .catch((e: unknown) => sendResponse({ error: e instanceof Error ? e.message : String(e) }));
+    .catch((e: unknown) =>
+      sendResponse({
+        error: e instanceof Error ? e.message : String(e),
+        // Tells the caller the payment may still settle: keep it counted.
+        ...(e instanceof PaymentPendingError ? { uncertain: true, requestId: e.requestId } : {}),
+      }),
+    );
   return true;
 });
 
@@ -62,7 +69,10 @@ async function handle(msg: WalletMsg): Promise<unknown> {
     case "send":
       if (!unlocked) throw new WalletError("The wallet is locked.");
       bumpAutoLock();
-      return sparkBackend.send(msg.destination, msg.amountSats);
+      return sparkBackend.send(msg.destination, msg.amountSats, { maxFeeSats: msg.maxFeeSats });
+    case "lookupSend":
+      if (!unlocked) throw new WalletError("The wallet is locked.");
+      return sparkBackend.lookupSend(msg.requestId, msg.invoice);
     default:
       throw new WalletError("Unknown wallet message");
   }

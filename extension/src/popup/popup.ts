@@ -1,7 +1,7 @@
 import type { PaymentRecord, PendingPayment, Settings, WalletInfo } from "../types";
 import { invoiceQrSvg } from "./qr";
 
-type Snapshot = { info: WalletInfo; settings: Settings; history: PaymentRecord[]; pending?: PendingPayment };
+type Snapshot = { info: WalletInfo; settings: Settings; history: PaymentRecord[]; pending?: PendingPayment; pendingCount?: number };
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -37,7 +37,7 @@ function show(id: string) {
 async function refresh() {
   showMsg("");
   const snap = await call<Snapshot>({ type: "getState" });
-  const { info, settings, history, pending } = snap;
+  const { info, settings, history, pending, pendingCount = 0 } = snap;
   $("network-flag").textContent = info.network === "mainnet" ? "Network: Bitcoin mainnet" : "Network: Spark regtest (no real money)";
 
   if (!info.hasVault) {
@@ -57,7 +57,8 @@ async function refresh() {
   const pendingBox = $("pending-box");
   if (pending) {
     pendingBox.hidden = false;
-    $("pending-text").textContent = `Pay ${pending.amountSats} sats? ${pending.reason}`;
+    const more = pendingCount > 1 ? ` (${pendingCount - 1} more waiting)` : "";
+    $("pending-text").textContent = `Pay ${pending.amountSats} sats? ${pending.reason}${more}`;
     $("pending-origin").textContent = pending.origin;
     pendingBox.dataset.id = pending.id;
   } else {

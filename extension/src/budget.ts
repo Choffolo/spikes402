@@ -143,6 +143,19 @@ export function withSiteAllowance(settings: BudgetSettings, origin: string, cost
   return { ...settings, siteAllowances: next };
 }
 
+/**
+ * Change today's counters by delta sats (negative to release). Does nothing
+ * if the budget day has moved on: that day's counters are already gone.
+ */
+export function adjustSpend(spend: SpendState, day: string, origin: string, delta: number): SpendState {
+  if (spend.day !== day || delta === 0) return spend;
+  return {
+    day,
+    globalSats: Math.max(0, spend.globalSats + delta),
+    perSite: { ...spend.perSite, [origin]: Math.max(0, (spend.perSite[origin] ?? 0) + delta) },
+  };
+}
+
 export function recordSpend(spend: SpendState, today: string, origin: string, amountSats: number): SpendState {
   const base = spendForToday(spend, today);
   return {

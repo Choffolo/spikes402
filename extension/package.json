@@ -1,6 +1,6 @@
 {
   "name": "spikes402-extension",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Minimal non-custodial WebLN wallet extension for Spikes402, built on the official Spark SDK.",
   "type": "module",

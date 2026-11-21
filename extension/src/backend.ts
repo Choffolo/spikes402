@@ -11,13 +11,33 @@ export type WalletBackend = {
    * Pay a BOLT11 invoice or a Spark address.
    * amountSats is required when the destination has no amount of its own.
    */
-  send(destination: string, amountSats?: number): Promise<{ preimage?: string; detail: string; feeSats?: number }>;
+  send(
+    destination: string,
+    amountSats?: number,
+    opts?: { maxFeeSats?: number },
+  ): Promise<{ preimage?: string; detail: string; feeSats?: number }>;
+  /** Ask the wallet what became of a Lightning payment that did not finish in time. */
+  lookupSend(requestId: string, invoice: string): Promise<{ state: "settled" | "failed" | "pending"; feeSats?: number }>;
 };
 
 export class WalletError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "WalletError";
+  }
+}
+
+/**
+ * The payment was handed to the network but we did not see it settle or fail
+ * in time. It may still go through, so it must stay counted until looked up.
+ */
+export class PaymentPendingError extends WalletError {
+  constructor(
+    message: string,
+    readonly requestId: string,
+  ) {
+    super(message);
+    this.name = "PaymentPendingError";
   }
 }
 

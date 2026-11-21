@@ -1,7 +1,7 @@
 import { SparkWallet } from "@buildonspark/spark-sdk";
 import type { WalletBackend } from "./backend";
-import { WalletError } from "./backend";
-import { assertPreimageMatchesInvoice, isBolt11 } from "./invoice";
+import { PaymentPendingError, WalletError } from "./backend";
+import { assertPreimageMatchesInvoice, isBolt11, parseBolt11AmountSats } from "./invoice";
 import {
   feeSatsFromSendRequest,
   lightningHint,
@@ -57,6 +57,17 @@ export const sparkBackend: WalletBackend = {
     return { balanceSats: Number.isFinite(sats) ? sats : 0, pubkey };
   },
 
+  async lookupSend(requestId, invoice) {
+    const req = await need().getLightningSendRequest(requestId);
+    const preimage = sendRequestHasPreimage(req);
+    if (preimage) {
+      await assertPreimageMatchesInvoice(invoice, preimage);
+      return { state: "settled", feeSats: feeSatsFromSendRequest(req) };
+    }
+    if (sendRequestFailed(req?.status)) return { state: "failed" };
+    return { state: "pending" };
+  },
+
   async receiveLightning(amountSats) {
     const hint = lightningHint(lastNetwork);
     if (!hint.ready) throw new WalletError(hint.hint);
@@ -73,7 +84,7 @@ export const sparkBackend: WalletBackend = {
     return { invoice, feeSats: 0 };
   },
 
-  async send(destination, amountSats) {
+  async send(destination, amountSats, opts) {
     const w = need();
     const dest = destination.trim();
     if (!dest) throw new WalletError("Enter an invoice or address.");
@@ -82,9 +93,11 @@ export const sparkBackend: WalletBackend = {
       const hint = lightningHint(lastNetwork);
       if (!hint.ready) throw new WalletError(hint.hint);
       const amount = amountSats !== undefined && amountSats > 0 ? amountSats : undefined;
+      // The same fee rule the budget uses, from the amount that will be paid.
+      const maxFeeSats = opts?.maxFeeSats ?? maxFeeSatsFor(amount ?? parseBolt11AmountSats(dest) ?? 10);
       const payment = await w.payLightningInvoice({
         invoice: dest,
-        maxFeeSats: maxFeeSatsFor(amount ?? 10),
+        maxFeeSats,
         ...(amount !== undefined ? { amountSatsToSend: amount } : {}),
       });
       if (!payment || !("id" in payment) || !payment.id) {
@@ -95,7 +108,7 @@ export const sparkBackend: WalletBackend = {
       return {
         preimage: settled.preimage,
         detail: `preimage ${settled.preimage}`,
-        feeSats: settled.feeSats ?? maxFeeSatsFor(amount ?? 10),
+        feeSats: settled.feeSats ?? maxFeeSats,
       };
     }
 
@@ -133,5 +146,5 @@ async function waitForPreimage(
     }
     await new Promise((r) => setTimeout(r, PREIMAGE_POLL_MS));
   }
-  throw new WalletError("Timed out waiting for the Lightning payment preimage.");
+  throw new PaymentPendingError("Timed out waiting for the Lightning payment preimage.", id);
 }
