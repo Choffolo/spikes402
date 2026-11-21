@@ -16,7 +16,11 @@ export async function loadState(): Promise<StoredState> {
   const s = (raw[KEY] ?? fallback()) as StoredState;
   return {
     vault: s.vault,
-    settings: { ...defaultSettings(), ...s.settings },
+    settings: {
+      ...defaultSettings(),
+      ...s.settings,
+      siteAllowances: { ...defaultSettings().siteAllowances, ...(s.settings?.siteAllowances ?? {}) },
+    },
     spend: s.spend ?? emptySpend("1970-01-01"),
     history: Array.isArray(s.history) ? s.history : [],
     pending: s.pending,
@@ -56,8 +60,6 @@ export async function setPending(pending: PendingPayment | undefined): Promise<v
   const s = await loadState();
   s.pending = pending;
   await saveState(s);
-  await chrome.action.setBadgeText({ text: pending ? "!" : "" });
-  await chrome.action.setBadgeBackgroundColor({ color: "#b45309" });
 }
 
 export function truncateDestination(s: string, n = 72): string {

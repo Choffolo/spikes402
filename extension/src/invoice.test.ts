@@ -2,40 +2,44 @@ import { describe, expect, it } from "vitest";
 import {
   InvoiceError,
   assertPreimageMatchesInvoice,
+  encodeBolt11ForTest,
   isBolt11,
   parseBolt11AmountSats,
   parseBolt11PaymentHash,
   preimageMatchesInvoice,
+  verifyBolt11Checksum,
 } from "./invoice";
+
+const inv = (hrp: string) => encodeBolt11ForTest(hrp);
 
 describe("parseBolt11AmountSats", () => {
   it("reads the usual multipliers", () => {
-    expect(parseBolt11AmountSats("lnbc20m1qqqq")).toBe(2_000_000);
-    expect(parseBolt11AmountSats("lnbc1u1qqqq")).toBe(100);
-    expect(parseBolt11AmountSats("lnbc100n1qqqq")).toBe(10);
-    expect(parseBolt11AmountSats("lnbc10n1qqqq")).toBe(1);
-    expect(parseBolt11AmountSats("lnbc2500u1qqqq")).toBe(250_000);
+    expect(parseBolt11AmountSats(inv("lnbc20m"))).toBe(2_000_000);
+    expect(parseBolt11AmountSats(inv("lnbc1u"))).toBe(100);
+    expect(parseBolt11AmountSats(inv("lnbc100n"))).toBe(10);
+    expect(parseBolt11AmountSats(inv("lnbc10n"))).toBe(1);
+    expect(parseBolt11AmountSats(inv("lnbc2500u"))).toBe(250_000);
   });
 
   it("rounds fractional sats up (nano and pico)", () => {
-    expect(parseBolt11AmountSats("lnbc15n1qqqq")).toBe(2); // 1.5 sat
-    expect(parseBolt11AmountSats("lnbc1n1qqqq")).toBe(1); // 0.1 sat
-    expect(parseBolt11AmountSats("lnbc1p1qqqq")).toBe(1);
+    expect(parseBolt11AmountSats(inv("lnbc15n"))).toBe(2); // 1.5 sat
+    expect(parseBolt11AmountSats(inv("lnbc1n"))).toBe(1); // 0.1 sat
+    expect(parseBolt11AmountSats(inv("lnbc1p"))).toBe(1);
   });
 
   it("treats a bare number as whole bitcoin", () => {
-    expect(parseBolt11AmountSats("lnbc11qqqq")).toBe(100_000_000); // 1 BTC
+    expect(parseBolt11AmountSats(inv("lnbc1"))).toBe(100_000_000); // 1 BTC
   });
 
   it("returns null for amountless invoices", () => {
-    expect(parseBolt11AmountSats("lnbc1qqqqqq")).toBeNull();
-    expect(parseBolt11AmountSats("  LNBC1QQQQ  ")).toBeNull();
+    expect(parseBolt11AmountSats(inv("lnbc"))).toBeNull();
+    expect(parseBolt11AmountSats("  " + inv("LNBC").toUpperCase() + "  ")).toBeNull();
   });
 
   it("accepts testnet and regtest prefixes, and a lightning: prefix", () => {
-    expect(parseBolt11AmountSats("lntb100n1qqqq")).toBe(10);
-    expect(parseBolt11AmountSats("lnbcrt2u1qqqq")).toBe(200);
-    expect(parseBolt11AmountSats("lightning:lnbc1u1qqqq")).toBe(100);
+    expect(parseBolt11AmountSats(inv("lntb100n"))).toBe(10);
+    expect(parseBolt11AmountSats(inv("lnbcrt2u"))).toBe(200);
+    expect(parseBolt11AmountSats("lightning:" + inv("lnbc1u"))).toBe(100);
   });
 
   it("rejects junk", () => {
@@ -43,15 +47,28 @@ describe("parseBolt11AmountSats", () => {
     expect(() => parseBolt11AmountSats("chromescar71@phoenixwallet.me")).toThrow(InvoiceError);
     expect(() => parseBolt11AmountSats("bc1qnotaninvoice")).toThrow(InvoiceError);
     expect(() => parseBolt11AmountSats("lnbc")).toThrow(InvoiceError);
+    expect(() => parseBolt11AmountSats("lnbc20m1qqqqqq")).toThrow(/checksum/);
   });
 });
 
 describe("isBolt11", () => {
   it("spots invoices and leaves addresses alone", () => {
-    expect(isBolt11("lnbc100n1qqqqqqqqqqqq")).toBe(true);
-    expect(isBolt11("lightning:lnbc100n1qqqqqqqqqqqq")).toBe(true);
+    const good = inv("lnbc100n");
+    expect(isBolt11(good)).toBe(true);
+    expect(isBolt11("lightning:" + good)).toBe(true);
+    expect(isBolt11("lnbc100n1qqqqqqqqqqqq")).toBe(false); // bad checksum
     expect(isBolt11("me@wallet.example")).toBe(false);
     expect(isBolt11("bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq")).toBe(false);
+  });
+});
+
+describe("BOLT11 checksum", () => {
+  it("accepts a checksum we just created and rejects a flipped character", () => {
+    const good = inv("lnbc100n");
+    expect(verifyBolt11Checksum(good)).toBe(true);
+    const flipped = good.slice(0, -1) + (good.endsWith("q") ? "p" : "q");
+    expect(verifyBolt11Checksum(flipped)).toBe(false);
+    expect(() => parseBolt11AmountSats(flipped)).toThrow(/checksum/);
   });
 });
 
@@ -96,7 +113,6 @@ function hex(bytes: Uint8Array): string {
 
 /** Minimal lnbc…1 invoice carrying only a payment-hash tagged field. Checksum is fake. */
 function makeInvoiceWithPaymentHash(hash: Uint8Array): string {
-  const CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
   const bits: number[] = Array(7).fill(0); // timestamp
   bits.push(1, 1, 20); // type 1, length 52 (260 bits)
   let acc = 0;
@@ -111,5 +127,5 @@ function makeInvoiceWithPaymentHash(hash: Uint8Array): string {
   }
   if (n > 0) bits.push((acc << (5 - n)) & 31);
   bits.push(...Array(104).fill(0)); // signature
-  return "lnbc1" + bits.map((w) => CHARSET[w]).join("") + "qqqqqq";
+  return encodeBolt11ForTest("lnbc", bits);
 }

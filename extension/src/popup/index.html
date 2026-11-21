@@ -47,10 +47,12 @@
         <h2>Confirm payment</h2>
         <p id="pending-text"></p>
         <p class="mono" id="pending-origin"></p>
-        <div class="row">
-          <button id="btn-accept" type="button">Pay</button>
+        <div class="pending-actions">
+          <button id="btn-accept-once" type="button">Pay once</button>
+          <button id="btn-accept-always" type="button" class="secondary">Always allow this price on this site</button>
           <button id="btn-decline" type="button" class="secondary">Decline</button>
         </div>
+        <p class="muted">You only see this when the page price does not fit your budget.</p>
       </div>
 
       <p class="balance">Balance: <strong id="balance">—</strong> sats</p>
@@ -78,7 +80,7 @@
       <label>Max sats per page payment <input id="set-per-pay" type="number" min="1" step="1" /></label>
       <label>Max sats per site per day <input id="set-per-site" type="number" min="1" step="1" /></label>
       <label>Max sats per day (all sites) <input id="set-per-day" type="number" min="1" step="1" /></label>
-      <label class="check"><input id="set-autopay" type="checkbox" /> Auto-pay when a request is within the budget</label>
+      <p class="muted">Pages that fit this budget are paid automatically (invoice plus fees). You are only asked when a page costs more than these caps.</p>
       <button id="btn-save-budget" type="button" class="secondary">Save budgets</button>
 
       <h2>Network</h2>
