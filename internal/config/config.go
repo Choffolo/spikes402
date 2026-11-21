@@ -46,26 +46,27 @@ func checkPathPattern(what, p string, caseSensitive bool) error {
 
 // Config is the content of the configuration file. See config.example.json.
 type Config struct {
-	Listen               string           `json:"listen"`                  // address to listen on, default ":8402" ("127.0.0.1:8402" with the fake backend)
-	Origin               string           `json:"origin"`                  // website to protect, e.g. "http://localhost:8080"
-	PriceSats            int64            `json:"price_sats"`              // default price per request in sats
-	Protect              []string         `json:"protect"`                 // path patterns that require payment
-	Prices               []gate.PriceRule `json:"prices,omitempty"`        // optional per-path prices; first match wins
-	PowSecondsPerSat     float64          `json:"pow_seconds_per_sat"`     // CPU-core seconds of work per sat, default 10
-	PowDifficulty        int              `json:"pow_difficulty"`          // 0 = derived from price and pow_seconds_per_sat
-	PowAlgorithm         string           `json:"pow_algorithm"`           // "sha256d" (default) or "argon2id"
-	Argon2MemoryMiB      int              `json:"argon2_memory_mib"`       // argon2id memory per attempt, default 16
-	Argon2MaxMemoryMiB   int              `json:"argon2_max_memory_mib"`   // concurrent Argon2id checks, default 256
-	ChallengeTTLSeconds  int              `json:"challenge_ttl_seconds"`   // default 600
-	ChallengesPerMinute  int              `json:"challenges_per_minute"`   // per client, default 30
-	MaxInvoicesPerMinute int              `json:"max_invoices_per_minute"` // all clients together, default 300
-	MaxPendingInvoices   int              `json:"max_pending_invoices"`    // default 10000
-	ClientIPHeader       string           `json:"client_ip_header"`        // e.g. "X-Forwarded-For", default "" (use the TCP address)
-	TrustedProxies       []string         `json:"trusted_proxies"`         // IPs/CIDRs allowed to set forwarding and client_ip_header
-	PreserveHost         bool             `json:"preserve_host"`           // send the public Host to the origin (trusted proxies only)
-	SecretKey            string           `json:"secret_key"`              // or env SPIKES402_SECRET_KEY
-	StateDir             string           `json:"state_dir"`               // spent tokens and withdrawal intents; default "<config dir>/state"
-	Lightning            Lightning        `json:"lightning"`
+	Listen               string             `json:"listen"`                  // address to listen on, default ":8402" ("127.0.0.1:8402" with the fake backend)
+	Origin               string             `json:"origin"`                  // website to protect, e.g. "http://localhost:8080"
+	PriceSats            int64              `json:"price_sats"`              // default price per request in sats
+	Protect              []string           `json:"protect"`                 // path patterns that require payment
+	Prices               []gate.PriceRule   `json:"prices,omitempty"`        // optional per-path prices; first match wins
+	Previews             []gate.PreviewRule `json:"previews,omitempty"`      // optional teaser of a protected page on its 402 page; first match wins
+	PowSecondsPerSat     float64            `json:"pow_seconds_per_sat"`     // CPU-core seconds of work per sat, default 10
+	PowDifficulty        int                `json:"pow_difficulty"`          // 0 = derived from price and pow_seconds_per_sat
+	PowAlgorithm         string             `json:"pow_algorithm"`           // "sha256d" (default) or "argon2id"
+	Argon2MemoryMiB      int                `json:"argon2_memory_mib"`       // argon2id memory per attempt, default 16
+	Argon2MaxMemoryMiB   int                `json:"argon2_max_memory_mib"`   // concurrent Argon2id checks, default 256
+	ChallengeTTLSeconds  int                `json:"challenge_ttl_seconds"`   // default 600
+	ChallengesPerMinute  int                `json:"challenges_per_minute"`   // per client, default 30
+	MaxInvoicesPerMinute int                `json:"max_invoices_per_minute"` // all clients together, default 300
+	MaxPendingInvoices   int                `json:"max_pending_invoices"`    // default 10000
+	ClientIPHeader       string             `json:"client_ip_header"`        // e.g. "X-Forwarded-For", default "" (use the TCP address)
+	TrustedProxies       []string           `json:"trusted_proxies"`         // IPs/CIDRs allowed to set forwarding and client_ip_header
+	PreserveHost         bool               `json:"preserve_host"`           // send the public Host to the origin (trusted proxies only)
+	SecretKey            string             `json:"secret_key"`              // or env SPIKES402_SECRET_KEY
+	StateDir             string             `json:"state_dir"`               // spent tokens and withdrawal intents; default "<config dir>/state"
+	Lightning            Lightning          `json:"lightning"`
 
 	Paused bool `json:"paused,omitempty"` // serve protected paths free; no invoices (dashboard toggle)
 
@@ -263,6 +264,17 @@ func (c *Config) complete() error {
 		}
 		if r.PriceSats < 1 || r.PriceSats > maxPriceSats {
 			return fmt.Errorf(`prices[%d].price_sats must be between 1 and %d`, i, maxPriceSats)
+		}
+	}
+	if len(c.Previews) > maxPriceRules {
+		return fmt.Errorf(`"previews" can list at most %d rules`, maxPriceRules)
+	}
+	for i, r := range c.Previews {
+		if err := checkPathPattern("previews pattern", r.Pattern, c.ProtectCaseSensitive); err != nil {
+			return err
+		}
+		if err := r.Check(); err != nil {
+			return fmt.Errorf("previews[%d]: %w", i, err)
 		}
 	}
 	if c.PowSecondsPerSat < 0 {

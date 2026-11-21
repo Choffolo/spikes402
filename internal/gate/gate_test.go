@@ -2,7 +2,6 @@ package gate
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -153,16 +152,16 @@ func TestHTMLPage(t *testing.T) {
 		!strings.Contains(body, `Authorization:"L402 "`) {
 		t.Fatalf("missing WebLN markup: %s", body)
 	}
-	// The script in the page is exactly what the CSP hash covers.
-	i, j := strings.Index(body, "<script>"), strings.Index(body, "</script>")
-	if i < 0 || j < i {
-		t.Fatal("script tag missing")
-	}
-	sum := sha256.Sum256([]byte(body[i+len("<script>") : j]))
-	want := "sha256-" + base64.StdEncoding.EncodeToString(sum[:])
+	// Every script in the page is exactly what the CSP hash covers.
 	csp := rec.Header().Get("Content-Security-Policy")
-	if !strings.Contains(csp, want) || !strings.Contains(csp, "connect-src 'self'") {
-		t.Fatalf("CSP %q, want hash %s", csp, want)
+	scripts := inlineScripts(body)
+	if len(scripts) != 2 || !strings.Contains(csp, "connect-src 'self'") {
+		t.Fatalf("want two inline scripts and connect-src 'self', got %d, CSP %q", len(scripts), csp)
+	}
+	for _, js := range scripts {
+		if want := "sha256-" + base64.StdEncoding.EncodeToString(sha256Sum([]byte(js))); !strings.Contains(csp, want) {
+			t.Fatalf("CSP %q, want hash %s", csp, want)
+		}
 	}
 	// Same invoice and token as the machine-readable challenge: no new invoice.
 	l402 := rec.Header().Values("WWW-Authenticate")[0]
@@ -342,7 +341,7 @@ func TestPoWStillWorksWhenNodeIsDown(t *testing.T) {
 		t.Fatal("no invoice should be offered when the node is down")
 	}
 	html := f.get("/premium/article", "", "text/html")
-	if strings.Contains(html.Body.String(), "webln-pay") || strings.Contains(html.Body.String(), "<script>") {
+	if strings.Contains(html.Body.String(), "webln-pay") || strings.Contains(html.Body.String(), "window.webln") {
 		t.Fatalf("WebLN markup without an invoice: %s", html.Body.String())
 	}
 	if rec := f.get("/premium/article", solve(t, b), ""); rec.Code != http.StatusOK {

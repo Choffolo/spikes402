@@ -123,6 +123,7 @@ func main() {
 		PriceSats:    cfg.PriceSats,
 		Protect:      cfg.Protect,
 		Prices:       cfg.Prices,
+		Previews:     cfg.Previews,
 		Paused:       cfg.Paused,
 		PoW:          cfg.PoW,
 		ChallengeTTL: cfg.ChallengeTTL(),
@@ -166,6 +167,9 @@ func main() {
 	if p.Algorithm == "argon2id" {
 		log.Printf("Argon2id checks: %d MiB each, at most %d at once (budget %d MiB)",
 			p.MemoryMiB, cfg.Argon2MaxMemoryMiB/p.MemoryMiB, cfg.Argon2MaxMemoryMiB)
+	}
+	if len(cfg.Previews) > 0 {
+		log.Printf("teasers on the 402 page (first matching rule wins): %v", cfg.Previews)
 	}
 	if len(cfg.Prices) > 0 {
 		log.Printf("path prices (first matching rule wins; unmatched protected paths use %d sats): %v", cfg.PriceSats, cfg.Prices)
