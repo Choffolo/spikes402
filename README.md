@@ -111,7 +111,7 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `prices` | Optional list of `{ "pattern", "price_sats" }` rules. Same pattern syntax and canonical path as `protect`. **The first matching rule wins**; put more specific patterns first. Unmatched protected paths use `price_sats`. | `[]` |
 | `protect` | Path patterns that require payment. `"/premium/**"` = everything under `/premium`; other patterns use [glob syntax](https://pkg.go.dev/path#Match), e.g. `"/*.pdf"`. See [Path matching](#path-matching) | required |
 | `protect_case_sensitive` | Match `protect` patterns with exact letter case. Off by default, because many websites serve `/Premium` like `/premium` | `false` |
-| `pow_seconds_per_sat` | How much work replaces one sat: seconds of one CPU core (see [Proof-of-work pricing](#proof-of-work-pricing)) | `10` |
+| `pow_seconds_per_sat` | How much work replaces one sat: seconds of one CPU core (see [Proof-of-work pricing](#proof-of-work-pricing)). Values below 1 are refused unless `unsafe_allow_dangerous_config` is set | `10` |
 | `pow_difficulty` | Leading zero bits for the puzzle. `0` = derive from the price and `pow_seconds_per_sat` | `0` |
 | `pow_algorithm` | `"sha256d"` or `"argon2id"` (memory-hard, see [Argon2id](#argon2id-memory-hard-proof-of-work)) | `"sha256d"` |
 | `argon2_memory_mib` | Memory per Argon2id attempt, 8–256 MiB | `16` |
@@ -127,7 +127,7 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `read_timeout_seconds` / `write_timeout_seconds` | Longest time to receive a whole request / send a whole response (raise the second for very large downloads or streaming) | `60` / `300` |
 | `unsafe_allow_dangerous_config` | Accept settings refused by default: `trusted_proxies` or `admin.allowed_ips` covering the whole internet (`0.0.0.0/0`, `::/0`), or the fake backend on a non-localhost address | `false` |
 | `secret_key` | Signs tokens, ≥ 32 characters. Better set via `SPIKES402_SECRET_KEY` | random with `fake`, required otherwise |
-| `state_dir` | Directory for spent tokens and withdrawal intents (mode 0700, files 0600, HMAC-sealed with `secret_key`). Created on startup if missing. Docker: must be a writable volume | `<directory of the config file>/state` |
+| `state_dir` | Directory for spent tokens, withdrawal intents, and dashboard overrides (mode 0700, files 0600). Created on startup if missing. Docker: must be a writable volume | `<directory of the config file>/state` |
 | `identify_bots` | Classify clients (Web Bot Auth, published IP lists, reverse DNS); see [Bot identification](#bot-identification) | `true` |
 | `known_bots` | Replace the built-in list of crawlers: `[{"name", "user_agent", "ip_ranges_url", "reverse_dns": [...]}]` | built-in list |
 | `paused` | Serve protected paths free and create no invoices (dashboard toggle; also honoured in the file / overrides) | `false` |
@@ -139,7 +139,7 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `admin.listen` | Address of the dashboard/API, separate from the proxy | `"127.0.0.1:8404"` |
 | `admin.allowed_ips` | IPs/CIDRs allowed to reach the dashboard besides localhost. Required if `admin.listen` is not localhost | `[]` |
 | `admin.ai_key` | Separate key for the [AI admin (MCP)](#ai-admin-mcp). Better set via `SPIKES402_AI_KEY` | `""` = no AI |
-| `admin.ai_can_apply` | Let the AI apply changes itself instead of only proposing them | `false` |
+| `admin.ai_can_apply` | Let the AI apply changes that do not reduce protection; anything weaker stays a suggestion for you to approve | `false` |
 | `admin.visitor_ips` | How visitors appear in the siege monitor: `"hash"`, `"truncate"` (/24, /48) or `"full"` | `"hash"` |
 | `withdraw.*` | See [Withdrawals](#withdrawals-optional-off-by-default) | off |
 | `lightning.backend` | `"fake"` (development) or `"phoenixd"` | required |
@@ -446,22 +446,33 @@ Everything else sits behind the discreet **Settings** link:
   `prices` (per-path rules; first match wins), `protect`, `pow_seconds_per_sat`,
   `challenges_per_minute`, `bot_policies` (the four visitor classes as
   dropdowns) and `paused`. They are validated like the config file, apply
-  immediately, and are saved to a sidecar file next to the config
-  (`config.overrides.json` when the config is `config.json`). `config.json`
-  itself is never rewritten. The overrides file is written atomically, mode
-  `0600`, and contains only those dashboard fields (unknown keys, including
-  secrets or Lightning settings, are refused on load). On start, overrides
-  win over the same fields in `config.json`. Delete the overrides file if you
-  want the config file values back. Everything about money or the perimeter
-  stays in the config file on purpose: passwords and keys, the Lightning
-  node, the withdraw destination, node anti-flood limits
+  immediately, and are saved under `state_dir` as `config.overrides.json`.
+  `config.json` itself is never rewritten. The change is validated, then
+  the overrides file is written atomically (mode `0600`), and only then
+  published to the running proxy: a change that fails validation or cannot
+  be saved is not applied. The file contains only those dashboard fields
+  (unknown keys, including secrets or Lightning settings, are refused on
+  load). On start, overrides win over the same fields in `config.json`,
+  and the process logs one line naming the file and which fields changed
+  (values are not secrets). A leftover `config.overrides.json` next to
+  the config file is still read if the `state_dir` copy is not there yet;
+  the next dashboard save writes to `state_dir`. Delete the overrides
+  file if you want the config file values back. Everything about money or
+  the perimeter stays in the config file on purpose: passwords and keys,
+  the Lightning node, the withdraw destination, node anti-flood limits
   (`max_invoices_per_minute`, `max_pending_invoices`), ports, trusted
   proxies / IP header, and admin allowed IPs. A stolen admin key can change
   prices, protection and pause, but cannot drain or flood the node.
   **Pause** serves protected paths free and creates no invoices at all
-  (no load on the node). Only the human admin can toggle it; the AI key
-  may propose a pause but cannot apply it, even when `admin.ai_can_apply`
-  is on. A collapsed list shows all current settings (no secrets) and node details;
+  (no load on the node). Only the human admin can toggle pause (on or
+  off); the AI key may propose it but cannot apply it, even when
+  `admin.ai_can_apply` is on. With `ai_can_apply`, the AI may only apply
+  changes that make protection stricter or equal (for example a higher
+  price). Anything that would reduce protection — removing or narrowing
+  `protect` patterns, a `free` bot policy, a lower price, or easier
+  proof-of-work — is shown as a suggestion and needs your click, with a
+  warning, in the dashboard. A collapsed list shows all current settings
+  (no secrets) and node details;
 - **AI proposals**: changes suggested by the AI admin, to approve or reject;
 - **Withdraw**, in its own red box at the bottom, only if enabled.
 
@@ -505,9 +516,10 @@ Tools: `get_status`, `get_recent_visits`, `get_settings`, `list_proposals`,
 `propose_settings_change` and `apply_settings_change`. With the AI key the API
 allows reading and **proposing** only; a proposal changes nothing until you
 approve it in the dashboard. Applying directly needs `"admin.ai_can_apply":
-true` in the config file. The AI key can **never** approve proposals or
-withdraw; there is no withdraw tool; and `spikes402-mcp` refuses to run with
-the human admin key.
+true` in the config file, and even then only for changes that do not reduce
+protection; weaker changes stay proposals. The AI key can **never** approve
+proposals or withdraw; there is no withdraw tool; and `spikes402-mcp`
+refuses to run with the human admin key.
 
 ## Withdrawals (optional, off by default)
 
@@ -681,7 +693,7 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
   required by the gate (the draft allows that).
 - Argon2id speed figures for GPUs are not measured by us.
 - Dashboard: one admin key (no user accounts, no audit log beyond the
-  process log); webmaster settings persist in a sidecar overrides file
+  process log); webmaster settings persist in `state_dir/config.overrides.json`
   (`config.json` is never rewritten); the siege monitor shows this process
   only and resets on restart.
 - Withdrawals: tested against the fake backend and a mock of phoenixd's API,

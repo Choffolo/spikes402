@@ -100,3 +100,57 @@ func TestOverridesMissingIsFine(t *testing.T) {
 		t.Fatalf("%v %+v", err, c)
 	}
 }
+
+func TestOverridesLiveInStateDir(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "c.json")
+	if err := os.WriteFile(file, []byte(`{`+base+`,"lightning":{"backend":"fake"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.OverridesFile() != filepath.Join(dir, "state", "config.overrides.json") {
+		t.Fatalf("overrides path: %s", c.OverridesFile())
+	}
+	price, paused := int64(9), true
+	n, err := c.Apply(Changes{PriceSats: &price, Paused: &paused})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteOverrides(n.OverridesFile(), n); err != nil {
+		t.Fatal(err)
+	}
+	// A leftover legacy file must not win over the state_dir copy.
+	legacy := OverridesPath(file)
+	if err := os.WriteFile(legacy, []byte(`{"price_sats":1,"protect":["/p/**"],"pow_seconds_per_sat":10,"challenges_per_minute":30,"paused":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.PriceSats != 9 || !loaded.Paused {
+		t.Fatalf("state_dir should win: price=%d paused=%v", loaded.PriceSats, loaded.Paused)
+	}
+}
+
+func TestLegacyOverridesStillLoad(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "c.json")
+	if err := os.WriteFile(file, []byte(`{`+base+`,"lightning":{"backend":"fake"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy := OverridesPath(file)
+	if err := os.WriteFile(legacy, []byte(`{"price_sats":8,"protect":["/p/**"],"pow_seconds_per_sat":10,"challenges_per_minute":30,"paused":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.PriceSats != 8 || !loaded.Paused {
+		t.Fatalf("legacy overrides not applied: price=%d paused=%v", loaded.PriceSats, loaded.Paused)
+	}
+}

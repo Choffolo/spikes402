@@ -152,8 +152,11 @@ func TestAdminTools(t *testing.T) {
 
 	srv, g = adminAPI(t, true)
 	tools = AdminTools(&AdminClient{BaseURL: srv.URL, Key: aiKey})
-	if _, err := call(t, tools, "apply_settings_change", `{"changes":{"price_sats":3}}`); err != nil || g.Settings().PriceSats != 3 {
-		t.Fatalf("apply with opt-in: %v", err)
+	if _, err := call(t, tools, "apply_settings_change", `{"changes":{"price_sats":1}}`); err == nil || g.Settings().PriceSats != 10 {
+		t.Fatalf("AI must not lower the price: %v gate=%d", err, g.Settings().PriceSats)
+	}
+	if _, err := call(t, tools, "apply_settings_change", `{"changes":{"price_sats":15}}`); err != nil || g.Settings().PriceSats != 15 {
+		t.Fatalf("apply with opt-in (stricter price): %v", err)
 	}
 }
 

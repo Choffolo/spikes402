@@ -65,11 +65,14 @@ These are known and not fixed yet. Contributions are welcome.
   addresses a minute; beyond that, new clients share one bucket and get
   `429`. An attacker with that many addresses (easy with IPv6) can lock out
   new visitors for a while. The Lightning node stays protected.
-- **AI admin with `ai_can_apply`.** When enabled, the AI admin can change
-  policies and prices, including making pages free, and it reads text chosen
-  by visitors (paths, bot host names), which could carry prompt injection.
-  It cannot withdraw or approve proposals. Leave `ai_can_apply` off, or
-  review its changes.
+- **AI admin with `ai_can_apply`.** When enabled, the AI admin can apply
+  changes that make protection stricter or equal (for example a higher
+  price). It cannot apply a change that would reduce protection (making
+  pages free, lowering prices, easier proof-of-work, narrowing `protect`),
+  toggle pause, withdraw, or approve proposals. Those stay suggestions
+  for the human admin. It still reads text chosen by visitors (paths, bot
+  host names), which could carry prompt injection. Leave `ai_can_apply`
+  off, or review its proposals.
 - **Key-directory fetches (Web Bot Auth).** The fetcher only connects over
   https, on port 443, to public addresses, but a few rarely used special
   ranges (for example NAT64 `64:ff9b::/96`, 6to4, Teredo, `198.18.0.0/15`,

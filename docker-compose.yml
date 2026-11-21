@@ -31,13 +31,12 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      # Dashboard overrides are written next to config.json. For a durable
-      # dashboard, bind-mount a writable directory instead, e.g.
-      #   ./config:/etc/spikes402
-      # with config.json inside it, writable by uid 65532.
+      # config.json can stay read-only. Dashboard overrides, spent tokens
+      # and withdrawal intents are written under state_dir (see below).
       - ./config.json:/etc/spikes402/config.json:ro
-      # Spent tokens and withdrawal intents. Must stay writable by
-      # uid 65532 (the process user). A named volume is created for you.
+      # Must stay writable by uid 65532 (the process user). Holds spent
+      # tokens, withdrawal intents, and config.overrides.json. A named
+      # volume is created for you.
       - spikes402-state:/var/lib/spikes402
     environment:
       SPIKES402_SECRET_KEY: ${SPIKES402_SECRET_KEY:?set a 32+ character secret (openssl rand -hex 32)}

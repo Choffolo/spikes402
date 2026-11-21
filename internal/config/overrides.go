@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,9 +11,9 @@ import (
 	"github.com/Choffolo/spikes402/internal/gate"
 )
 
-// OverridesPath is the sidecar file next to the main config: for
-// "config.json" it is "config.overrides.json". The main file is never
-// rewritten; only these webmaster settings are stored here.
+// OverridesPath is the legacy sidecar next to the main config: for
+// "config.json" it is "config.overrides.json". New writes use
+// Config.OverridesFile (in state_dir). The main file is never rewritten.
 func OverridesPath(configFile string) string {
 	dir, name := filepath.Split(configFile)
 	ext := filepath.Ext(name)
@@ -73,12 +74,16 @@ func snapshot(c *Config) overrideFile {
 	}
 }
 
-func applyOverridesFile(c *Config, path string) (*Config, error) {
+func applyOverridesFile(c *Config, configFile string) (*Config, error) {
+	path, err := findOverrides(c, configFile)
+	if err != nil {
+		return nil, err
+	}
+	if path == "" {
+		return c, nil
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return c, nil
-		}
 		return nil, err
 	}
 	var o overrideFile
@@ -91,7 +96,101 @@ func applyOverridesFile(c *Config, path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	fields := changedOverrideFields(c, n)
+	if len(fields) == 0 {
+		log.Printf("applied overrides from %s (no differences)", path)
+	} else {
+		log.Printf("applied overrides from %s (%s)", path, strings.Join(fields, ", "))
+	}
 	return n, nil
+}
+
+func findOverrides(c *Config, configFile string) (string, error) {
+	path := c.OverridesFile()
+	if path != "" {
+		_, err := os.Stat(path)
+		if err == nil {
+			return path, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+	}
+	legacy := OverridesPath(configFile)
+	if legacy == "" || legacy == path {
+		return "", nil
+	}
+	_, err := os.Stat(legacy)
+	if err == nil {
+		return legacy, nil
+	}
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	return "", err
+}
+
+func changedOverrideFields(base, n *Config) []string {
+	var fields []string
+	if base.PriceSats != n.PriceSats {
+		fields = append(fields, "price_sats")
+	}
+	if !priceRulesEqual(base.Prices, n.Prices) {
+		fields = append(fields, "prices")
+	}
+	if !stringSliceEqual(base.Protect, n.Protect) {
+		fields = append(fields, "protect")
+	}
+	if base.PowSecondsPerSat != n.PowSecondsPerSat {
+		fields = append(fields, "pow_seconds_per_sat")
+	}
+	if base.ChallengesPerMinute != n.ChallengesPerMinute {
+		fields = append(fields, "challenges_per_minute")
+	}
+	if !policiesEqual(base.BotPolicies, n.BotPolicies) {
+		fields = append(fields, "bot_policies")
+	}
+	if base.Paused != n.Paused {
+		fields = append(fields, "paused")
+	}
+	return fields
+}
+
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func priceRulesEqual(a, b []gate.PriceRule) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Pattern != b[i].Pattern || a[i].PriceSats != b[i].PriceSats {
+			return false
+		}
+	}
+	return true
+}
+
+func policiesEqual(a, b map[string]gate.Policy) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		w, ok := b[k]
+		if !ok || v != w {
+			return false
+		}
+	}
+	return true
 }
 
 // WriteOverrides writes the dashboard-editable fields of c to path

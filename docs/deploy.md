@@ -101,25 +101,23 @@ keep the origin's cache headers.
 
 - Mount a JSON file at `/etc/spikes402/config.json` (the image default).
   The process runs as uid 65532; the file must be readable by that user.
-  Dashboard changes are saved next to it as `config.overrides.json` (mode
-  `0600`); `config.json` is never rewritten. The example Compose file mounts
-  a single file read-only, so those overrides would be lost when the
-  container is recreated. For a durable dashboard, bind-mount a writable
-  directory (for example `./config:/etc/spikes402`) that contains
-  `config.json` and is writable by uid 65532, so the sidecar can be written
-  and kept.
-- Spent tokens and withdrawal intents are written under `state_dir`
-  (in the example, `/var/lib/spikes402`). The directory is mode 0700,
-  the files 0600, and each record is HMAC-sealed with `secret_key`
-  (no secrets are stored in the files). The example Compose file mounts
-  a named volume `spikes402-state` there; it must stay writable by
-  uid 65532. If you bind-mount a host directory instead, create it
-  first and `chown 65532:65532` it. A missing or unreadable `state_dir`
-  prevents the process from starting. A tampered or unreadable spent
-  store also refuses to start (so a restart cannot “forget” spent
-  tokens). An unreadable withdrawal intent starts the process but
-  blocks withdrawals until you check the node and resolve the intent
-  in the dashboard.
+  `config.json` is never rewritten. Dashboard changes are saved under
+  `state_dir` as `config.overrides.json` (mode `0600`).
+- Spent tokens, withdrawal intents, and dashboard overrides are written
+  under `state_dir` (in the example, `/var/lib/spikes402`). The directory
+  is mode 0700, the files 0600, and spent/intent records are HMAC-sealed
+  with `secret_key` (no secrets are stored in the files). The example
+  Compose file mounts a named volume `spikes402-state` there; it must
+  stay writable by uid 65532, including for the overrides file. If you
+  bind-mount a host directory instead, create it first and
+  `chown 65532:65532` it. A missing or unreadable `state_dir` prevents
+  the process from starting. A tampered or unreadable spent store also
+  refuses to start (so a restart cannot “forget” spent tokens). An
+  unreadable withdrawal intent starts the process but blocks withdrawals
+  until you check the node and resolve the intent in the dashboard. A
+  leftover `config.overrides.json` next to `config.json` is still read
+  if the `state_dir` copy does not exist yet; the next dashboard save
+  writes to the volume.
 - Set secrets with environment variables, not in the file:
   `SPIKES402_SECRET_KEY`, `SPIKES402_ADMIN_KEY`, `PHOENIXD_PASSWORD`.
 - Leave `withdraw.enabled` false unless you are actively withdrawing.
@@ -148,7 +146,7 @@ it the funds are gone.
   to offline storage you control. Restrict permissions (mode 600).
 - Test that you can restore the volume before you put real money on the
   node.
-- The `spikes402-state` volume holds spent tokens and withdrawal intents.
+- The `spikes402-state` volume holds spent tokens, withdrawal intents, and dashboard overrides.
   It is not a secret, but losing it lets old tokens be spent again until
   they expire, and an interrupted withdrawal may need a manual resolve.
   Changing `secret_key` makes existing state unreadable (the process

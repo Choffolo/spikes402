@@ -24,6 +24,10 @@ import (
 const (
 	maxPriceSats  = 1_000_000
 	maxPriceRules = 100
+
+	// MinPowSecondsPerSat is the lowest pow_seconds_per_sat accepted
+	// without unsafe_allow_dangerous_config.
+	MinPowSecondsPerSat = 1.0
 )
 
 // checkPathPattern is the syntax rule shared by "protect" and "prices".
@@ -152,14 +156,10 @@ func Load(file string) (*Config, error) {
 	if err := c.complete(); err != nil {
 		return nil, fmt.Errorf("%s: %w", file, err)
 	}
-	cfg, err := applyOverridesFile(&c, OverridesPath(file))
-	if err != nil {
-		return nil, err
-	}
-	if err := cfg.resolveStateDir(file); err != nil {
+	if err := c.resolveStateDir(file); err != nil {
 		return nil, fmt.Errorf("%s: %w", file, err)
 	}
-	return cfg, nil
+	return applyOverridesFile(&c, file)
 }
 
 func (c *Config) resolveStateDir(configFile string) error {
@@ -176,6 +176,14 @@ func (c *Config) resolveStateDir(configFile string) error {
 		c.StateDir = filepath.Join(base, c.StateDir)
 	}
 	return nil
+}
+
+// OverridesFile is where dashboard settings are saved: state_dir/config.overrides.json.
+func (c *Config) OverridesFile() string {
+	if c == nil || c.StateDir == "" {
+		return ""
+	}
+	return filepath.Join(c.StateDir, "config.overrides.json")
 }
 
 func (c *Config) complete() error {
@@ -256,6 +264,9 @@ func (c *Config) complete() error {
 	}
 	if c.PowSecondsPerSat < 0 {
 		return errors.New(`"pow_seconds_per_sat" must be positive`)
+	}
+	if c.PowSecondsPerSat < MinPowSecondsPerSat && !c.UnsafeAllowDangerousConfig {
+		return fmt.Errorf(`"pow_seconds_per_sat" must be at least %g (one CPU-core second per sat) so proof-of-work cannot be switched off; set "unsafe_allow_dangerous_config": true if you really mean a lower value`, MinPowSecondsPerSat)
 	}
 	if c.PowAlgorithm == "" {
 		c.PowAlgorithm = pow.SHA256d
