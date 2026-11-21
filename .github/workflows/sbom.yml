@@ -13,8 +13,6 @@ permissions:
 jobs:
   sbom:
     runs-on: ubuntu-latest
-    permissions:
-      contents: ${{ github.event_name == 'release' && 'write' || 'read' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
@@ -31,13 +29,26 @@ jobs:
             sbom/spikes402-image.cdx.json
             vex/spikes402.openvex.json
           if-no-files-found: error
+
+  # There is no separate release workflow; attach the artifact when a GitHub
+  # Release is published.
+  attach-release:
+    if: github.event_name == 'release'
+    needs: sbom
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: spikes402-sbom
+          path: dist
       - name: Attach SBOM to the GitHub Release
-        if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "${{ github.event.release.tag_name }}" \
-            sbom/spikes402-source.cdx.json \
-            sbom/spikes402-image.cdx.json \
-            vex/spikes402.openvex.json \
+            dist/spikes402-source.cdx.json \
+            dist/spikes402-image.cdx.json \
+            dist/spikes402.openvex.json \
             --clobber
