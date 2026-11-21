@@ -60,6 +60,12 @@
     <p class="note">Changes apply immediately and last until restart. Edit the config file to keep them.</p>
     <form id="set-form">
       <label>Price (sats) <input id="f-price" type="number" min="1" max="1000000"></label>
+      <p class="note">Per-path prices: first matching rule wins, so list more specific patterns first. Unmatched protected paths use the price above.</p>
+      <table id="price-rules">
+        <thead><tr><th>Pattern</th><th>Sats</th><th></th></tr></thead>
+        <tbody id="f-prices"></tbody>
+      </table>
+      <p><button type="button" id="f-price-add">Add a rule</button></p>
       <label>Proof-of-work seconds per sat <input id="f-sps" type="number" min="0.001" max="3600" step="any"></label>
       <label>402 answers per visitor per minute <input id="f-cpm" type="number" min="1" max="100000"></label>
       <label>Bot policies (JSON, <code>{}</code> = everyone pays the same)

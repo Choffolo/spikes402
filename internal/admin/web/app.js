@@ -162,6 +162,7 @@ async function refresh() {
 function renderCurrent(st) {
   const s = st.settings, n = st.gate.node, p = s.current_pow;
   const list = [["Origin", s.origin], ["Protected", s.protect.join(" ")], ["Price", s.price_sats + " sats"],
+    ["Path prices", (s.prices || []).map((r) => r.pattern + " = " + r.price_sats + " sats").join(", ") || "none (default only)"],
     ["Proof-of-work", `${p.Algorithm} difficulty ${p.Difficulty}` + (p.MemoryMiB ? `, ${p.MemoryMiB} MiB` : "")],
     ["Invoices / min (all)", s.max_invoices_per_minute], ["Bot identification", s.identify_bots ? "on" : "off"],
     ["Visitor IPs in monitor", s.visitor_ips], ["AI may apply changes", s.ai_can_apply ? "yes" : "no (propose only)"],
@@ -179,14 +180,51 @@ async function loadSettings() {
 }
 function fillSettings(s) {
   $("f-price").value = s.price_sats; $("f-sps").value = s.pow_seconds_per_sat; $("f-cpm").value = s.challenges_per_minute;
-  $("f-pol").value = JSON.stringify(s.bot_policies, null, 2); state.current = s;
+  $("f-pol").value = JSON.stringify(s.bot_policies, null, 2);
+  fillPrices(s.prices);
+  state.current = s;
 }
+
+function fillPrices(list) {
+  $("f-prices").replaceChildren();
+  (list || []).forEach((r) => $("f-prices").append(priceRow(r.pattern, r.price_sats)));
+}
+function priceRow(pattern, sats) {
+  const tr = el("tr");
+  const pat = document.createElement("input");
+  pat.className = "pat"; pat.placeholder = "/premium/**"; pat.value = pattern || "";
+  const price = document.createElement("input");
+  price.className = "sats"; price.type = "number"; price.min = "1"; price.max = "1000000";
+  price.value = sats || 1;
+  const actions = el("td", null, "actions");
+  const up = el("button", "↑"); up.type = "button"; up.title = "Move up";
+  const down = el("button", "↓"); down.type = "button"; down.title = "Move down";
+  const del = el("button", "Remove"); del.type = "button";
+  up.addEventListener("click", () => { const prev = tr.previousElementSibling; if (prev) tr.parentNode.insertBefore(tr, prev); });
+  down.addEventListener("click", () => { const next = tr.nextElementSibling; if (next) tr.parentNode.insertBefore(next, tr); });
+  del.addEventListener("click", () => tr.remove());
+  actions.append(up, " ", down, " ", del);
+  const tdPat = el("td"); tdPat.append(pat);
+  const tdSats = el("td"); tdSats.append(price);
+  tr.append(tdPat, tdSats, actions);
+  return tr;
+}
+function readPrices() {
+  return [...$("f-prices").rows].map((tr) => ({
+    pattern: tr.querySelector(".pat").value.trim(),
+    price_sats: +tr.querySelector(".sats").value,
+  }));
+}
+
+$("f-price-add").addEventListener("click", () => $("f-prices").append(priceRow("", 1)));
 
 $("set-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const cur = state.current, ch = {};
   try {
     if (+$("f-price").value !== cur.price_sats) ch.price_sats = +$("f-price").value;
+    const prices = readPrices();
+    if (JSON.stringify(prices) !== JSON.stringify(cur.prices || [])) ch.prices = prices;
     if (+$("f-sps").value !== cur.pow_seconds_per_sat) ch.pow_seconds_per_sat = +$("f-sps").value;
     if (+$("f-cpm").value !== cur.challenges_per_minute) ch.challenges_per_minute = +$("f-cpm").value;
     const pol = JSON.parse($("f-pol").value || "{}");

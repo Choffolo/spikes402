@@ -411,9 +411,10 @@ Lightning light (green = fine, red = a problem; hover it for details).
 Everything else sits behind the discreet **Settings** link:
 
 - the few **safe settings** that can change while running: `price_sats`,
-  `pow_seconds_per_sat`, `challenges_per_minute` and `bot_policies`. They are
-  validated like the config file, apply immediately and **last until
-  restart**; edit the file to keep them. Everything else (addresses,
+  `prices` (per-path rules; first match wins), `pow_seconds_per_sat`,
+  `challenges_per_minute` and `bot_policies`. They are validated like the
+  config file, apply immediately and **last until restart**; edit the file
+  to keep them. Everything else (addresses,
   secrets, the Lightning backend, withdrawal destination) is config-file only.
   A collapsed list shows all current settings (no secrets) and node details;
 - **AI proposals**: changes suggested by the AI admin, to approve or reject;

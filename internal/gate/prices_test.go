@@ -139,6 +139,29 @@ func TestSectionPoWTracksPrice(t *testing.T) {
 	}
 }
 
+func TestUpdateSettingsChangesPathPrices(t *testing.T) {
+	f := sectionFixture(t)
+	if b := f.challenge(t, "/premium/a"); b.PriceSats != 20 {
+		t.Fatalf("before: %d", b.PriceSats)
+	}
+	auth := f.pay(t, f.challenge(t, "/articles/hello"))
+	s := f.gate.Settings()
+	s.Prices = []PriceRule{{Pattern: "/articles/**", PriceSats: 50}}
+	if err := f.gate.UpdateSettings(s); err != nil {
+		t.Fatal(err)
+	}
+	if b := f.challenge(t, "/articles/new"); b.PriceSats != 50 {
+		t.Fatalf("live article price %d, want 50", b.PriceSats)
+	}
+	if b := f.challenge(t, "/premium/a"); b.PriceSats != 10 {
+		t.Fatalf("removed rule should fall back to default: %d", b.PriceSats)
+	}
+	rec := f.get("/articles/hello", auth, "")
+	if rec.Code != http.StatusPaymentRequired || !strings.Contains(rec.Body.String(), errWrongPrice.Error()) {
+		t.Fatalf("old cheap token after rise: %d %q", rec.Code, rec.Body.String())
+	}
+}
+
 func mustDecodeClaims(t *testing.T, token string) claims {
 	t.Helper()
 	body, _, ok := strings.Cut(token, ".")

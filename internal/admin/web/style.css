@@ -43,3 +43,10 @@ label { display:block; color:var(--dim); }
 #feed td { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:16rem; }
 @media (max-width: 640px) { .stats { grid-template-columns:repeat(2, 1fr); } }
 @media (prefers-reduced-motion: reduce) { .wall { animation:none; } }
+
+#price-rules { margin:.2rem 0 .4rem; }
+#price-rules th { text-align:left; font-weight:normal; color:var(--dim); font-size:12px; padding:.2rem .4rem; }
+#price-rules input { margin:0; }
+#price-rules input.sats { width:6.5rem; }
+#price-rules .actions { white-space:nowrap; width:1%; }
+#price-rules .actions button { padding:.2rem .4rem; }

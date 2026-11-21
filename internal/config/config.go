@@ -509,6 +509,7 @@ func (c *Config) ChallengeTTL() time.Duration {
 // stay as they are. Changes last until restart: edit the file to keep them.
 type Changes struct {
 	PriceSats           *int64                  `json:"price_sats,omitempty"`
+	Prices              *[]gate.PriceRule       `json:"prices,omitempty"`
 	PowSecondsPerSat    *float64                `json:"pow_seconds_per_sat,omitempty"`
 	ChallengesPerMinute *int                    `json:"challenges_per_minute,omitempty"`
 	BotPolicies         *map[string]gate.Policy `json:"bot_policies,omitempty"`
@@ -516,7 +517,7 @@ type Changes struct {
 
 // Empty reports whether ch changes nothing.
 func (ch Changes) Empty() bool {
-	return ch.PriceSats == nil && ch.PowSecondsPerSat == nil && ch.ChallengesPerMinute == nil && ch.BotPolicies == nil
+	return ch.PriceSats == nil && ch.Prices == nil && ch.PowSecondsPerSat == nil && ch.ChallengesPerMinute == nil && ch.BotPolicies == nil
 }
 
 // Apply returns a validated copy of c with the changes; c is untouched.
@@ -526,8 +527,12 @@ func (c *Config) Apply(ch Changes) (*Config, error) {
 	}
 	n := *c
 	n.BotPolicies = maps.Clone(c.BotPolicies)
+	n.Prices = append([]gate.PriceRule(nil), c.Prices...)
 	if ch.PriceSats != nil {
 		n.PriceSats = *ch.PriceSats
+	}
+	if ch.Prices != nil {
+		n.Prices = append([]gate.PriceRule(nil), (*ch.Prices)...)
 	}
 	if ch.PowSecondsPerSat != nil {
 		if v := *ch.PowSecondsPerSat; !(v > 0 && v <= 3600) || math.IsNaN(v) {
@@ -561,7 +566,7 @@ type Public struct {
 	Origin               string                 `json:"origin"`
 	Protect              []string               `json:"protect"`
 	PriceSats            int64                  `json:"price_sats"`
-	Prices               []gate.PriceRule       `json:"prices,omitempty"`
+	Prices               []gate.PriceRule       `json:"prices"`
 	PowAlgorithm         string                 `json:"pow_algorithm"`
 	PowSecondsPerSat     float64                `json:"pow_seconds_per_sat"`
 	PowDifficulty        int                    `json:"pow_difficulty"`
@@ -590,10 +595,13 @@ func (c *Config) Public() Public {
 		MaxInvoicesPerMinute: c.MaxInvoicesPerMinute, MaxPendingInvoices: c.MaxPendingInvoices,
 		IdentifyBots: c.IdentifyBotsOn(), BotPolicies: c.BotPolicies, LightningBackend: c.Lightning.Backend,
 		AICanApply: c.Admin.AICanApply, VisitorIPs: c.Admin.VisitorIPs, WithdrawEnabled: c.Withdraw.Enabled,
-		Editable: []string{"price_sats", "pow_seconds_per_sat", "challenges_per_minute", "bot_policies"},
+		Editable: []string{"price_sats", "prices", "pow_seconds_per_sat", "challenges_per_minute", "bot_policies"},
 	}
 	if p.BotPolicies == nil {
 		p.BotPolicies = map[string]gate.Policy{}
+	}
+	if p.Prices == nil {
+		p.Prices = []gate.PriceRule{}
 	}
 	if c.Withdraw.Enabled {
 		p.WithdrawDestination = c.Withdraw.Destination
@@ -603,5 +611,5 @@ func (c *Config) Public() Public {
 
 // GateSettings converts the live-editable part of c for the gate.
 func (c *Config) GateSettings() gate.Settings {
-	return gate.Settings{PriceSats: c.PriceSats, PoW: c.PoW, Policies: c.BotPolicies, ChallengesPerMinute: c.ChallengesPerMinute}
+	return gate.Settings{PriceSats: c.PriceSats, Prices: append([]gate.PriceRule(nil), c.Prices...), PoW: c.PoW, Policies: c.BotPolicies, ChallengesPerMinute: c.ChallengesPerMinute}
 }

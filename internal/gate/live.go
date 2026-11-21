@@ -14,6 +14,7 @@ import (
 // Changes are swapped in atomically and apply to new 402 offers.
 type Settings struct {
 	PriceSats           int64
+	Prices              []PriceRule // first match wins; empty means use PriceSats only
 	PoW                 func(priceSats int64) pow.Params
 	Policies            map[string]Policy
 	ChallengesPerMinute int
@@ -34,6 +35,7 @@ func (g *Gate) UpdateSettings(s Settings) error {
 		}
 	}
 	g.limiter.setPerMinute(s.ChallengesPerMinute)
+	s.Prices = append([]PriceRule(nil), s.Prices...)
 	g.live.Store(&s)
 	return nil
 }
