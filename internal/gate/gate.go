@@ -127,8 +127,9 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad path: "+why, http.StatusBadRequest)
 		return
 	}
-	session := g.session(r) // our cookie: not the origin's business
-	set := g.live.Load()    // one consistent snapshot for this request
+	passes := takePassCookies(r) // read before session() removes them
+	session := g.session(r)      // our cookies: not the origin's business
+	set := g.live.Load()         // one consistent snapshot for this request
 	if !g.protected(r.URL.Path, set) {
 		g.opt.Next.ServeHTTP(w, r)
 		return
@@ -154,6 +155,11 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.opt.Next.ServeHTTP(w, r)
 		return
 	}
+	// A pass (see pass.go) is a payment already made for this very page.
+	if resHash := hashResource(resource(r)); r.Header.Get("Authorization") == "" && g.validPass(passes[passName(resHash)], resHash) {
+		g.opt.Next.ServeHTTP(w, r)
+		return
+	}
 	price := pol.price(g.pathPrice(r.URL.Path, set))
 	if session == "" {
 		session = newSession(w, g.scheme(r) == "https")
@@ -165,13 +171,20 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		id, err := g.redeem(r, auth, price)
 		if err == nil {
 			outcome := OutcomePaid
-			if scheme, _, _ := strings.Cut(auth, " "); strings.EqualFold(scheme, "PoW") {
+			scheme, _, _ := strings.Cut(auth, " ")
+			if strings.EqualFold(scheme, "PoW") {
 				outcome = OutcomePoW
 			}
 			g.observe(r, class, outcome)
 			g.pending.drop(id)
 			r.Header.Del("Authorization") // our credential, not the origin's business
-			g.opt.Next.ServeHTTP(w, r)
+			redeem := r.Header.Get(RedeemHeader)
+			r.Header.Del(RedeemHeader)
+			if redeem == redeemCookie && r.Method == http.MethodGet {
+				g.issuePass(w, r, id) // the page navigates next; the origin is not called yet
+				return
+			}
+			g.deliver(w, r, id, scheme)
 			return
 		}
 		var busy *busyError
@@ -189,6 +202,39 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	g.challenge(w, r, set, class, problem, key, price, pol.Action == ActionPoWOnly)
 }
+
+// deliver sends a redeemed request to the origin. If the origin cannot answer
+// (a transport error or a 5xx status, so nothing was delivered) a GET or HEAD
+// gives the token back for a few more tries (see spentSet.release): a payer
+// should not lose a payment to a hiccup of the site. Other methods may have
+// changed something at the origin, so they never get a second try.
+func (g *Gate) deliver(w http.ResponseWriter, r *http.Request, id, scheme string) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		g.opt.Next.ServeHTTP(w, r)
+		return
+	}
+	rec := &statusRecorder{ResponseWriter: w}
+	g.opt.Next.ServeHTTP(rec, r)
+	if rec.status >= 500 {
+		g.spent.release(spentKey(scheme, id), g.now())
+	}
+}
+
+// statusRecorder remembers the status code the origin answered with.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if s.status == 0 && code >= 200 { // ignore 1xx
+		s.status = code
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+// Unwrap lets http.ResponseController reach the real writer (flushing).
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
 // classify identifies the client and logs anything noteworthy.
 func (g *Gate) classify(r *http.Request) botid.Class {
@@ -324,8 +370,8 @@ func (g *Gate) check(r *http.Request, auth string, price int64) (claims, error) 
 	if c.Resource != hashResource(resource(r)) {
 		return claims{}, errWrongTarget
 	}
-	if c.PriceSats < price {
-		return claims{}, errWrongPrice
+	if c.Kind != "" { // a pass is not a token
+		return claims{}, errBadToken
 	}
 
 	switch strings.ToUpper(scheme) {
@@ -340,6 +386,11 @@ func (g *Gate) check(r *http.Request, auth string, price int64) (claims, error) 
 			return claims{}, errBadProof
 		}
 	case "POW":
+		// The work was priced when the token was issued; it must still cover
+		// today's price. (A token without a price, from an older version, never does.)
+		if c.PriceSats < price {
+			return claims{}, errWrongPrice
+		}
 		nonce, err := strconv.ParseUint(proof, 10, 64)
 		p := c.powParams()
 		if err != nil || p.Validate() != nil {

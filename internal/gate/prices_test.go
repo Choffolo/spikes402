@@ -101,17 +101,47 @@ func TestCheapTokenCannotUnlockExpensivePath(t *testing.T) {
 	}
 }
 
-func TestDefaultPriceRiseRejectsOldToken(t *testing.T) {
+// A price rise must not void what people already hold: a paid invoice is
+// honoured at the price it was issued for, a proof of work is not (its
+// difficulty was set for the old price).
+func TestPriceRiseHonoursPaidInvoiceButNotOldPoW(t *testing.T) {
 	f := newFixture(t)
-	auth := f.pay(t, f.challenge(t, "/premium/a"))
+	paid := f.pay(t, f.challenge(t, "/premium/a"))
+	work := solve(t, f.challenge(t, "/premium/b"))
 	s := f.gate.Settings()
 	s.PriceSats = 50
 	if err := f.gate.UpdateSettings(s); err != nil {
 		t.Fatal(err)
 	}
-	rec := f.get("/premium/a", auth, "")
+	if rec := f.get("/premium/a", paid, ""); rec.Code != http.StatusOK {
+		t.Fatalf("paid invoice after price rise: got %d %q", rec.Code, rec.Body.String())
+	}
+	rec := f.get("/premium/b", work, "")
 	if rec.Code != http.StatusPaymentRequired || !strings.Contains(rec.Body.String(), errWrongPrice.Error()) {
-		t.Fatalf("after price rise: got %d %q", rec.Code, rec.Body.String())
+		t.Fatalf("old proof of work after price rise: got %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+// Tokens from before the price was signed into them (claim missing, read as 0):
+// a payment is honoured (the invoice was paid), work is not (price unknown).
+func TestLegacyTokenWithoutPrice(t *testing.T) {
+	f := newFixture(t)
+	legacy := func(path string) challengeBody {
+		b := f.challenge(t, path)
+		c := mustDecodeClaims(t, b.L402.Token)
+		c.PriceSats = 0
+		tok, err := f.gate.sign.sign(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.L402.Token, b.PoW.Challenge = tok, tok
+		return b
+	}
+	if rec := f.get("/premium/a", f.pay(t, legacy("/premium/a")), ""); rec.Code != http.StatusOK {
+		t.Fatalf("legacy paid token: got %d", rec.Code)
+	}
+	if rec := f.get("/premium/b", solve(t, legacy("/premium/b")), ""); rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("legacy PoW token: got %d", rec.Code)
 	}
 }
 
@@ -156,9 +186,8 @@ func TestUpdateSettingsChangesPathPrices(t *testing.T) {
 	if b := f.challenge(t, "/premium/a"); b.PriceSats != 10 {
 		t.Fatalf("removed rule should fall back to default: %d", b.PriceSats)
 	}
-	rec := f.get("/articles/hello", auth, "")
-	if rec.Code != http.StatusPaymentRequired || !strings.Contains(rec.Body.String(), errWrongPrice.Error()) {
-		t.Fatalf("old cheap token after rise: %d %q", rec.Code, rec.Body.String())
+	if rec := f.get("/articles/hello", auth, ""); rec.Code != http.StatusOK {
+		t.Fatalf("paid cheap token after rise is still honoured: %d %q", rec.Code, rec.Body.String())
 	}
 }
 
@@ -236,6 +265,7 @@ func TestOldTokenStillBoundAfterProtectChange(t *testing.T) {
 	if rec := f.get("/articles/hello", auth, ""); rec.Code != http.StatusOK {
 		t.Fatalf("paid token: %d", rec.Code)
 	}
+	unused := f.pay(t, f.challenge(t, "/articles/hello"))
 
 	s := f.gate.Settings()
 	s.Protect = []string{"/articles/**", "/premium/**", "/new/**"}
@@ -246,11 +276,13 @@ func TestOldTokenStillBoundAfterProtectChange(t *testing.T) {
 	if err := f.gate.UpdateSettings(s); err != nil {
 		t.Fatal(err)
 	}
-	rec := f.get("/articles/hello", auth, "")
-	if rec.Code != http.StatusPaymentRequired || !strings.Contains(rec.Body.String(), errWrongPrice.Error()) {
-		t.Fatalf("token issued at 5 sats after price rose: %d %q", rec.Code, rec.Body.String())
-	}
-	if rec := f.get("/premium/secret", auth, ""); rec.Code != http.StatusPaymentRequired {
+	if rec := f.get("/premium/secret", unused, ""); rec.Code != http.StatusPaymentRequired {
 		t.Fatalf("cross-path after protect change: %d", rec.Code)
+	}
+	if rec := f.get("/articles/hello", unused, ""); rec.Code != http.StatusOK {
+		t.Fatalf("paid token issued at 5 sats, price now 50: %d %q", rec.Code, rec.Body.String())
+	}
+	if rec := f.get("/articles/hello", auth, ""); rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("a spent token must stay spent: %d", rec.Code)
 	}
 }

@@ -25,9 +25,9 @@ var page = template.Must(template.New("402").Parse(`<!doctype html>
  code{word-break:break-all;background:#f3f3f3;padding:.2rem .3rem;border-radius:4px;font-size:.85rem}
  img{display:block;margin:1rem 0;image-rendering:pixelated}
  small{color:#666}
- #webln{margin:1.2rem 0}
- #webln button{font:inherit;padding:.4rem .8rem}
- #webln .err{color:#a00}
+ #wallet-box{margin:1.2rem 0}
+ #wallet-box button{font:inherit;padding:.4rem .8rem}
+ #wallet-box .err{color:#a00}
 </style>
 </head>
 <body>
@@ -37,7 +37,7 @@ var page = template.Must(template.New("402").Parse(`<!doctype html>
 <p>Pay this Lightning invoice:</p>
 <a href="lightning:{{.Invoice}}"><img src="{{$.QR}}" alt="QR code of the Lightning invoice" width="256" height="256"></a>
 <p><code>{{.Invoice}}</code></p>
-<p id="webln" hidden>
+<p id="wallet-box" hidden>
   <button type="button" id="webln-pay" data-invoice="{{.Invoice}}" data-token="{{.Token}}">Pay with one click</button>
   <small id="webln-msg"></small>
 </p>
@@ -58,10 +58,10 @@ This offer expires at {{.ExpiresAt.Format "15:04 MST"}}.</small></p>
 // browser sees. Invoice and token are read from the button, not
 // interpolated here.
 const weblnJS = `(function(){
-var w=window.webln,box=document.getElementById("webln");
-if(!w||!box)return;
+var w=window.webln,box=document.getElementById("wallet-box");
+if(!box||!w||typeof w.enable!=="function"||typeof w.sendPayment!=="function")return;
 box.hidden=false;
-var btn=document.getElementById("webln-pay"),msg=document.getElementById("webln-msg"),busy=false;
+var btn=document.getElementById("webln-pay"),msg=document.getElementById("webln-msg"),busy=false,KEY="spikes402-redeemed";
 function say(t,err){msg.textContent=t||"";msg.className=err?"err":""}
 function fail(e){
   busy=false;btn.disabled=false;
@@ -71,19 +71,20 @@ function fail(e){
 function pay(){
   if(busy)return;
   busy=true;btn.disabled=true;say("Requesting payment…");
-  Promise.resolve(w.enable()).then(function(){return w.sendPayment(btn.getAttribute("data-invoice"))}).then(function(res){
+  Promise.resolve().then(function(){return w.enable()}).then(function(){return w.sendPayment(btn.getAttribute("data-invoice"))}).then(function(res){
     var preimage=((res&&(res.preimage||res.paymentPreimage))||"").toString().replace(/^0x/i,"").replace(/\s/g,"");
     if(!preimage)throw new Error("The wallet did not return a preimage.");
-    return fetch(location.href,{headers:{Authorization:"L402 "+btn.getAttribute("data-token")+":"+preimage},credentials:"same-origin"}).then(function(r){
-      if(!r.ok)throw new Error("Payment was sent, but the page did not accept it ("+r.status+").");
-      return r.text();
+    return fetch(location.href,{headers:{Authorization:"L402 "+btn.getAttribute("data-token")+":"+preimage,"Spikes402-Redeem":"cookie"},credentials:"same-origin",cache:"no-store"}).then(function(r){
+      if(r.status!==204)throw new Error("Payment was sent, but the page did not accept it ("+r.status+").");
+      try{sessionStorage.setItem(KEY,Date.now())}catch(e){}
+      location.replace(location.href);
     });
-  }).then(function(html){
-    document.open();document.write(html);document.close();
   }).catch(fail);
 }
 btn.addEventListener("click",pay);
-pay();
+var last=0;try{last=+sessionStorage.getItem(KEY)||0}catch(e){}
+if(Date.now()-last<50000){say("Payment was sent, but the browser did not keep the access cookie. Allow cookies for this site and try again in a minute.",true)}
+else pay();
 })();`
 
 var weblnHash = base64.StdEncoding.EncodeToString(sha256Sum([]byte(weblnJS)))
