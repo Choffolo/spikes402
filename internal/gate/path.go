@@ -90,3 +90,19 @@ func hashResource(res string) string {
 	h := sha256.Sum256([]byte(res))
 	return hex.EncodeToString(h[:16])
 }
+
+// PriceFor is the price of path under the given rules (first match wins).
+// Letter case is ignored unless caseSensitive is set, like the gate itself.
+func PriceFor(path string, prices []PriceRule, def int64, caseSensitive bool) int64 {
+	key := matchKey(path, caseSensitive)
+	for _, r := range prices {
+		pat := r.Pattern
+		if !caseSensitive {
+			pat = strings.ToLower(pat)
+		}
+		if matchPattern(pat, key) {
+			return r.PriceSats
+		}
+	}
+	return def
+}

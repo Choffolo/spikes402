@@ -196,7 +196,7 @@ func TestSettingsRoles(t *testing.T) {
 	}
 
 	e = newEnv(t, `,"ai_can_apply":true`)
-	if rec, _ := e.call("PUT", "/api/settings", aiKey, map[string]any{"price_sats": 3}); rec.Code != 200 || e.gate.Settings().PriceSats != 3 {
+	if rec, _ := e.call("PUT", "/api/settings", aiKey, map[string]any{"price_sats": 25}); rec.Code != 200 || e.gate.Settings().PriceSats != 25 {
 		t.Fatalf("AI with ai_can_apply: %d", rec.Code)
 	}
 }
@@ -534,7 +534,11 @@ func TestPathPriceSettings(t *testing.T) {
 	}
 
 	e = newEnv(t, `,"ai_can_apply":true`)
-	if rec, _ := e.call("PUT", "/api/settings", aiKey, map[string]any{"prices": rules}); rec.Code != 200 || len(e.gate.Settings().Prices) != 2 {
+	strict := []any{
+		map[string]any{"pattern": "/premium/special/**", "price_sats": 30},
+		map[string]any{"pattern": "/premium/**", "price_sats": 20},
+	}
+	if rec, _ := e.call("PUT", "/api/settings", aiKey, map[string]any{"prices": strict}); rec.Code != 200 || len(e.gate.Settings().Prices) != 2 {
 		t.Fatalf("AI with ai_can_apply: %d", rec.Code)
 	}
 
@@ -650,7 +654,7 @@ func TestSettingsPersistInOverrides(t *testing.T) {
 	if !bytes.Equal(before, after) {
 		t.Fatal("config.json was rewritten")
 	}
-	over := config.OverridesPath(e.file)
+	over := e.srv.cfg.OverridesFile()
 	st, err := os.Stat(over)
 	if err != nil {
 		t.Fatal(err)
@@ -664,5 +668,48 @@ func TestSettingsPersistInOverrides(t *testing.T) {
 	}
 	if loaded.PriceSats != 42 || !loaded.Paused || len(loaded.Protect) != 1 || loaded.Protect[0] != "/only/**" || loaded.BotPolicies["unknown"].Action != gate.ActionFree {
 		t.Fatalf("reload: %+v policies=%v", loaded, loaded.BotPolicies)
+	}
+}
+
+func TestSettingsNotPublishedIfSaveFails(t *testing.T) {
+	e := newEnv(t, "")
+	// Point overrides at a path that cannot be created, so the write fails.
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.srv.cfg.StateDir = blocker
+	rec, out := e.call("PUT", "/api/settings", adminKey, map[string]any{"price_sats": 99})
+	if rec.Code != 500 {
+		t.Fatalf("want 500 on save failure, got %d %v", rec.Code, out)
+	}
+	if e.gate.Settings().PriceSats != 10 {
+		t.Fatalf("change was published although it was not saved: price=%d", e.gate.Settings().PriceSats)
+	}
+}
+
+func TestAICannotWeakenProtection(t *testing.T) {
+	e := newEnv(t, `,"ai_can_apply":true`)
+	// Lowering the price is weaker: must stay a proposal.
+	rec, out := e.call("PUT", "/api/settings", aiKey, map[string]any{"price_sats": 1})
+	if rec.Code != 403 || e.gate.Settings().PriceSats != 10 {
+		t.Fatalf("AI lowered the price: %d %v gate=%d", rec.Code, out, e.gate.Settings().PriceSats)
+	}
+	if rec, out = e.call("PUT", "/api/settings", aiKey, map[string]any{"protect": []string{"/elsewhere/**"}}); rec.Code != 403 {
+		t.Fatalf("AI rewrote protect: %d %v", rec.Code, out)
+	}
+	if rec, out = e.call("PUT", "/api/settings", aiKey, map[string]any{"bot_policies": map[string]any{"unknown": map[string]any{"action": "free"}}}); rec.Code != 403 {
+		t.Fatalf("AI set free: %d %v", rec.Code, out)
+	}
+	if rec, out = e.call("PUT", "/api/settings", aiKey, map[string]any{"pow_seconds_per_sat": 1}); rec.Code != 403 {
+		t.Fatalf("AI lowered PoW: %d %v", rec.Code, out)
+	}
+	// Raising the price is stricter: allowed.
+	if rec, out = e.call("PUT", "/api/settings", aiKey, map[string]any{"price_sats": 25}); rec.Code != 200 || e.gate.Settings().PriceSats != 25 {
+		t.Fatalf("AI should apply a stricter price: %d %v", rec.Code, out)
+	}
+	// The human admin can still weaken after a clear choice (API has no confirm).
+	if rec, _ = e.call("PUT", "/api/settings", adminKey, map[string]any{"price_sats": 5}); rec.Code != 200 || e.gate.Settings().PriceSats != 5 {
+		t.Fatalf("admin should still be able to lower the price: %d", rec.Code)
 	}
 }

@@ -46,7 +46,7 @@ async function login() {
     $("login").hidden = true; $("nav").hidden = false; $("node").hidden = false;
     $("withdraw").hidden = !me.withdraw_enabled;
     state.role = me.role;
-    if (me.role !== "admin") $("login-error").textContent = "This key has the AI role: read and propose only.";
+    if (me.role !== "admin") $("login-error").textContent = "This key has the AI role: it can suggest changes; it may apply only those that do not reduce protection.";
     route();
     state.timers.push(setInterval(pollSiege, 1000), setInterval(refresh, 5000));
     pollSiege(); refresh();
@@ -293,6 +293,32 @@ function readPrices() {
 $("f-price-add").addEventListener("click", () => $("f-prices").append(priceRow("", 1)));
 $("f-protect-add").addEventListener("click", () => $("f-protect").append(protectRow("")));
 
+function weakenReasons(cur, ch) {
+  const why = [];
+  if (ch.paused === true && !cur.paused) why.push("protected paths would be served free (pause)");
+  if (ch.paused === false && cur.paused) why.push("protection would start charging again (unpause)");
+  if (ch.price_sats != null && ch.price_sats < cur.price_sats) why.push("the default price would fall");
+  if (ch.pow_seconds_per_sat != null && ch.pow_seconds_per_sat < cur.pow_seconds_per_sat) why.push("proof-of-work would get easier");
+  if (ch.challenges_per_minute != null && ch.challenges_per_minute > cur.challenges_per_minute) why.push("the per-client rate limit would be raised");
+  if (ch.protect) {
+    const next = new Set(ch.protect);
+    for (const p of cur.protect || []) {
+      if (!next.has(p)) { why.push("a protect pattern would be removed or narrowed"); break; }
+    }
+  }
+  if (ch.prices) {
+    const oldMin = Math.min(cur.price_sats, ...(cur.prices || []).map((r) => r.price_sats));
+    const newMin = Math.min(ch.prices.length ? Infinity : cur.price_sats, ...ch.prices.map((r) => r.price_sats));
+    if (newMin < oldMin) why.push("a path price would fall");
+  }
+  if (ch.bot_policies) {
+    for (const [k, v] of Object.entries(ch.bot_policies)) {
+      if (v && v.action === "free") why.push("a bot policy would be set to free (" + k + ")");
+    }
+  }
+  return why;
+}
+
 $("set-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const cur = state.current, ch = {};
@@ -308,9 +334,28 @@ $("set-form").addEventListener("submit", async (e) => {
     const pol = readPolicies();
     if (JSON.stringify(pol) !== JSON.stringify(classPolicies(cur.bot_policies))) ch.bot_policies = pol;
     if (!Object.keys(ch).length) return msg("set-msg", "Nothing changed.");
+    const why = weakenReasons(cur, ch);
+    if (state.role !== "admin") {
+      if (why.length) {
+        await api("POST", "/api/proposals", { changes: ch, reason: "would reduce protection: " + why.join("; ") });
+        msg("set-msg", "Saved as a suggestion for the human admin (it would reduce protection).", "ok");
+        return loadProposals();
+      }
+    } else if (why.length && !confirm("This would reduce protection:\n\n- " + why.join("\n- ") + "\n\nApply it anyway?")) {
+      return;
+    }
     fillSettings(await api("PUT", "/api/settings", ch));
     msg("set-msg", "Applied and saved.", "ok");
-  } catch (err) { msg("set-msg", err.message, "err"); }
+  } catch (err) {
+    if (state.role !== "admin" && /propose it for the human admin/.test(err.message)) {
+      try {
+        await api("POST", "/api/proposals", { changes: ch, reason: "would reduce protection" });
+        msg("set-msg", "Saved as a suggestion for the human admin (it would reduce protection).", "ok");
+        return loadProposals();
+      } catch (e2) { msg("set-msg", e2.message, "err"); return; }
+    }
+    msg("set-msg", err.message, "err");
+  }
 });
 
 async function loadProposals() {
@@ -326,8 +371,14 @@ async function loadProposals() {
       for (const [act, label] of [["approve", "Approve"], ["reject", "Reject"]]) {
         const b = el("button", label);
         b.addEventListener("click", async () => {
-          try { await api("POST", `/api/proposals/${encodeURIComponent(p.id)}/${act}`); loadSettings(); loadProposals(); }
-          catch (err) { alert(err.message); }
+          try {
+            if (act === "approve") {
+              const why = weakenReasons(state.current || {}, p.changes || {});
+              if (why.length && !confirm("This proposal would reduce protection:\n\n- " + why.join("\n- ") + "\n\nApprove it anyway?")) return;
+            }
+            await api("POST", `/api/proposals/${encodeURIComponent(p.id)}/${act}`);
+            loadSettings(); loadProposals();
+          } catch (err) { alert(err.message); }
         });
         d.append(b, " ");
       }

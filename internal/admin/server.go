@@ -31,7 +31,8 @@ var webFiles embed.FS
 type Role string
 
 // Roles. The AI may read and propose changes; it may apply them only if
-// "admin.ai_can_apply" is set; it can never withdraw or approve proposals.
+// "admin.ai_can_apply" is set, and only when the change does not reduce
+// protection. It can never withdraw or approve proposals.
 const (
 	RoleAdmin Role = "admin"
 	RoleAI    Role = "ai"
@@ -323,7 +324,9 @@ func (s *Server) putSettings(_ http.ResponseWriter, r *http.Request, role Role) 
 	return s.apply(ch, role)
 }
 
-// apply validates and applies changes to the running gate.
+// apply validates the resulting config, writes the overrides file, then
+// publishes to the running gate. A change that fails validation or cannot
+// be saved is not published.
 func (s *Server) apply(ch config.Changes, by Role) (config.Public, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -335,20 +338,28 @@ func (s *Server) apply(ch config.Changes, by Role) (config.Public, error) {
 	if err != nil {
 		return config.Public{}, err
 	}
+	if by == RoleAI {
+		if why := config.WeakensProtection(s.cfg, n); len(why) > 0 {
+			return config.Public{}, fail(http.StatusForbidden, "this would reduce protection (%s); propose it for the human admin to approve", strings.Join(why, "; "))
+		}
+	}
+	path := s.cfg.OverridesFile()
+	if path == "" && s.configFile != "" {
+		path = config.OverridesPath(s.configFile)
+	}
+	if path == "" {
+		return config.Public{}, fail(http.StatusInternalServerError, "no state_dir to save overrides; not applying")
+	}
+	if err := config.WriteOverrides(path, n); err != nil {
+		log.Printf("admin: settings not saved to %s: %v (not applied)", path, err)
+		return config.Public{}, fail(http.StatusInternalServerError, "settings were not saved: %v", err)
+	}
 	if err := s.gate.UpdateSettings(n.GateSettings()); err != nil {
-		return config.Public{}, err
+		log.Printf("admin: settings saved to %s but not applied: %v", path, err)
+		return config.Public{}, fail(http.StatusInternalServerError, "settings were saved but could not be applied: %v", err)
 	}
 	s.cfg = n
 	b, _ := json.Marshal(ch)
-	if s.configFile == "" {
-		log.Printf("admin: settings changed by %s: %s (until restart; no config path to save overrides)", by, b)
-		return n.Public(), nil
-	}
-	path := config.OverridesPath(s.configFile)
-	if err := config.WriteOverrides(path, n); err != nil {
-		log.Printf("admin: settings changed by %s: %s (active until restart, but not saved to %s: %v)", by, b, path, err)
-		return n.Public(), fail(http.StatusInternalServerError, "settings are active until restart but were not saved: %v", err)
-	}
 	log.Printf("admin: settings changed by %s: %s (saved to %s)", by, b, path)
 	return n.Public(), nil
 }
