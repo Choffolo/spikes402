@@ -6,9 +6,58 @@ For flags and every config key, see the [README](../README.md).
 ## Docker and Compose
 
 The repository has a multi-stage `Dockerfile` (static binary, distroless
-non-root runtime, no shell) and an example `docker-compose.yml`: Spikes402
-plus the official [ACINQ phoenixd](https://hub.docker.com/r/acinq/phoenixd)
-image, pinned by digest.
+non-root runtime, no shell; linux/amd64 and linux/arm64) and an example
+`docker-compose.yml`: Spikes402 plus the official
+[ACINQ phoenixd](https://hub.docker.com/r/acinq/phoenixd) image, pinned by
+digest.
+
+Released images are published to the GitHub Container Registry as
+`ghcr.io/choffolo/spikes402`. Tags follow the git tag (`v0.1.0` and
+`0.1.0`); `latest` points at the newest stable release (not a pre-release
+such as `v0.1.0-rc.1`).
+
+```sh
+docker pull ghcr.io/choffolo/spikes402:v0.1.0   # or :latest
+```
+
+To run the published image instead of building locally, in
+`docker-compose.yml` set `image: ghcr.io/choffolo/spikes402:v0.1.0` on the
+`spikes402` service and remove the `build: .` line. Volumes, environment
+and ports stay the same.
+
+```sh
+docker run --rm -p 127.0.0.1:8402:8402 \
+  -v "$PWD/config.json:/etc/spikes402/config.json:ro" \
+  -v spikes402-state:/var/lib/spikes402 \
+  -e SPIKES402_SECRET_KEY -e PHOENIXD_PASSWORD \
+  ghcr.io/choffolo/spikes402:v0.1.0
+```
+
+The package may be private until it is set public once in the GitHub
+package settings (Packages → `spikes402` → Package settings → Change
+visibility → Public), or with:
+
+```sh
+gh api --method PUT /user/packages/container/spikes402/visibility -f visibility=public
+```
+
+That can only be done after the first image has been pushed (the package
+does not exist before then). The repository is public, so the package
+may already inherit public visibility; if a `docker pull` without a
+login works, there is nothing to change.
+
+### Verifying the image signature
+
+Each release image is signed keylessly with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+(Sigstore, GitHub Actions identity). The signature covers the multi-arch
+index. A provenance attestation and an image SBOM are also attached.
+
+```sh
+cosign verify ghcr.io/choffolo/spikes402:v0.1.0 \
+  --certificate-identity-regexp '^https://github.com/Choffolo/spikes402/.github/workflows/release.yml@refs/tags/v.+$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
 
 1. Copy the example config and edit the `origin` (the site you are
    protecting). Leave passwords out of the file; they come from the
@@ -168,16 +217,24 @@ docker compose cp phoenixd:/phoenix/.phoenix/seed.dat ./seed.dat.bak
 ## Upgrading
 
 1. Back up `seed.dat` and your `.env` / `config.json`.
-2. Pull the new Spikes402 source (or rebuild from the tag you want).
+2. Pull the new image tag (or rebuild from the git tag you want):
+
+   ```sh
+   # if compose uses the published image:
+   docker compose pull spikes402
+   docker compose up -d
+   # if you still build locally:
+   git fetch --tags && git checkout v0.1.0
+   docker compose up --build -d
+   ```
+
 3. Refresh image digests in the `Dockerfile` and `docker-compose.yml` if
-   you bump Go, the distroless runtime, or phoenixd.
-4. `docker compose up --build -d`.
-5. Check the logs: `docker compose logs -f spikes402`.
+   you bump Go, the distroless runtime, or phoenixd (only when building
+   locally).
+4. Check the logs: `docker compose logs -f spikes402`.
 
 phoenixd and Spikes402 can be upgraded independently. Read the phoenixd
 release notes before bumping that image; keep the volume.
-
-There is no image registry for Spikes402 yet. Build from this repository.
 
 ## Security checklist
 
