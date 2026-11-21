@@ -38,8 +38,26 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .row.end button { width: auto; flex: 0; }
 .muted, .hint { color: var(--muted); font-size: 12px; }
 .hint { margin: 0 0 8px; }
-.msg { padding: 8px; border-radius: 6px; margin: 0 0 8px; background: #ecfdf3; }
-.msg.err { background: #fef3c7; }
+/* Notices: solid colour + bold text, WCAG AA (success/info/error all ≥ 7:1). */
+.msg {
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin: 0 0 8px;
+  font-weight: 700;
+  background: #115e59;
+  color: #fff;
+  border: 1px solid #0f766e;
+}
+.msg.info {
+  background: #0c4a6e;
+  border-color: #0369a1;
+  color: #fff;
+}
+.msg.err, .msg.warn {
+  background: #9a3412;
+  border-color: #7c2d12;
+  color: #fff;
+}
 .balance { font-size: 16px; margin: 4px 0 8px; }
 .mono { font-family: ui-monospace, monospace; font-size: 11px; word-break: break-all; }
 .wrap { max-height: 6em; overflow: auto; }
@@ -68,3 +86,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .pending-actions button {
   width: 100%;
 }
+
+/* Nothing may push the popup sideways: long words and numbers wrap or are cut with an ellipsis. */
+html, body { overflow-x: hidden; }
+body, p, li, label, h2, .msg, .pending, .mono { overflow-wrap: anywhere; }
+textarea { resize: vertical; }
+button.spaced { margin-top: 12px; }
+.history li { padding: 6px 0; }
+.h-top { display: flex; justify-content: space-between; gap: 8px; min-width: 0; }
+.h-site { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.h-time { color: var(--muted); flex: none; }
+.h-nums { display: flex; flex-wrap: wrap; gap: 2px 12px; color: var(--muted); margin-top: 2px; }

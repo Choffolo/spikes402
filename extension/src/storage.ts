@@ -3,7 +3,7 @@ import { defaultSettings, type PaymentRecord, type PendingPayment, type Settings
 import type { EncryptedVault } from "./crypto";
 
 const KEY = "spikes402";
-const HISTORY_MAX = 50;
+const HISTORY_MAX = 20;
 
 const fallback = (): StoredState => ({
   settings: defaultSettings(),
@@ -19,6 +19,7 @@ export async function loadState(): Promise<StoredState> {
   const s = (raw[KEY] ?? fallback()) as StoredState;
   return {
     vault: s.vault,
+    backupPending: s.backupPending === true,
     settings: {
       ...defaultSettings(),
       ...s.settings,

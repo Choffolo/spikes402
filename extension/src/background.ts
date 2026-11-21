@@ -1,4 +1,12 @@
-import { applyTabBadge, type TabPrice } from "./badge";
+import {
+  applyTabBadge,
+  badgeAfterPriceReport,
+  flashPaidIcon,
+  pageKey,
+  restoreTabIcon,
+  samePage,
+  type TabPrice,
+} from "./badge";
 import {
   adjustSpend,
   decidePayment,
@@ -11,7 +19,9 @@ import {
   type Decision,
 } from "./budget";
 import { encryptMnemonic, generateMnemonic, isValidMnemonic, normalizeMnemonic } from "./crypto";
+import type { QuizAnswer } from "./backup";
 import { InvoiceError, isBolt11, parseBolt11AmountSats } from "./invoice";
+import { looksLikeLightningAddress, parseLightningAddress, resolveLightningAddress, UNSUPPORTED_ADDRESS } from "./lnaddress";
 import { lightningHint } from "./backend";
 import { isExtensionPage, pageOrigin, sanitizeSettings } from "./sender";
 import { maxFeeSatsFor } from "./spark-util";
@@ -44,6 +54,8 @@ type PopupMsg =
   | { type: "getState" }
   | { type: "createWallet"; password: string }
   | { type: "restoreWallet"; mnemonic: string; password: string }
+  | { type: "revealPhrase"; password: string }
+  | { type: "confirmBackup"; password: string; answers: QuizAnswer[] }
   | { type: "unlock"; password: string }
   | { type: "lock" }
   | { type: "saveSettings"; settings: Partial<Settings> }
@@ -53,6 +65,7 @@ type PopupMsg =
 
 type PageMsg = { type: "webln"; method: "enable" | "getInfo" | "sendPayment"; origin: string; invoice?: string };
 type PagePriceMsg = { type: "pagePrice"; amountSats: number | null };
+type AutoPayMsg = { type: "autoPayCheck"; invoice: string };
 
 chrome.runtime.onInstalled.addListener(() => {
   void ensureWalletHost();
@@ -64,9 +77,22 @@ chrome.runtime.onStartup?.addListener(() => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabPrices.delete(tabId);
+  restoreTabIcon(tabId);
 });
 
-chrome.runtime.onMessage.addListener((msg: PopupMsg | PageMsg | PagePriceMsg, sender, sendResponse) => {
+// The badge is per-tab and Chrome clears it on navigation. If the new URL
+// is not the page we just paid, drop the memory and the icon flash too.
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (!info.url) return;
+  const prev = tabPrices.get(tabId);
+  if (!prev) return;
+  if (samePage(prev.pageUrl, info.url)) return;
+  tabPrices.delete(tabId);
+  restoreTabIcon(tabId);
+  void applyTabBadge(tabId, undefined);
+});
+
+chrome.runtime.onMessage.addListener((msg: PopupMsg | PageMsg | PagePriceMsg | AutoPayMsg, sender, sendResponse) => {
   if (!msg || typeof msg !== "object" || !("type" in msg)) return;
   if ((msg as { target?: string }).target === "wallet") return; // for the wallet host
   handle(msg, sender)
@@ -75,7 +101,8 @@ chrome.runtime.onMessage.addListener((msg: PopupMsg | PageMsg | PagePriceMsg, se
   return true;
 });
 
-async function handle(msg: PopupMsg | PageMsg | PagePriceMsg, sender: chrome.runtime.MessageSender): Promise<unknown> {
+async function handle(msg: PopupMsg | PageMsg | PagePriceMsg | AutoPayMsg, sender: chrome.runtime.MessageSender): Promise<unknown> {
+  if (msg.type === "autoPayCheck") return autoPayCheck(msg, sender);
   if (msg.type === "pagePrice") {
     handlePagePrice(msg, sender);
     return { ok: true };
@@ -90,6 +117,10 @@ async function handle(msg: PopupMsg | PageMsg | PagePriceMsg, sender: chrome.run
       return createWallet(msg.password);
     case "restoreWallet":
       return restoreWallet(msg.mnemonic, msg.password);
+    case "revealPhrase":
+      return revealPhrase(msg.password);
+    case "confirmBackup":
+      return confirmBackup(msg.password, msg.answers);
     case "unlock":
       return unlock(msg.password);
     case "lock":
@@ -125,6 +156,7 @@ async function snapshot(): Promise<{
   const info: WalletInfo = {
     unlocked,
     hasVault: !!s.vault,
+    backupPending: !!s.backupPending,
     network: s.settings.network,
     lightningReady: hint.ready,
     lightningHint: hint.hint,
@@ -144,9 +176,35 @@ async function createWallet(password: string): Promise<{ mnemonic: string }> {
   const s = await loadState();
   if (s.vault) throw new Error("A wallet already exists in this browser. Unlock it, or remove the extension data first.");
   const mnemonic = generateMnemonic();
-  await saveVault(await encryptMnemonic(mnemonic, password));
-  await unlock(password);
+  const vault = await encryptMnemonic(mnemonic, password);
+  // The wallet stays locked until the owner proves they saved the words (see
+  // confirmBackup). The flag is stored with the vault in one step, so closing
+  // the popup at any moment resumes the backup instead of skipping it.
+  await updateState((st) => {
+    st.vault = vault;
+    st.backupPending = true;
+  });
   return { mnemonic };
+}
+
+/** Show the phrase again; only with the password, and only decrypted in the wallet host. */
+async function revealPhrase(password: string): Promise<{ mnemonic: string }> {
+  const s = await loadState();
+  if (!s.vault) throw new Error("No wallet is stored yet.");
+  await ensureWalletHost();
+  return walletCall<{ mnemonic: string }>("reveal", { vault: s.vault, password });
+}
+
+/** The owner typed back some of the words: the wallet may now be used. */
+async function confirmBackup(password: string, answers: QuizAnswer[]): Promise<{ ok: true }> {
+  const s = await loadState();
+  if (!s.vault || !s.backupPending) throw new Error("There is nothing to confirm.");
+  await ensureWalletHost();
+  await walletCall("checkWords", { vault: s.vault, password, answers });
+  await updateState((st) => {
+    st.backupPending = false;
+  });
+  return unlock(password);
 }
 
 async function restoreWallet(mnemonic: string, password: string): Promise<{ ok: true }> {
@@ -162,6 +220,7 @@ async function restoreWallet(mnemonic: string, password: string): Promise<{ ok: 
 async function unlock(password: string): Promise<{ ok: true }> {
   const s = await loadState();
   if (!s.vault) throw new Error("No wallet is stored yet.");
+  if (s.backupPending) throw new Error("First check that you saved your 12 words. Open the wallet to finish setting up.");
   await ensureWalletHost();
   // Decrypt only in the wallet host, so the service worker never holds the phrase.
   await walletCall("connect", {
@@ -184,23 +243,40 @@ async function receiveInvoice(amountSats: number): Promise<{ invoice: string; fe
 }
 
 async function sendFromPopup(destination: string, amountSats?: number): Promise<{ detail: string }> {
-  const dest = destination.trim();
+  let dest = destination.trim();
   if (!dest) throw new Error("Enter an invoice or address.");
   let amount = amountSats;
+  let paidTo: string | undefined;
+  if (looksLikeLightningAddress(dest)) {
+    // name@domain: ask the address for an invoice of exactly this amount, then pay that invoice.
+    const parsed = parseLightningAddress(dest);
+    if (!parsed) throw new Error(UNSUPPORTED_ADDRESS);
+    paidTo = `${parsed.user}@${parsed.domain}`;
+    dest = (await resolveLightningAddress(parsed, amount ?? 0)).invoice;
+  }
   if (isBolt11(dest)) {
     const encoded = parseBolt11AmountSats(dest);
     if (encoded !== null) amount = encoded;
   }
-  const res = await walletCall<{ preimage?: string; detail: string }>("send", { destination: dest, amountSats: amount });
+  // Same fee rule as page payments: the wallet may not spend more fee than this.
+  const maxFeeSats = isBolt11(dest) ? maxFeeSatsFor(amount ?? 0) : undefined;
+  const res = await walletCall<{ preimage?: string; detail: string; feeSats?: number }>("send", {
+    destination: dest,
+    amountSats: amount,
+    ...(maxFeeSats === undefined ? {} : { maxFeeSats }),
+  });
   await appendHistory({
     time: new Date().toISOString(),
     origin: "popup",
-    amountSats: amount ?? 0,
-    destination: truncateDestination(dest),
+    amountSats: (amount ?? 0) + (res.feeSats ?? 0),
+    priceSats: amount ?? 0,
+    ...(res.feeSats === undefined ? {} : { feeSats: res.feeSats }),
+    destination: truncateDestination(paidTo ?? dest),
     result: "sent",
-    detail: res.detail,
+    detail: "Sent.", // never keep the preimage in the history
   });
-  return res;
+  const sent = amount ?? 0;
+  return { detail: `Sent ${sent} sats${res.feeSats === undefined ? "" : ` (fee ${res.feeSats})`}.` };
 }
 
 async function handleWebln(msg: PageMsg, sender: chrome.runtime.MessageSender): Promise<unknown> {
@@ -259,8 +335,8 @@ async function handleWebln(msg: PageMsg, sender: chrome.runtime.MessageSender): 
       maxFeeSats: feeSats,
     });
     if (!res.preimage) throw new WalletCallError("The wallet paid, but did not return a preimage.", true);
-    await finishReservation(reservation.id, { settled: true, feeSats: res.feeSats }, res.detail);
-    markPaid(sender.tab?.id, amountSats ?? 0);
+    await finishReservation(reservation.id, { settled: true, feeSats: res.feeSats }, "Paid.");
+    markPaid(sender.tab?.id, amountSats ?? 0, sender.tab?.url);
     return { preimage: res.preimage };
   } catch (e) {
     const detail = e instanceof Error ? e.message : String(e);
@@ -274,6 +350,37 @@ async function handleWebln(msg: PageMsg, sender: chrome.runtime.MessageSender): 
     await finishReservation(reservation.id, { settled: false }, detail);
     throw e;
   }
+}
+
+/**
+ * Will this page be paid without asking? The page content script uses the
+ * answer to cover the 402 page with a "Paying…" notice at once, instead of
+ * showing the QR code for the few seconds a payment takes. It reserves
+ * nothing and pays nothing.
+ */
+async function autoPayCheck(msg: AutoPayMsg, sender: chrome.runtime.MessageSender): Promise<{ willPay: boolean; amountSats?: number }> {
+  const origin = pageOrigin(sender);
+  if (!origin || typeof msg.invoice !== "string") return { willPay: false };
+  const host = await walletCall<{ unlocked?: boolean }>("status").catch(() => ({ unlocked: false }));
+  if (!host.unlocked) return { willPay: false };
+  let amountSats: number | null;
+  try {
+    amountSats = parseBolt11AmountSats(msg.invoice);
+  } catch {
+    return { willPay: false };
+  }
+  if (amountSats === null) return { willPay: false };
+  const s = await loadState();
+  const today = todayLocal();
+  const d = decidePayment({
+    amountSats,
+    origin,
+    settings: s.settings,
+    spend: spendForToday(s.spend, today),
+    today,
+    feeSats: maxFeeSatsFor(amountSats),
+  });
+  return d.action === "pay" ? { willPay: true, amountSats } : { willPay: false };
 }
 
 type Reserved = Decision | { action: "reserved"; reservation: Reservation };
@@ -336,6 +443,8 @@ function finishReservation(
       time: new Date().toISOString(),
       origin: r.origin,
       amountSats: outcome.settled ? actual : r.amountSats,
+      priceSats: r.amountSats,
+      ...(outcome.settled ? { feeSats: outcome.feeSats ?? r.feeSats } : {}),
       destination: truncateDestination(r.invoice),
       result: outcome.settled ? "sent" : "failed",
       detail,
@@ -353,6 +462,7 @@ function markUncertain(id: string, requestId: string | undefined, detail: string
       time: new Date().toISOString(),
       origin: r.origin,
       amountSats: paymentCost(r.amountSats, r.feeSats),
+      priceSats: r.amountSats,
       destination: truncateDestination(r.invoice),
       result: "pending",
       detail: `${detail} Not confirmed; still counted in the budget.`,
@@ -477,28 +587,25 @@ function handlePagePrice(msg: PagePriceMsg, sender: chrome.runtime.MessageSender
     typeof msg.amountSats === "number" && Number.isFinite(msg.amountSats) && msg.amountSats > 0
       ? Math.floor(msg.amountSats)
       : undefined;
-  if (!amount) {
-    tabPrices.delete(tabId);
-    void applyTabBadge(tabId, undefined);
-    return;
-  }
-  const prev = tabPrices.get(tabId);
-  const paid = !!prev?.paid && prev.amountSats === amount;
-  const state: TabPrice = { amountSats: amount, paid, needsConfirm: !!prev?.needsConfirm };
-  tabPrices.set(tabId, state);
+  const pageUrl = sender.tab?.url ?? sender.url;
+  const state = badgeAfterPriceReport(tabPrices.get(tabId), amount, pageUrl);
+  if (state) tabPrices.set(tabId, state);
+  else tabPrices.delete(tabId);
   void applyTabBadge(tabId, state);
 }
 
-function markPaid(tabId: number | undefined, amountSats: number): void {
+function markPaid(tabId: number | undefined, amountSats: number, pageUrl?: string): void {
   if (tabId === undefined) return;
   const prev = tabPrices.get(tabId);
   const state: TabPrice = {
     amountSats: prev?.amountSats ?? amountSats,
     paid: true,
     needsConfirm: false,
+    pageUrl: pageKey(pageUrl) || prev?.pageUrl,
   };
   tabPrices.set(tabId, state);
   void applyTabBadge(tabId, state);
+  flashPaidIcon(tabId);
 }
 
 function markConfirm(tabId: number | undefined, needsConfirm: boolean): void {
@@ -527,20 +634,20 @@ async function log(
   });
 }
 
-async function openPopup(pending?: { origin: string; amountSats: number }) {
+async function openPopup(pending?: { origin: string; amountSats: number; costSats: number }) {
   try {
     if (chrome.action.openPopup) await chrome.action.openPopup();
   } catch {
     /* some Chrome views refuse this; the toolbar badge still shows the page price */
   }
   const summary = pending
-    ? `Pay ${pending.amountSats} sats to ${pending.origin}? Open the extension to confirm or decline.`
-    : "Open the extension to confirm or decline.";
+    ? `${pending.origin} asks for ${pending.amountSats} sats + a fee of up to ${pending.costSats - pending.amountSats}. Open the wallet to pay or decline.`
+    : "Open the wallet to pay or decline.";
   try {
     await chrome.notifications.create("spikes402-confirm", {
       type: "basic",
       iconUrl: "icons/icon-128.png",
-      title: "Spikes402: confirm a payment",
+      title: "Spikes402: a payment needs your OK",
       message: summary,
       priority: 2,
     });

@@ -22,6 +22,8 @@ export type PaymentRecord = {
   destination: string; // invoice or address, may be truncated when stored
   result: "sent" | "failed" | "refused" | "pending";
   detail: string;
+  priceSats?: number; // what the page asked for
+  feeSats?: number; // the fee that was paid (the fee cap if the wallet did not report one)
 };
 
 export type PendingPayment = {
@@ -61,11 +63,18 @@ export type StoredState = {
   /** Payment confirmations waiting for the user, oldest first. */
   prompts: PendingPayment[];
   reservations: Reservation[];
+  /**
+   * A wallet was created but its owner has not yet proved they saved the
+   * words. The wallet cannot be unlocked until they do. The words
+   * themselves stay in the encrypted vault; this is only the flag.
+   */
+  backupPending?: boolean;
 };
 
 export type WalletInfo = {
   unlocked: boolean;
   hasVault: boolean;
+  backupPending: boolean;
   network: Network;
   balanceSats?: number;
   pubkey?: string;

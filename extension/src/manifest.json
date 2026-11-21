@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Spikes402 Wallet",
-  "version": "0.1.2",
-  "description": "Non-custodial Lightning wallet for Spikes402 pages. Injects WebLN, keeps keys in this browser, and talks only to the Spark network (no API key, no Spikes402 server).",
+  "version": "0.1.4",
+  "description": "Non-custodial Lightning wallet for Spikes402 pages. Injects WebLN and keeps keys in this browser. No API key and no Spikes402 server: it talks to the Spark network, and to a Lightning address's server when you send to one.",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
@@ -21,7 +21,6 @@
   },
   "background": {
     "service_worker": "background.js",
-    "scripts": ["background.js"],
     "type": "module"
   },
   "content_scripts": [
@@ -54,13 +53,7 @@
     "notifications"
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; frame-ancestors 'none'; connect-src 'self' https://0.spark.lightspark.com https://2.spark.flashnet.xyz https://api.lightspark.com https://mempool.space https://regtest-mempool.us-west-2.sparkinfra.net https://spark-operator.breez.technology wss://api.lightspark.com;"
-  },
-  "browser_specific_settings": {
-    "gecko": {
-      "id": "wallet@spikes402.local",
-      "strict_min_version": "128.0"
-    }
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; frame-ancestors 'none'; connect-src 'self' https: wss://api.lightspark.com;"
   },
   "host_permissions": [
     "https://api.lightspark.com/*",
