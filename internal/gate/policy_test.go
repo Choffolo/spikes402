@@ -276,9 +276,9 @@ func TestArgonVerificationGuards(t *testing.T) {
 		t.Fatal(rec.Code)
 	}
 
-	// Fill every verification slot.
-	for i := 0; i < cap(f.gate.argonSlots); i++ {
-		f.gate.argonSlots <- struct{}{}
+	// Fill the Argon2id memory budget so a new check cannot start.
+	if !f.gate.argon.acquire(f.gate.argon.max, 0) {
+		t.Fatal("hold argon budget")
 	}
 	// Cheap rejections still work and never reach Argon2id: a used token,
 	// a forged token, an expired one.
@@ -296,11 +296,9 @@ func TestArgonVerificationGuards(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "1" {
 		t.Fatalf("got %d %q", rec.Code, rec.Header().Get("Retry-After"))
 	}
-	for i := 0; i < cap(f.gate.argonSlots); i++ {
-		<-f.gate.argonSlots
-	}
+	f.gate.argon.release(f.gate.argon.max)
 	if rec := f.get("/premium/b", good2, ""); rec.Code != http.StatusOK {
-		t.Fatalf("after the slots freed up: got %d", rec.Code)
+		t.Fatalf("after the budget was freed: got %d", rec.Code)
 	}
 }
 

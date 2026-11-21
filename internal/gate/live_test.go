@@ -86,8 +86,8 @@ func TestEvents(t *testing.T) {
 	f.pow = pow.Params{Algorithm: pow.Argon2id, Difficulty: 1, MemoryMiB: 8}
 	f.gate.limiter = newRateLimiter(100)
 	b = f.challenge(t, "/premium/d")
-	for i := 0; i < cap(f.gate.argonSlots); i++ {
-		f.gate.argonSlots <- struct{}{}
+	if !f.gate.argon.acquire(f.gate.argon.max, 0) {
+		t.Fatal("hold argon budget")
 	}
 	if r := f.get("/premium/d", solve(t, b), ""); r.Code != http.StatusServiceUnavailable {
 		t.Fatal(r.Code)

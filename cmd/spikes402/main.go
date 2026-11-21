@@ -35,12 +35,7 @@ func main() {
 	}
 
 	origin, _ := url.Parse(cfg.Origin) // validated by config.Load
-	proxy := &httputil.ReverseProxy{
-		Rewrite: func(r *httputil.ProxyRequest) {
-			r.SetURL(origin)
-			r.SetXForwarded()
-		},
-	}
+	proxy := originProxy(origin)
 
 	secret := []byte(cfg.SecretKey)
 	if len(secret) == 0 { // only allowed with the fake backend
@@ -105,9 +100,10 @@ func main() {
 		TrustedProxies:       trusted,
 		CaseSensitive:        cfg.ProtectCaseSensitive,
 
-		Classifier: classifier,
-		Policies:   cfg.BotPolicies,
-		Observer:   observer,
+		Classifier:         classifier,
+		Policies:           cfg.BotPolicies,
+		Observer:           observer,
+		Argon2MaxMemoryMiB: cfg.Argon2MaxMemoryMiB,
 	})
 	mux.Handle("/", g)
 
@@ -127,6 +123,10 @@ func main() {
 	p := cfg.PoW(cfg.PriceSats)
 	log.Printf("spikes402 listening on %s, protecting %v of %s at %d sats or %s PoW difficulty %d (~%.1f s on one CPU core)",
 		cfg.Listen, cfg.Protect, cfg.Origin, cfg.PriceSats, p.Algorithm, p.Difficulty, p.ExpectedSeconds())
+	if p.Algorithm == "argon2id" {
+		log.Printf("Argon2id checks: %d MiB each, at most %d at once (budget %d MiB)",
+			p.MemoryMiB, cfg.Argon2MaxMemoryMiB/p.MemoryMiB, cfg.Argon2MaxMemoryMiB)
+	}
 	if len(cfg.Prices) > 0 {
 		log.Printf("path prices (first matching rule wins; unmatched protected paths use %d sats): %v", cfg.PriceSats, cfg.Prices)
 	}
@@ -185,4 +185,44 @@ func startAdmin(cfg *config.Config, configFile string, g *gate.Gate, monitor *ad
 		}
 	}
 	log.Printf("admin dashboard on http://%s (%s)", cfg.Admin.Listen, ai)
+}
+
+// originProxy forwards requests to the website. Idle connections are kept
+// so a burst does not open a new TCP connection for every request. Timeouts
+// stop a slow or hanging origin from holding a client (and a paid token)
+// indefinitely: the proxy answers 502, and a GET/HEAD can retry the token
+// (see gate.deliver).
+func originProxy(origin *url.URL) *httputil.ReverseProxy {
+	return newOriginProxy(origin, originTransport())
+}
+
+func newOriginProxy(origin *url.URL, tr http.RoundTripper) *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
+		Rewrite: func(r *httputil.ProxyRequest) {
+			r.SetURL(origin)
+			r.SetXForwarded()
+		},
+		Transport: tr,
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			log.Printf("origin error: %v", err)
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+		},
+	}
+}
+
+func originTransport() *http.Transport {
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          1024,
+		MaxIdleConnsPerHost:   256,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
 }

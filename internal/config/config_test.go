@@ -62,6 +62,8 @@ func TestInvalid(t *testing.T) {
 		"argon too little":   `{"origin":"http://o","price_sats":5,"protect":["/x"],"pow_algorithm":"argon2id","argon2_memory_mib":1,"lightning":{"backend":"fake"}}`,
 		"argon too hard":     `{"origin":"http://o","price_sats":5,"protect":["/x"],"pow_algorithm":"argon2id","pow_difficulty":30,"lightning":{"backend":"fake"}}`,
 		"memory w/o argon":   `{"origin":"http://o","price_sats":5,"protect":["/x"],"argon2_memory_mib":16,"lightning":{"backend":"fake"}}`,
+		"argon over budget":  `{"origin":"http://o","price_sats":5,"protect":["/x"],"pow_algorithm":"argon2id","argon2_memory_mib":64,"argon2_max_memory_mib":32,"lightning":{"backend":"fake"}}`,
+		"argon budget huge":  `{"origin":"http://o","price_sats":5,"protect":["/x"],"pow_algorithm":"argon2id","argon2_max_memory_mib":99999,"lightning":{"backend":"fake"}}`,
 		"negative pow diff":  `{"origin":"http://o","price_sats":5,"protect":["/x"],"pow_difficulty":-1,"lightning":{"backend":"fake"}}`,
 		"bad policy":         `{"origin":"http://o","price_sats":5,"protect":["/x"],"bot_policies":{"impostor":{"action":"ban"}},"lightning":{"backend":"fake"}}`,
 		"bad multiplier":     `{"origin":"http://o","price_sats":5,"protect":["/x"],"bot_policies":{"impostor":{"action":"pay","price_multiplier":-2}},"lightning":{"backend":"fake"}}`,
@@ -113,6 +115,9 @@ func TestArgon2id(t *testing.T) {
 	}
 	if p := c.PoW(10); p.Difficulty != 13 { // ten times the price, ~2^3.3 more work
 		t.Fatalf("got %+v", p)
+	}
+	if c.Argon2MaxMemoryMiB != 256 {
+		t.Fatalf("default budget %d, want 256", c.Argon2MaxMemoryMiB)
 	}
 }
 

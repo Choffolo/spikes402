@@ -10,10 +10,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"math"
 	"net"
 	"net/http"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -55,6 +55,11 @@ type Options struct {
 	// Observer, if set, is told about every request to a protected path.
 	// It is called synchronously and must be fast.
 	Observer func(Event)
+
+	// Argon2MaxMemoryMiB is the most memory concurrent Argon2id checks may
+	// use together. 0 means DefaultArgonMaxMemoryMiB (256). A single check
+	// that needs more than this is refused (see config).
+	Argon2MaxMemoryMiB int
 }
 
 // PriceRule maps a path pattern (same syntax as Protect) to a price.
@@ -79,9 +84,8 @@ type Gate struct {
 	now     func() time.Time // replaceable in tests
 	live    atomic.Pointer[Settings]
 
-	// argonSlots caps how many Argon2id solutions are checked at once:
-	// each check takes tens of MiB and milliseconds of CPU.
-	argonSlots chan struct{}
+	// argon limits memory used by concurrent Argon2id checks.
+	argon *argonBudget
 
 	nodeLog  rateLog // why no invoice was offered
 	classLog rateLog // bot classifications
@@ -103,9 +107,9 @@ func New(opt Options) *Gate {
 		node:    newNodeGuard(opt.Lightning, opt.MaxInvoicesPerMinute),
 		now:     time.Now,
 
-		argonSlots: make(chan struct{}, min(4, max(1, runtime.NumCPU()/2))),
-		nodeLog:    rateLog{perMinute: 1},
-		classLog:   rateLog{perMinute: 60},
+		argon:    newArgonBudget(opt.Argon2MaxMemoryMiB),
+		nodeLog:  rateLog{perMinute: 1},
+		classLog: rateLog{perMinute: 60},
 	}
 	g.live.Store(&Settings{
 		PriceSats: opt.PriceSats, Prices: append([]PriceRule(nil), opt.Prices...),
@@ -411,7 +415,7 @@ func (g *Gate) check(r *http.Request, auth string, price int64) (claims, error) 
 // checkArgon verifies an Argon2id solution. A check costs the server tens
 // of MiB and milliseconds, so it is only done for a genuine, unexpired,
 // unused token of ours (checked above and here), counts against the
-// client's rate limit, runs at most len(argonSlots) at a time, and a
+// client's rate limit, runs only if the memory budget has room, and a
 // wrong answer burns the token: one check per token, ever.
 func (g *Gate) checkArgon(r *http.Request, p pow.Params, token string, nonce uint64, c claims) error {
 	now := g.now()
@@ -421,12 +425,10 @@ func (g *Gate) checkArgon(r *http.Request, p pow.Params, token string, nonce uin
 	if ok, wait := g.limiter.allow(g.client(r), now); !ok {
 		return &busyError{http.StatusTooManyRequests, wait, "too many requests"}
 	}
-	select {
-	case g.argonSlots <- struct{}{}:
-		defer func() { <-g.argonSlots }()
-	default:
+	if !g.argon.acquire(p.MemoryMiB, argonAcquireWait) {
 		return &busyError{http.StatusServiceUnavailable, time.Second, "busy checking proofs of work, retry shortly"}
 	}
+	defer g.argon.release(p.MemoryMiB)
 	if !p.Check(token, nonce) {
 		if err := g.spent.use(spentKey("PoW", c.ID), time.Unix(c.Expires, 0), now); err != nil {
 			return err
@@ -544,6 +546,7 @@ func (g *Gate) newOffer(r *http.Request, now time.Time, key string, p pow.Params
 	}
 	o := offer{id: c.ID, token: token, invoice: invoice, expires: time.Unix(c.Expires, 0), price: price, pow: p}
 	if invoice != "" {
+		o.qr = string(invoiceQR(invoice))
 		g.pending.put(key, o)
 	}
 	return o, nil
@@ -587,7 +590,7 @@ func (g *Gate) writeChallenge(w http.ResponseWriter, r *http.Request, o offer, p
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		h.Set("Content-Security-Policy", "default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'sha256-"+weblnHash+"'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 		w.WriteHeader(http.StatusPaymentRequired)
-		writeHTML(w, body)
+		writeHTML(w, body, template.URL(o.qr))
 		return
 	}
 	h.Set("Content-Type", "application/json")

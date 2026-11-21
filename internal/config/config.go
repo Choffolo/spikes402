@@ -47,6 +47,7 @@ type Config struct {
 	PowDifficulty        int              `json:"pow_difficulty"`          // 0 = derived from price and pow_seconds_per_sat
 	PowAlgorithm         string           `json:"pow_algorithm"`           // "sha256d" (default) or "argon2id"
 	Argon2MemoryMiB      int              `json:"argon2_memory_mib"`       // argon2id memory per attempt, default 16
+	Argon2MaxMemoryMiB   int              `json:"argon2_max_memory_mib"`   // concurrent Argon2id checks, default 256
 	ChallengeTTLSeconds  int              `json:"challenge_ttl_seconds"`   // default 600
 	ChallengesPerMinute  int              `json:"challenges_per_minute"`   // per client, default 30
 	MaxInvoicesPerMinute int              `json:"max_invoices_per_minute"` // all clients together, default 300
@@ -253,6 +254,15 @@ func (c *Config) complete() error {
 		}
 	default:
 		return errors.New(`"pow_algorithm" must be "sha256d" or "argon2id"`)
+	}
+	if c.Argon2MaxMemoryMiB == 0 {
+		c.Argon2MaxMemoryMiB = gate.DefaultArgonMaxMemoryMiB
+	}
+	if c.Argon2MaxMemoryMiB < 1 || c.Argon2MaxMemoryMiB > gate.MaxArgonMaxMemoryMiB {
+		return fmt.Errorf(`"argon2_max_memory_mib" must be between 1 and %d`, gate.MaxArgonMaxMemoryMiB)
+	}
+	if c.PowAlgorithm == pow.Argon2id && c.Argon2MemoryMiB > c.Argon2MaxMemoryMiB {
+		return fmt.Errorf(`"argon2_memory_mib" (%d) is more than "argon2_max_memory_mib" (%d)`, c.Argon2MemoryMiB, c.Argon2MaxMemoryMiB)
 	}
 	for k, p := range c.BotPolicies {
 		if p.PriceMultiplier == 0 {

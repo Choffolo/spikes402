@@ -26,7 +26,7 @@ type fixture struct {
 	pow  pow.Params // puzzle handed out, whatever the price
 }
 
-func newFixture(t *testing.T) *fixture {
+func newFixture(t testing.TB) *fixture {
 	t.Helper()
 	f := &fixture{ln: lightning.NewFake(), now: time.Unix(1_800_000_000, 0),
 		pow: pow.Params{Algorithm: pow.SHA256d, Difficulty: testDifficulty}}

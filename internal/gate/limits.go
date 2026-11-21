@@ -78,6 +78,7 @@ type offer struct {
 	expires time.Time
 	price   int64
 	pow     pow.Params
+	qr      string // data URI, filled once when the invoice is created
 }
 
 // pendingOffers remembers the invoices handed out and not yet expired,
