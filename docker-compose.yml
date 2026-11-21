@@ -1,0 +1,49 @@
+# Example: Spikes402 in front of your site, with phoenixd for Lightning.
+# Copy this, fill a .env and config.json (never commit those), then:
+#   cp config.docker.example.json config.json
+#   docker compose up --build
+#
+# Put TLS in front (Caddy, nginx, or another reverse proxy). See docs/deploy.md.
+#
+# WARNING: the phoenixd-data volume contains seed.dat. If you lose it, you
+# lose the funds. Back it up and keep the copy offline.
+
+services:
+  phoenixd:
+    # Official ACINQ image (0.9.3). The entrypoint already agrees to the
+    # terms of service and binds the HTTP API on 0.0.0.0 inside the
+    # container — do not publish that port.
+    image: acinq/phoenixd:0.9.3@sha256:f5cbe046104b430052438668b2383416fe1df3c1d808fea1eb76dc139144a32b
+    restart: unless-stopped
+    volumes:
+      - phoenixd-data:/phoenix/.phoenix
+    networks:
+      - spikes402
+    # No "ports:" on purpose. phoenixd must not be reachable from the public
+    # internet. Spikes402 talks to it on the compose network only.
+
+  spikes402:
+    build: .
+    image: spikes402:local
+    restart: unless-stopped
+    depends_on:
+      - phoenixd
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config.json:/etc/spikes402/config.json:ro
+    environment:
+      SPIKES402_SECRET_KEY: ${SPIKES402_SECRET_KEY:?set a 32+ character secret (openssl rand -hex 32)}
+      SPIKES402_ADMIN_KEY: ${SPIKES402_ADMIN_KEY:?set a 32+ character admin key, different from the secret}
+      PHOENIXD_PASSWORD: ${PHOENIXD_PASSWORD:?set phoenixd's limited-access password from phoenix.conf}
+    ports:
+      - "8402:8402"
+      - "127.0.0.1:8404:8404"
+    networks:
+      - spikes402
+
+networks:
+  spikes402:
+
+volumes:
+  phoenixd-data:

@@ -519,6 +519,8 @@ phoenixd gets inbound liquidity automatically; the first payments it
 receives pay for opening its channel, so small amounts may not show up in
 your balance straight away. Read phoenixd's docs on fees before going live.
 
+To run the proxy and phoenixd with Docker, see [Deploying Spikes402](docs/deploy.md).
+
 ## For bot authors
 
 `Authorization` formats and the JSON body are documented above and in every

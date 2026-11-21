@@ -7,3 +7,7 @@ extension/node_modules/
 extension/dist/
 extension/coverage/
 extension/spikes402-extension.zip
+
+# Local Compose / environment secrets
+.env
+.env.*

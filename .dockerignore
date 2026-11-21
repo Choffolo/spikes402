@@ -1,0 +1,21 @@
+.git
+.github
+.gitignore
+
+# Secrets and local data — never send these to the build.
+.env
+.env.*
+**/seed.dat
+**/phoenix.conf
+**/*password*
+config.json
+
+# Not needed to build the proxy.
+audit/
+extension/
+docs/
+bin/
+*.md
+*.zip
+**/*_test.go
+**/testdata/
