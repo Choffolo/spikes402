@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Choffolo/spikes402/internal/botid"
 	"github.com/Choffolo/spikes402/internal/gate"
 )
 
@@ -84,6 +85,74 @@ func WeakensProtection(cur, next *Config) []string {
 		}
 	}
 	return why
+}
+
+// Limits for what the AI may apply on its own (see NeedsConfirmation).
+const (
+	aiPriceFactor = 2    // a price may at most double...
+	aiPriceFloor  = 10   // ...unless it stays at or below this many sats,
+	aiPriceCeil   = 1000 // and never go above this many sats.
+)
+
+// NeedsConfirmation lists changes that make protection stricter or equal on
+// paper but can still take a site down: a whole-site paywall, known
+// crawlers (search engines, signed agents) made to pay or blocked where
+// they were not, a big price jump, or a sharp cut in challenges. The AI
+// may not apply these, and the dashboard asks the human to confirm them,
+// even when ai_can_apply is on. An empty list means no extra confirmation.
+func NeedsConfirmation(cur, next *Config) []string {
+	if cur == nil || next == nil {
+		return nil
+	}
+	var why []string
+
+	had := map[string]struct{}{}
+	for _, p := range cur.Protect {
+		had[p] = struct{}{}
+	}
+	for _, p := range next.Protect {
+		if _, ok := had[p]; !ok && strings.Trim(p, "/*") == "" {
+			why = append(why, "protect pattern "+p+" would put the whole site behind payment")
+		}
+	}
+
+	if bigRise(cur.PriceSats, next.PriceSats) {
+		why = append(why, fmt.Sprintf("price_sats would rise from %d to %d", cur.PriceSats, next.PriceSats))
+	}
+	caseSens := cur.ProtectCaseSensitive || next.ProtectCaseSensitive
+	for _, r := range next.Prices {
+		was := gate.PriceFor(samplePath(r.Pattern), cur.Prices, cur.PriceSats, caseSens)
+		if bigRise(was, r.PriceSats) {
+			why = append(why, fmt.Sprintf("price for %s would rise from %d to %d", r.Pattern, was, r.PriceSats))
+		}
+	}
+
+	if next.ChallengesPerMinute*2 < cur.ChallengesPerMinute {
+		why = append(why, fmt.Sprintf("challenges_per_minute would fall from %d to %d", cur.ChallengesPerMinute, next.ChallengesPerMinute))
+	}
+
+	// Stricter policies are fine for unknown clients and impostors. For
+	// anything else (verified crawlers, signed agents, named bots, URL
+	// policies) being made to pay or blocked needs a human.
+	for k, b := range next.BotPolicies {
+		a := cur.BotPolicies[k]
+		if k == string(botid.Unknown) || k == string(botid.Impostor) {
+			if policyMultiplier(b) > aiPriceFactor*policyMultiplier(a) {
+				why = append(why, fmt.Sprintf("bot policy %s price_multiplier would more than double", k))
+			}
+			continue
+		}
+		if policyRank(b) > policyRank(a) || policyMultiplier(b) > policyMultiplier(a) {
+			why = append(why, fmt.Sprintf("bot policy %s would make it pay more or be blocked (%s → %s)", k, policyAction(a), policyAction(b)))
+		}
+	}
+	return why
+}
+
+// bigRise reports whether a price going from old to next is more than the
+// AI may apply on its own.
+func bigRise(old, next int64) bool {
+	return next > old && (next > aiPriceCeil || (next > aiPriceFloor && next > aiPriceFactor*old))
 }
 
 func policyAction(p gate.Policy) string {

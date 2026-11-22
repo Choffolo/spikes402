@@ -380,6 +380,9 @@ async function loadProposals() {
     const d = el("div", null, "proposal");
     d.append(el("p", `${time(p.created)} · ${p.status}` + (p.reason ? " · " + p.reason : "") + (p.result ? " · " + p.result : "")));
     d.append(el("pre", JSON.stringify(p.changes)));
+    if (p.status === "pending" && p.risks && p.risks.length) {
+      d.append(el("p", "Needs your explicit confirmation: " + p.risks.join("; "), "msg err"));
+    }
     if (p.status === "pending") {
       for (const [act, label] of [["approve", "Approve"], ["reject", "Reject"]]) {
         const b = el("button", label);
@@ -388,8 +391,9 @@ async function loadProposals() {
             if (act === "approve") {
               const why = weakenReasons(state.current || {}, p.changes || {});
               if (why.length && !confirm("This proposal would reduce protection:\n\n- " + why.join("\n- ") + "\n\nApprove it anyway?")) return;
+              if (p.risks && p.risks.length && !confirm("This proposal could take your site down or cut off search engines:\n\n- " + p.risks.join("\n- ") + "\n\nApprove it anyway?")) return;
             }
-            await api("POST", `/api/proposals/${encodeURIComponent(p.id)}/${act}`);
+            await api("POST", `/api/proposals/${encodeURIComponent(p.id)}/${act}` + (act === "approve" ? "?confirm=1" : ""));
             loadSettings(); loadProposals();
           } catch (err) { alert(err.message); }
         });

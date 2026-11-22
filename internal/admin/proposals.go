@@ -84,6 +84,18 @@ func (p *proposals) pending(now time.Time) int {
 	return n
 }
 
+// peek returns a pending proposal without deciding it.
+func (p *proposals) peek(id string) (Proposal, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, x := range p.items {
+		if x.ID == id && x.Status == "pending" {
+			return *x, true
+		}
+	}
+	return Proposal{}, false
+}
+
 // take marks a pending proposal as being decided so it is used only once.
 func (p *proposals) take(id string, now time.Time) (Proposal, error) {
 	p.mu.Lock()
