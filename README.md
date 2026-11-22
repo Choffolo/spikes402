@@ -941,6 +941,14 @@ Lightning (reusable BOLT12 offer; your wallet must support BOLT12/BIP353, e.g. P
   address; the ₿ only marks it as a bitcoin address, type it as `chromescar71@phoenixwallet.me`)
 - Offer: `lno1zrxq8pjw7qjlm68mtp7e3yvxee4y5xrgjhhyf2fxhlphpckrvevh50u0qfq27txqpv7e74w9r9jqytz387aafwc0qq5rduglwu0jgkglqj4kwqszf8me4efvhmywwrekdhtytml88630fxsypfxg52es0l9xrgdz0xlsqv74kqw6557fzsyrdl5wr5vxp9wpu3f4t8shr74qmzjj7ygl8sgpqhvnlkgwzcmgcmyhmctd6vzgmfnfaq07qgqrrv8d4c6ql3dtnnjyka7t47h9lmzgsv2hrnxqdv8u5787m4wfwqqs2n57l9hzh9lyaql207qtwjqe7u`
 
+## Acknowledgements
+
+- Jason Lowery, for [Softwar](https://dspace.mit.edu/handle/1721.1/153030) and the golden retriever with a spiked collar that started it all.
+- [PoWned](https://x.com/Printer_Gobrrr/status/2123081612145402056) by @Printer_Gobrrr, the WordPress plugin that makes crawlers mine before they read: the direct inspiration for our proof-of-work path.
+- Lightning Labs, for the [L402](https://github.com/lightninglabs/L402) protocol.
+- @ang3lsec, for the careful security reports before launch.
+- @Malaga82, for the Googlebot reverse-DNS and 1xx ideas.
+
 ## License
 
 [GNU AGPLv3](LICENSE).
