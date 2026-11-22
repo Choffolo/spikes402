@@ -197,7 +197,7 @@ func TestSettingsRoles(t *testing.T) {
 	}
 
 	e = newEnv(t, `,"ai_can_apply":true`)
-	if rec, _ := e.call("PUT", "/api/settings", aiKey, map[string]any{"price_sats": 25}); rec.Code != 200 || e.gate.Settings().PriceSats != 25 {
+	if rec, _ := e.call("PUT", "/api/settings", aiKey, map[string]any{"price_sats": 15}); rec.Code != 200 || e.gate.Settings().PriceSats != 15 {
 		t.Fatalf("AI with ai_can_apply: %d", rec.Code)
 	}
 }
@@ -218,7 +218,14 @@ func TestProposals(t *testing.T) {
 	if rec, _ := e.call("POST", "/api/proposals/"+id+"/approve", aiKey, nil); rec.Code != 403 {
 		t.Fatalf("AI approved its own proposal: %d", rec.Code)
 	}
-	if rec, out := e.call("POST", "/api/proposals/"+id+"/approve", adminKey, nil); rec.Code != 200 || out["status"] != "applied" {
+	// 10 -> 50 sats is a big jump: the human must confirm it explicitly.
+	if rec, out := e.call("POST", "/api/proposals/"+id+"/approve", adminKey, nil); rec.Code != 409 {
+		t.Fatalf("unconfirmed risky approve: %d %v", rec.Code, out)
+	}
+	if e.gate.Settings().PriceSats != 10 {
+		t.Fatal("an unconfirmed approve changed the settings")
+	}
+	if rec, out := e.call("POST", "/api/proposals/"+id+"/approve?confirm=1", adminKey, nil); rec.Code != 200 || out["status"] != "applied" {
 		t.Fatalf("%d %v", rec.Code, out)
 	}
 	if e.gate.Settings().PriceSats != 50 {
@@ -536,8 +543,8 @@ func TestPathPriceSettings(t *testing.T) {
 
 	e = newEnv(t, `,"ai_can_apply":true`)
 	strict := []any{
-		map[string]any{"pattern": "/premium/special/**", "price_sats": 30},
-		map[string]any{"pattern": "/premium/**", "price_sats": 20},
+		map[string]any{"pattern": "/premium/special/**", "price_sats": 20},
+		map[string]any{"pattern": "/premium/**", "price_sats": 15},
 	}
 	if rec, _ := e.call("PUT", "/api/settings", aiKey, map[string]any{"prices": strict}); rec.Code != 200 || len(e.gate.Settings().Prices) != 2 {
 		t.Fatalf("AI with ai_can_apply: %d", rec.Code)
@@ -706,11 +713,64 @@ func TestAICannotWeakenProtection(t *testing.T) {
 		t.Fatalf("AI lowered PoW: %d %v", rec.Code, out)
 	}
 	// Raising the price is stricter: allowed.
-	if rec, out = e.call("PUT", "/api/settings", aiKey, map[string]any{"price_sats": 25}); rec.Code != 200 || e.gate.Settings().PriceSats != 25 {
+	if rec, out = e.call("PUT", "/api/settings", aiKey, map[string]any{"price_sats": 15}); rec.Code != 200 || e.gate.Settings().PriceSats != 15 {
 		t.Fatalf("AI should apply a stricter price: %d %v", rec.Code, out)
 	}
 	// The human admin can still weaken after a clear choice (API has no confirm).
 	if rec, _ = e.call("PUT", "/api/settings", adminKey, map[string]any{"price_sats": 5}); rec.Code != 200 || e.gate.Settings().PriceSats != 5 {
 		t.Fatalf("admin should still be able to lower the price: %d", rec.Code)
+	}
+}
+
+// The takedown from the advisory: each part looks "stricter" on its own.
+// The AI must not apply it, even piece by piece, and the dashboard flags it.
+func TestAICannotApplyTakedown(t *testing.T) {
+	e := newEnv(t, `,"ai_can_apply":true`)
+	for name, ch := range map[string]map[string]any{
+		"whole site":  {"protect": []string{"/premium/**", "/**"}},
+		"max price":   {"price_sats": 1000000},
+		"crawlers":    {"bot_policies": map[string]any{"verified": map[string]any{"action": "block"}}},
+		"crawler pay": {"bot_policies": map[string]any{"verified-signed": map[string]any{"action": "pay", "price_multiplier": 5}}},
+		"one per min": {"challenges_per_minute": 1},
+		"all at once": {
+			"price_sats": 1000000, "protect": []string{"/premium/**", "/**"}, "challenges_per_minute": 1,
+			"bot_policies": map[string]any{"verified": map[string]any{"action": "block"}},
+		},
+	} {
+		rec, out := e.call("PUT", "/api/settings", aiKey, ch)
+		if rec.Code != 403 {
+			t.Fatalf("%s: AI applied it: %d %v", name, rec.Code, out)
+		}
+	}
+	if s := e.gate.Settings(); s.PriceSats != 10 || len(s.Protect) != 1 {
+		t.Fatalf("settings changed: %+v", s)
+	}
+	// It can still propose it; the dashboard marks it and the human must confirm.
+	rec, p := e.call("POST", "/api/proposals", aiKey, map[string]any{"changes": map[string]any{"protect": []string{"/premium/**", "/**"}}})
+	if rec.Code != 200 {
+		t.Fatalf("propose: %d %v", rec.Code, p)
+	}
+	req := httptest.NewRequest("GET", "/api/proposals", nil)
+	req.RemoteAddr = "127.0.0.1:5000"
+	req.Header.Set("Authorization", "Bearer "+adminKey)
+	lrec := httptest.NewRecorder()
+	e.h.ServeHTTP(lrec, req)
+	var list []map[string]any
+	if err := json.Unmarshal(lrec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0]["risks"] == nil {
+		t.Fatalf("proposal not flagged: %v", list)
+	}
+	id := p["id"].(string)
+	if rec, _ := e.call("POST", "/api/proposals/"+id+"/approve", adminKey, nil); rec.Code != 409 {
+		t.Fatalf("approved without confirmation: %d", rec.Code)
+	}
+	if rec, _ := e.call("POST", "/api/proposals/"+id+"/approve?confirm=1", adminKey, nil); rec.Code != 200 {
+		t.Fatalf("confirmed approve: %d", rec.Code)
+	}
+	// Small, ordinary tightening is still fine for the AI.
+	if rec, out := e.call("PUT", "/api/settings", aiKey, map[string]any{"bot_policies": map[string]any{"unknown": map[string]any{"action": "block"}}}); rec.Code != 200 {
+		t.Fatalf("AI could not tighten unknown clients: %d %v", rec.Code, out)
 	}
 }

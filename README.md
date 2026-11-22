@@ -606,7 +606,13 @@ Everything else sits behind the discreet **Settings** link:
   price). Anything that would reduce protection — removing or narrowing
   `protect` patterns, a `free` bot policy, a lower price, or easier
   proof-of-work — is shown as a suggestion and needs your click, with a
-  warning, in the dashboard. A collapsed list shows all current settings
+  warning, in the dashboard. So does anything that could take the site
+  down even though it looks stricter: a whole-site `protect` pattern
+  (`/`, `/**`), making verified crawlers or signed agents pay or be
+  blocked, a price more than doubling (or above 1000 sats), or cutting
+  `challenges_per_minute` by more than half. Those proposals are marked in
+  the dashboard and the API only applies them with an explicit
+  confirmation (`POST /api/proposals/{id}/approve?confirm=1`). A collapsed list shows all current settings
   (no secrets) and node details;
 - **AI proposals**: changes suggested by the AI admin, to approve or reject;
 - **Withdraw**, in its own red box at the bottom, only if enabled.
@@ -652,7 +658,7 @@ Tools: `get_status`, `get_recent_visits`, `get_settings`, `list_proposals`,
 allows reading and **proposing** only; a proposal changes nothing until you
 approve it in the dashboard. Applying directly needs `"admin.ai_can_apply":
 true` in the config file, and even then only for changes that do not reduce
-protection; weaker changes stay proposals. The AI key can **never** approve
+protection or need extra confirmation (see above); those stay proposals. The AI key can **never** approve
 proposals or withdraw; there is no withdraw tool; and `spikes402-mcp`
 refuses to run with the human admin key.
 

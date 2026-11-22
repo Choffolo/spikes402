@@ -3,6 +3,7 @@ package gate
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -273,5 +274,35 @@ func TestClaimGlobalLookupBudget(t *testing.T) {
 	}
 	if n := counter.n.Load(); n < 1 || int(n) > lookupPerMin {
 		t.Fatalf("lookups %d", n)
+	}
+}
+
+// The lookup cache is bounded: distinct payment hashes cannot grow it
+// without limit, expired results are dropped, and a full cache still works.
+func TestInvoiceCacheIsBounded(t *testing.T) {
+	c := newInvoiceCache(lightning.NewFake())
+	if c.lookup == nil {
+		t.Skip("fake backend has no lookup")
+	}
+	now := time.Unix(1_800_000_000, 0)
+	for i := 0; i < lookupCacheMax+500; i++ {
+		c.window = time.Time{} // lift the per-minute cap for this test
+		h := fmt.Sprintf("%064x", i)
+		if _, err := c.get(h, now.Add(time.Hour), now); err != nil && err != lightning.ErrNotFound {
+			t.Fatal(err)
+		}
+		if n := len(c.cache); n > lookupCacheMax {
+			t.Fatalf("cache holds %d entries, cap %d", n, lookupCacheMax)
+		}
+		now = now.Add(time.Millisecond)
+	}
+	// Far in the future everything has expired; the next insert sweeps.
+	now = now.Add(time.Hour)
+	c.window = time.Time{}
+	if _, err := c.get(fmt.Sprintf("%064x", 1<<40), now.Add(time.Hour), now); err != nil && err != lightning.ErrNotFound {
+		t.Fatal(err)
+	}
+	if n := len(c.cache); n > 1 && n >= lookupCacheMax {
+		t.Fatalf("expired entries were not swept: %d left", n)
 	}
 }

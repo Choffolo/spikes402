@@ -28,6 +28,7 @@ const (
 	lookupBurst     = 4           // node lookups in flight
 	lookupPerMin    = 120         // node lookups per minute, all invoices
 	lookupTimeout   = nodeTimeout // same 3s bound as invoice creation
+	lookupCacheMax  = 10_000      // cached results (a few MiB at most)
 )
 
 // invoiceCache looks up invoice status, coalescing concurrent calls for
@@ -43,6 +44,7 @@ type invoiceCache struct {
 	inflight map[string]*invoiceCall
 	window   time.Time
 	fetched  int
+	swept    time.Time
 }
 
 type invoiceEntry struct {
@@ -121,11 +123,36 @@ func (c *invoiceCache) get(paymentHash string, paidUntil, now time.Time) (lightn
 
 	c.mu.Lock()
 	delete(c.inflight, paymentHash)
+	c.makeRoomLocked(now)
 	c.cache[paymentHash] = invoiceEntry{pay: pay, err: err, expires: now.Add(ttl)}
 	c.mu.Unlock()
 	call.pay, call.err = pay, err
 	close(call.done)
 	return pay, err
+}
+
+// makeRoomLocked keeps the cache below lookupCacheMax: at the cap it
+// forgets expired results (at most once a second, so a full cache stays
+// cheap), then, if still full, arbitrary ones. Forgetting a result only
+// costs a repeat lookup, which the lookup limits already bound.
+func (c *invoiceCache) makeRoomLocked(now time.Time) {
+	if len(c.cache) < lookupCacheMax {
+		return
+	}
+	if now.Sub(c.swept) >= time.Second {
+		c.swept = now
+		for k, e := range c.cache {
+			if !now.Before(e.expires) {
+				delete(c.cache, k)
+			}
+		}
+	}
+	for k := range c.cache {
+		if len(c.cache) < lookupCacheMax {
+			return
+		}
+		delete(c.cache, k)
+	}
 }
 
 func (c *invoiceCache) fetch(paymentHash string) (lightning.IncomingPayment, error) {
