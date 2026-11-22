@@ -24,7 +24,7 @@ func main() {
 	if url == "" {
 		url = "http://127.0.0.1:8404"
 	}
-	s := &mcp.Server{Name: "spikes402", Version: "0.1", Tools: mcp.AdminTools(&mcp.AdminClient{BaseURL: url, Key: key})}
+	s := &mcp.Server{Name: "spikes402", Version: "0.2.0", Tools: mcp.AdminTools(&mcp.AdminClient{BaseURL: url, Key: key})}
 	if err := s.Serve(context.Background(), os.Stdin, os.Stdout); err != nil {
 		log.Fatal(err)
 	}
