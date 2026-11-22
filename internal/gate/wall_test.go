@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -47,6 +48,13 @@ func TestEnergyWallPage(t *testing.T) {
 		`id="webln-pay"`, // the Lightning invoice flow is still there
 		`id="open-wallet"`, `id="pay-wait"`, "Open in wallet",
 		"data:image/png;base64,",
+		`class="logo"`,
+		`aria-hidden="true"`,
+		`rel="icon"`,
+		`type="image/svg+xml"`,
+		"data:image/svg", ";base64,",
+		"#F7931A",
+		"An invisible energy wall",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page lacks %q", want)
@@ -58,11 +66,12 @@ func TestEnergyWallPage(t *testing.T) {
 		t.Error("puzzle and invoice use different tokens")
 	}
 	// Nothing from outside, nothing inline beyond the two hashed scripts.
-	if strings.Contains(body, "<script src") || strings.Contains(body, "http://") {
+	// The inline logo's xmlns is http://www.w3.org/2000/svg, not a fetch.
+	if strings.Contains(body, "<script src") || strings.Contains(body, `src="http://`) || strings.Contains(body, `href="http://`) {
 		t.Error("page loads or links something external")
 	}
 	csp := rec.Header().Get("Content-Security-Policy")
-	for _, want := range []string{"default-src 'none'", "worker-src 'self'", "connect-src 'self'", "frame-ancestors 'none'"} {
+	for _, want := range []string{"default-src 'none'", "img-src data:", "worker-src 'self'", "connect-src 'self'", "frame-ancestors 'none'"} {
 		if !strings.Contains(csp, want) {
 			t.Errorf("CSP %q lacks %q", csp, want)
 		}
@@ -215,5 +224,26 @@ console.log(JSON.stringify(out))`
 		} else if rec.Code != http.StatusPaymentRequired { // same token: already spent
 			t.Fatalf("a token must be spendable once, got %d", rec.Code)
 		}
+	}
+}
+
+// The mark in the 402 page (and the favicon) is the same file as the
+// repo-root copy used in the README and on the demo site.
+func TestLogoAssetMatchesEmbed(t *testing.T) {
+	want, err := os.ReadFile(filepath.Join("..", "..", "assets", "logo.svg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(want) != logoSVG {
+		t.Fatal("assets/logo.svg and internal/gate/assets/logo.svg have drifted")
+	}
+	if !strings.Contains(logoSVG, `viewBox="0 0 128 128"`) || !strings.Contains(logoSVG, "#F7931A") {
+		t.Fatal("logo.svg does not look like the Spikes402 mark")
+	}
+	if !strings.Contains(string(logoInline), `class="logo"`) || !strings.Contains(string(logoInline), `aria-hidden="true"`) {
+		t.Fatal("inline logo is not marked decorative")
+	}
+	if !strings.HasPrefix(string(logoFavicon), "data:image/svg+xml;base64,") {
+		t.Fatalf("favicon is not a data URI: %s", logoFavicon[:40])
 	}
 }
