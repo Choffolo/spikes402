@@ -247,3 +247,24 @@ func TestLogoAssetMatchesEmbed(t *testing.T) {
 		t.Fatalf("favicon is not a data URI: %s", logoFavicon[:40])
 	}
 }
+
+func TestWallPriceUnit(t *testing.T) {
+	if satUnit(1) != "sat" || satUnit(2) != "sats" || satUnit(10) != "sats" {
+		t.Fatalf("satUnit: 1=%q 2=%q 10=%q", satUnit(1), satUnit(2), satUnit(10))
+	}
+
+	f := newFixture(t)
+	body := f.get("/premium/article", "", "text/html").Body.String()
+	if !strings.Contains(body, "This page costs <strong>10 sats</strong>") {
+		t.Error("default price should read \"10 sats\"")
+	}
+
+	f.gate.live.Store(&Settings{PriceSats: 1, Protect: []string{"/premium/**"}, PoW: f.gate.opt.PoW, ChallengesPerMinute: 1000})
+	body = f.get("/premium/article", "", "text/html").Body.String()
+	if !strings.Contains(body, "This page costs <strong>1 sat</strong>") {
+		t.Error("a price of 1 should read \"1 sat\"")
+	}
+	if strings.Contains(body, "1 sats") {
+		t.Error("a price of 1 still says \"1 sats\"")
+	}
+}
