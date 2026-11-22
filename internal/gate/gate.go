@@ -258,7 +258,8 @@ func (g *Gate) deliver(w http.ResponseWriter, r *http.Request, id, scheme string
 	}
 }
 
-// protectedCacheControl is set on every response for a protected path.
+// protectedCacheControl is set on every final response for a protected path
+// (not on 1xx informational responses).
 const protectedCacheControl = "private, no-store"
 
 // noStore wraps w so the response is sent with Cache-Control:
@@ -275,6 +276,11 @@ type cacheControlWriter struct {
 }
 
 func (w *cacheControlWriter) WriteHeader(code int) {
+	if code < 200 {
+		// 1xx is not a final response; Cache-Control does not apply.
+		w.ResponseWriter.WriteHeader(code)
+		return
+	}
 	if !w.wrote {
 		w.Header().Set("Cache-Control", w.value)
 		w.wrote = true
