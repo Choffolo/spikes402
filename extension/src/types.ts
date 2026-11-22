@@ -12,6 +12,7 @@ export const defaultSettings = (): Settings => ({
   maxSatsPerSitePerDay: 100,
   maxSatsPerDay: 500,
   siteAllowances: {},
+  sites: {},
   network: "mainnet",
 });
 
@@ -28,6 +29,10 @@ export type PaymentRecord = {
 
 export type PendingPayment = {
   id: string;
+  /** "trust": the first request from a site, asking whether it may pay automatically. */
+  kind?: "trust";
+  /** Site key of the origin (see site.ts). */
+  site?: string;
   origin: string;
   invoice: string;
   amountSats: number;

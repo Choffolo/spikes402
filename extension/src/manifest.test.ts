@@ -18,6 +18,12 @@ describe("manifest", () => {
     expect(Object.keys(firefox).sort()).toEqual(["background", "browser_specific_settings"]);
   });
 
+  it("injects window.webln only into https pages and local development hosts", () => {
+    for (const cs of manifest.content_scripts) {
+      expect(cs.matches).toEqual(["https://*/*", "http://localhost/*", "http://127.0.0.1/*"]);
+    }
+  });
+
   it("has the same version as package.json", () => {
     expect(manifest.version).toBe(pkg.version);
   });

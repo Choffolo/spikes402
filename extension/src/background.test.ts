@@ -120,8 +120,14 @@ async function boot() {
   await tick(1);
 }
 
+const SITES = ["a.example", "one.example", "two.example", "evil.example", "example.com", "hold.example", "other.example"];
+const trustedSites = (dailySats = 100) =>
+  Object.fromEntries(SITES.map((d) => [d, { trusted: true, dailySats, since: "2026-11-01T00:00:00.000Z" }]));
+
 beforeEach(async () => {
   installChrome();
+  // The sites these tests pay from are trusted already; trust itself is tested at the end.
+  store["spikes402"] = { settings: { sites: trustedSites() } };
   await boot();
 });
 
@@ -213,7 +219,9 @@ describe("locking", () => {
   });
 
   it("two payments cannot both pass a cap that fits only one", async () => {
-    store["spikes402"] = { settings: { maxSatsPerPayment: 10, maxSatsPerSitePerDay: 15, maxSatsPerDay: 500, siteAllowances: {}, network: "mainnet" } };
+    store["spikes402"] = {
+      settings: { maxSatsPerPayment: 10, maxSatsPerSitePerDay: 15, maxSatsPerDay: 500, siteAllowances: {}, sites: trustedSites(15), network: "mainnet" },
+    };
     await boot();
     walletSend = () => new Promise(() => undefined); // both would be in flight together
     void pay("https://a.example", small(), 1);
@@ -518,5 +526,139 @@ describe("toolbar badge after a page is paid", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("trusted sites", () => {
+  const enable = (origin: string, tab = 1) => call({ type: "webln", method: "enable", origin }, pageSender(origin, tab));
+  const answerTrust = (id: string, choice: "once" | "always" | "refuse", dailySats?: number) =>
+    call({ type: "confirmPayment", id, choice, dailySats }, ext);
+  const sites = () => (state().settings as unknown as { sites: Record<string, { trusted: boolean; dailySats: number }> }).sites ?? {};
+
+  beforeEach(async () => {
+    store["spikes402"] = {}; // no site is trusted yet
+    await boot();
+  });
+
+  it("asks the first time a site calls enable, and only then enables it", async () => {
+    let settled = false;
+    const p = enable("https://shop.example.org").then((r) => ((settled = true), r));
+    await tick();
+    expect(settled).toBe(false);
+    const prompt = state().prompts?.[0];
+    expect(prompt).toMatchObject({ kind: "trust", site: "example.org", origin: "https://shop.example.org" });
+    expect(prompt?.reason).toMatch(/Allow automatic payments on example\.org, up to 100 sats a day\?/);
+
+    expect((await answerTrust(prompt!.id, "always", 25)).error).toBeUndefined();
+    expect(await p).toEqual({ enabled: true });
+    expect(sites()["example.org"]).toMatchObject({ trusted: true, dailySats: 25 });
+
+    // Asked once: another subdomain of the same site is already trusted.
+    expect(await enable("https://pay.example.org", 2)).toEqual({ enabled: true });
+    expect(state().prompts ?? []).toHaveLength(0);
+  });
+
+  it("rejects, and remembers, a site the user turns down", async () => {
+    const p = enable("https://bad.example");
+    await tick();
+    await answerTrust(state().prompts![0].id, "refuse");
+    expect((await p).error).toMatch(/not allowed/);
+    expect(sites()["bad.example"]).toMatchObject({ trusted: false });
+
+    // No new question, no payment, nothing sent to the wallet.
+    expect((await enable("https://bad.example")).error).toMatch(/not allowed/);
+    expect((await pay("https://bad.example", small())).error).toMatch(/not allowed/);
+    expect(state().prompts ?? []).toHaveLength(0);
+    expect(sends).toHaveLength(0);
+  });
+
+  it("asks on a first sendPayment too, and pays only after approval", async () => {
+    const p = pay("https://new.example", small());
+    await tick();
+    expect(sends).toHaveLength(0);
+    await answerTrust(state().prompts![0].id, "always");
+    expect((await p).error).toBeUndefined();
+    expect(sends).toHaveLength(1);
+  });
+
+  it("behaves the same whether or not the wallet is unlocked (no lock-state leak)", async () => {
+    hostUnlocked = false;
+    const p = enable("https://probe.example");
+    await tick();
+    expect(state().prompts?.[0]).toMatchObject({ kind: "trust" }); // asked, not "wallet is locked"
+    await answerTrust(state().prompts![0].id, "refuse");
+    expect((await p).error).not.toMatch(/locked/);
+  });
+
+  it("one question per site, however many calls arrive", async () => {
+    const calls = [enable("https://spam.example", 1), enable("https://www.spam.example", 2), pay("https://x.spam.example", small(), 3)];
+    await tick();
+    expect(state().prompts).toHaveLength(1);
+    await answerTrust(state().prompts![0].id, "refuse");
+    for (const r of await Promise.all(calls)) expect(r.error).toMatch(/not allowed/);
+  });
+
+  it("a trust question needs allow or refuse, and a sane limit", async () => {
+    void enable("https://odd.example");
+    await tick();
+    const id = state().prompts![0].id;
+    expect((await answerTrust(id, "once")).error).toBeTruthy();
+    expect((await answerTrust(id, "always", 0)).error).toBeTruthy();
+    expect(state().prompts).toHaveLength(1); // still waiting
+    expect(sites()["odd.example"]).toBeUndefined();
+    await answerTrust(id, "refuse");
+  });
+
+  it("does not answer when nobody answers, and stores nothing", async () => {
+    vi.useFakeTimers();
+    const p = enable("https://silent.example");
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 10);
+    expect((await p).error).toMatch(/not allowed/);
+    expect(sites()["silent.example"]).toBeUndefined();
+  });
+
+  it("only https pages (and http://localhost for development) may use the wallet", async () => {
+    for (const o of ["http://example.com", "http://192.168.0.2", "http://localhost.evil.com"]) {
+      expect((await enable(o)).error).toMatch(/only works on https/);
+    }
+    expect(state().prompts ?? []).toHaveLength(0);
+    const p = enable("http://localhost:3000");
+    await tick();
+    expect(state().prompts?.[0]).toMatchObject({ kind: "trust", site: "localhost:3000" });
+    await answerTrust(state().prompts![0].id, "always");
+    expect(await p).toEqual({ enabled: true });
+  });
+
+  it("subdomains share one daily cap: minting subdomains does not buy more", async () => {
+    store["spikes402"] = { settings: { sites: { "evil.example": { trusted: true, dailySats: 100, since: "2026-11-01T00:00:00.000Z" } } } };
+    await boot();
+    for (let i = 0; i < 10; i++) expect((await pay(`https://sub${i}.evil.example`, small(), 1 + i)).error).toBeUndefined();
+    expect(sends).toHaveLength(10); // 10 x (5 + fee cap 5) = the 100 sat cap
+    void pay("https://sub10.evil.example", small(), 20);
+    await tick();
+    expect(sends).toHaveLength(10); // the 11th is asked about, not paid
+    expect(state().prompts?.[0]).toMatchObject({ origin: "https://sub10.evil.example" });
+    expect(state().spend?.perSite).toEqual({ "evil.example": 100 });
+  });
+
+  it("revoking a site makes it ask again; a page cannot do it", async () => {
+    store["spikes402"] = { settings: { sites: { "a.example": { trusted: true, dailySats: 100, since: "2026-11-01T00:00:00.000Z" } } } };
+    await boot();
+    expect((await call({ type: "forgetSite", site: "a.example" }, pageSender("https://a.example"))).error).toBeTruthy();
+    expect(sites()["a.example"]).toBeDefined();
+    expect((await call({ type: "forgetSite", site: "a.example" }, ext)).error).toBeUndefined();
+    expect(sites()["a.example"]).toBeUndefined();
+    void enable("https://a.example");
+    await tick();
+    expect(state().prompts?.[0]).toMatchObject({ kind: "trust", site: "a.example" });
+    await answerTrust(state().prompts![0].id, "refuse");
+  });
+
+  it("a page is never covered by the Paying notice unless its site is trusted", async () => {
+    const check = (origin: string) => call({ type: "autoPayCheck", invoice: small() }, pageSender(origin));
+    expect(await check("https://unknown.example")).toEqual({ willPay: false });
+    store["spikes402"] = { settings: { sites: { "ok.example": { trusted: true, dailySats: 100, since: "2026-11-01T00:00:00.000Z" } } } };
+    expect(await check("https://ok.example")).toMatchObject({ willPay: true });
+    expect(await check("http://ok.example")).toEqual({ willPay: false });
   });
 });

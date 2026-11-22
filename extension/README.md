@@ -3,7 +3,8 @@
 A small Manifest V3 extension that keeps a **non-custodial** Lightning
 wallet in your browser and injects [`window.webln`](https://www.webln.guide/)
 so a [Spikes402](https://github.com/Choffolo/spikes402) 402 page can pay
-automatically when the amount is within your budget.
+automatically when the amount is within your budget, on sites you have
+allowed.
 
 Keys never leave this machine. There is no Spikes402 server for the wallet.
 The wallet uses the official [Spark SDK](https://docs.spark.money/wallets/typescript)
@@ -50,17 +51,29 @@ On mainnet, use only tiny amounts. To try it in your browser, see
   supported yet. Paste an invoice instead." After a send the popup shows
   "Sending…", then "Sent N sats (fee M)" or the error, clears the form and
   updates the balance.
+- Trusted sites: a site can use the wallet only after you allow it. The
+  first time a page calls `webln.enable()` or asks for a payment, the popup
+  (and a notification) asks "Allow automatic payments on <site>, up to N
+  sats a day?"; you can change N before allowing. Until you answer, the page
+  gets nothing, whether or not the wallet is unlocked. "Don't allow" is
+  remembered so the site does not ask again. The list is under "Trusted
+  sites" in the popup; removing a site makes it ask again. A site means the
+  registrable domain (eTLD+1), so `shop.example.com` and `pay.example.com`
+  are one site with one daily limit. Only https pages are served, plus
+  `http://localhost` and `http://127.0.0.1` for development (each local port
+  is its own site); the script is not injected into other http pages.
 - Limits: max sats per page payment (default 10; an **all-inclusive** cap:
   the price plus the biggest possible fee must fit, otherwise the popup
-  asks first, showing "N sats + a fee of up to M"), max sats per site per
-  day (default 100), global daily cap (default 500). The biggest fee is 10%
+  asks first, showing "N sats + a fee of up to M"), the daily limit offered
+  for a newly trusted site (default 100; each trusted site keeps its own),
+  global daily cap (default 500). The biggest fee is 10%
   of the price, at least 5 sats, so with the default cap a page above 5
   sats asks first; you only pay the real fee, which is often lower. Each
   paid page is written to the history with its real fee.
   Pages that fit all three caps are paid automatically. If a page costs
   more, the popup asks whether to pay once, always allow this price on
   this site, or decline. "Always allow" raises the per-page cap for that
-  origin only; later visits still respect the daily caps.
+  site only; later visits still respect the daily caps.
 - How a payment is booked: the full cost (invoice amount plus the fee cap)
   is counted in the budget **before** the payment is sent, and the same
   fee cap is given to the wallet. When the payment settles, the real cost
@@ -208,6 +221,18 @@ Gaps compared to Chrome:
   the tab URL), not from a value the page can invent. Privileged actions
   (unlock, send, confirm, settings) are accepted only from extension
   pages. The mnemonic is decrypted only in the wallet host.
+- **Per-site trust, keyed by registrable domain.** Nothing is paid and
+  `enable()` does not succeed for a site you have not allowed, and an
+  unknown site gets the same answer whether the wallet is locked or not.
+  Caps and trust are keyed by the registrable domain from the Public Suffix
+  List (the [`tldts`](https://github.com/remusao/tldts) library, MIT, no
+  dependencies besides its core, pinned), including the list's private
+  section, so a hostile site cannot get fresh allowances from new
+  subdomains, while `alice.github.io` and `bob.github.io` stay separate. A
+  hand-written suffix list would be short but wrong for rules such as
+  `*.ck` or `co.uk`, and would go stale; this keeps the data current with
+  each release of the dependency. Domains are shown in their ASCII form, so
+  look-alike (IDN) names are visible.
 - **Origin in prompts.** Confirmation text and the desktop notification
   include the page origin and the amount, not just the invoice.
 - **No remote code.** Manifest V3 CSP for extension pages is

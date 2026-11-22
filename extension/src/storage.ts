@@ -24,6 +24,7 @@ export async function loadState(): Promise<StoredState> {
       ...defaultSettings(),
       ...s.settings,
       siteAllowances: { ...defaultSettings().siteAllowances, ...(s.settings?.siteAllowances ?? {}) },
+      sites: { ...(s.settings?.sites ?? {}) },
     },
     spend: s.spend ?? emptySpend("1970-01-01"),
     history: Array.isArray(s.history) ? s.history : [],
