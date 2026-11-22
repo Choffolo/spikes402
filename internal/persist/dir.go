@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // Prepare creates dir (mode 0700) if needed and makes sure it is writable.
@@ -59,6 +60,8 @@ func writeAtomic(dir, name string, data []byte) error {
 	return syncDir(dir)
 }
 
+// appendLine appends line and a newline. It does not fsync: callers
+// make it durable with syncFile, so several appends can share one fsync.
 func appendLine(path, line string) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -72,14 +75,31 @@ func appendLine(path, line string) error {
 		f.Close()
 		return err
 	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
 	return f.Close()
 }
 
+// syncFile fsyncs the file at path, including data written through
+// other handles.
+func syncFile(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	err = f.Sync()
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// syncDir fsyncs a directory so a rename or a new file survives a crash.
+// Windows has no directory fsync (FlushFileBuffers on a directory handle
+// fails with "Access is denied"), and NTFS journals renames itself, so it
+// is skipped there.
 func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	d, err := os.Open(dir)
 	if err != nil {
 		return err

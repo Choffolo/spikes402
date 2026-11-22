@@ -3,10 +3,12 @@ package persist
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -228,5 +230,57 @@ func TestSpentFilesHaveNoSecret(t *testing.T) {
 		if strings.Contains(string(raw), string(key)) {
 			t.Fatalf("secret in %s", name)
 		}
+	}
+}
+
+// Concurrent Persist calls share fsyncs, and across a compaction nothing
+// is lost: every record is there after a reload.
+func TestSpentConcurrentPersistAcrossCompaction(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	key := testKey(t)
+	now := time.Unix(1_800_000_000, 0)
+	s, err := OpenSpent(dir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Load(now); err != nil {
+		t.Fatal(err)
+	}
+	n := maxLogLines + 500 // forces at least one compaction
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := w; i < n; i += 8 {
+				id := fmt.Sprintf("pay:%032x", i)
+				if err := s.Persist(SpentRecord{ID: id, Expires: now.Add(time.Hour).Unix(), First: now.Unix()}); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	s2, err := OpenSpent(dir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s2.Load(now)
+	if err != nil || len(got) != n {
+		t.Fatalf("reload: %d records, want %d (%v)", len(got), n, err)
+	}
+}
+
+// Directory fsync is skipped on Windows (it fails there with "Access is
+// denied") and works elsewhere; either way it must not return an error.
+func TestSyncDirNeverFails(t *testing.T) {
+	if err := syncDir(t.TempDir()); err != nil {
+		t.Fatal(err)
 	}
 }
