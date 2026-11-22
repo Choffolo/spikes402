@@ -133,10 +133,18 @@ func TestPreviewOnThe402Page(t *testing.T) {
 		`<meta name="description" content="A alert(1) teaser">`,
 		"<article>", "First paragraph, with a break",
 		"This page costs", // the wall is still there
+		"A taste of what is behind the energy wall.",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page lacks %q", want)
 		}
+	}
+	cap, title := strings.Index(body, "A taste of what is behind the energy wall."), strings.Index(body, "<h2>Secret &amp; Report</h2>")
+	if cap < 0 || title < 0 || cap > title {
+		t.Errorf("caption should sit above the preview title (cap=%d title=%d)", cap, title)
+	}
+	if strings.Contains(body, "A taste of what is behind the wall.<") {
+		t.Error("old caption text is still on the page")
 	}
 	for _, bad := range []string{"onerror=alert", "<img src=x", "<b>Report", "SCRIPT-TEXT", "javascript:alert", `alert("INLINE")`, "NAV-TEXT"} {
 		if strings.Contains(body, bad) {
