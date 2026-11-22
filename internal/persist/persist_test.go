@@ -295,7 +295,7 @@ func TestWriteFile(t *testing.T) {
 		t.Fatalf("%q %v", got, err)
 	}
 	mode, err := fileMode(filepath.Join(dir, "public-stats.json"))
-	if err != nil || mode != 0o600 {
+	if err != nil || (runtime.GOOS != "windows" && mode != 0o600) {
 		t.Fatalf("mode %o %v", mode, err)
 	}
 }
