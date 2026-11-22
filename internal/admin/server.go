@@ -342,6 +342,9 @@ func (s *Server) apply(ch config.Changes, by Role) (config.Public, error) {
 		if why := config.WeakensProtection(s.cfg, n); len(why) > 0 {
 			return config.Public{}, fail(http.StatusForbidden, "this would reduce protection (%s); propose it for the human admin to approve", strings.Join(why, "; "))
 		}
+		if why := config.NeedsConfirmation(s.cfg, n); len(why) > 0 {
+			return config.Public{}, fail(http.StatusForbidden, "this needs a human to confirm it (%s); propose it for the human admin to approve", strings.Join(why, "; "))
+		}
 	}
 	path := s.cfg.OverridesFile()
 	if path == "" && s.configFile != "" {
@@ -383,8 +386,33 @@ func mergeBotPolicies(current, incoming map[string]gate.Policy) map[string]gate.
 	return out
 }
 
+// proposalOut is a proposal plus what a human should look at before
+// approving it, judged against the current settings.
+type proposalOut struct {
+	Proposal
+	Risks []string `json:"risks,omitempty"`
+}
+
+// risks lists why approving ch needs an explicit confirmation.
+func (s *Server) risks(ch config.Changes) []string {
+	cur := s.config()
+	n, err := cur.Apply(ch)
+	if err != nil {
+		return nil
+	}
+	return config.NeedsConfirmation(cur, n)
+}
+
 func (s *Server) listProposals(_ http.ResponseWriter, _ *http.Request, _ Role) (any, error) {
-	return s.proposals.list(s.now()), nil
+	list := s.proposals.list(s.now())
+	out := make([]proposalOut, len(list))
+	for i, p := range list {
+		out[i] = proposalOut{Proposal: p}
+		if p.Status == "pending" {
+			out[i].Risks = s.risks(p.Changes)
+		}
+	}
+	return out, nil
 }
 
 func (s *Server) propose(_ http.ResponseWriter, r *http.Request, role Role) (any, error) {
@@ -407,6 +435,15 @@ func (s *Server) propose(_ http.ResponseWriter, r *http.Request, role Role) (any
 }
 
 func (s *Server) approve(_ http.ResponseWriter, r *http.Request, role Role) (any, error) {
+	// A proposal that could take the site down is only applied when the
+	// request says "confirm=1" (the dashboard asks the human first).
+	if r.URL.Query().Get("confirm") != "1" {
+		if p, ok := s.proposals.peek(r.PathValue("id")); ok {
+			if why := s.risks(p.Changes); len(why) > 0 {
+				return nil, fail(http.StatusConflict, "needs explicit confirmation (%s); repeat with ?confirm=1", strings.Join(why, "; "))
+			}
+		}
+	}
 	p, err := s.proposals.take(r.PathValue("id"), s.now())
 	if err != nil {
 		return nil, fail(http.StatusNotFound, "%v", err)
