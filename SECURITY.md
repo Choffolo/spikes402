@@ -51,9 +51,16 @@ amounts on mainnet. See [Try the wallet](docs/try-the-wallet.md).
 - Spark allows a unilateral on-chain exit; that button is **not** in the
   extension yet. Recovering funds that way today needs the phrase and an
   external tool (`sparkcli`).
-- While the wallet is unlocked, a page can be paid automatically if it
-  fits the caps (default: 10 sats per page, 100 per site per day, 500 per
-  day, fees included). Over a cap, the popup asks for confirmation.
+- A site can use the wallet only after you allow it: the first request
+  from a site asks you ("Allow automatic payments on <site>, up to N sats a
+  day?"), and you can remove sites again in the popup. Sites are told apart
+  by registrable domain (eTLD+1), so subdomains share one entry and one
+  limit. Only https pages (and `http://localhost` / `127.0.0.1` for
+  development) are served.
+- While the wallet is unlocked, a page of an allowed site can be paid
+  automatically if it fits the caps (default: 10 sats per page, 100 per
+  site per day, 500 per day, fees included). Over a cap, the popup asks for
+  confirmation.
 - Keys never leave this machine; there is no Spikes402 server for the
   wallet. Report extension bugs the same way as above.
 

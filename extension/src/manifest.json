@@ -26,8 +26,9 @@
   "content_scripts": [
     {
       "matches": [
-        "http://*/*",
-        "https://*/*"
+        "https://*/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
       ],
       "js": [
         "inject.js"
@@ -37,8 +38,9 @@
     },
     {
       "matches": [
-        "http://*/*",
-        "https://*/*"
+        "https://*/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
       ],
       "js": [
         "content.js"

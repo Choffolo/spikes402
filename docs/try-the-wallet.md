@@ -83,10 +83,14 @@ Defaults (you can change them in the popup):
 - 100 sats per site per day
 - 500 sats per day in total
 
-Visit a Spikes402 page over `http:` or `https:` (for example
-`http://127.0.0.1:8402/premium/…`; `file:` URLs are not supported). If the
-wallet is unlocked and the price fits all three caps, the page is paid
-automatically, and the page shows "Paying N sats…" until it opens. If it
+Visit a Spikes402 page over `https:` (or `http://localhost` /
+`http://127.0.0.1` for development, for example
+`http://127.0.0.1:8402/premium/…`; other `http:` pages and `file:` URLs are
+not supported). The first time a site asks, the popup asks "Allow
+automatic payments on this site, up to N sats a day?"; choose **Allow** to
+continue. Allowed sites are listed under "Trusted sites", where you can
+remove them. If the wallet is unlocked and the price fits all three caps,
+the page is paid automatically, and the page shows "Paying N sats…" until it opens. If it
 would go over a cap, the popup asks (showing "N sats + a fee of up to M")
 whether to **pay this time**, **always allow this price on this site**, or
 **not pay**. "Always

@@ -89,6 +89,20 @@ function render(snap: Snapshot, full: boolean) {
   const { info, settings, pending, pendingCount = 0 } = snap;
   $("network-flag").textContent = info.network === "mainnet" ? "Real bitcoin" : "Test network (no real money)";
 
+  // A site asking to be trusted comes first, whatever else the wallet shows.
+  if (pending?.kind === "trust") {
+    const box = $("view-trust");
+    if (box.dataset.id !== pending.id) {
+      box.dataset.id = pending.id;
+      $("trust-site").textContent = pending.site ?? pending.origin;
+      $("trust-origin").textContent = `Asked from ${pending.origin}`;
+      input("trust-limit").value = String(settings.maxSatsPerSitePerDay);
+    }
+    show("view-trust");
+    return;
+  }
+  delete $("view-trust").dataset.id;
+
   if (!info.hasVault) {
     if (current !== "view-restore" && current !== "view-password") show("view-setup");
     return;
@@ -127,6 +141,7 @@ function render(snap: Snapshot, full: boolean) {
     delete pendingBox.dataset.id;
   }
 
+  renderSites(settings.sites ?? {});
   if (full) {
     input("set-per-pay").value = String(settings.maxSatsPerPayment);
     input("set-per-site").value = String(settings.maxSatsPerSitePerDay);
@@ -134,6 +149,31 @@ function render(snap: Snapshot, full: boolean) {
     $<HTMLSelectElement>("set-network").value = settings.network;
   }
   if (current === "view-history") renderHistory(snap.history);
+}
+
+function renderSites(sites: Settings["sites"]) {
+  const entries = Object.entries(sites).sort(([a], [b]) => a.localeCompare(b));
+  const list = $("sites");
+  if (!entries.length) {
+    const li = document.createElement("li");
+    li.textContent = "None yet. A site asks the first time it wants to pay.";
+    return list.replaceChildren(li);
+  }
+  list.replaceChildren(
+    ...entries.map(([site, rule]) => {
+      const li = document.createElement("li");
+      const name = document.createElement("strong");
+      name.textContent = site;
+      const note = document.createTextNode(rule.trusted ? ` up to ${rule.dailySats} sats a day ` : " not allowed ");
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "secondary";
+      remove.textContent = "Remove";
+      remove.addEventListener("click", () => void call({ type: "forgetSite", site }).then(() => refresh(true)).catch(fail));
+      li.append(name, note, remove);
+      return li;
+    }),
+  );
 }
 
 function renderHistory(history: PaymentRecord[]) {
@@ -407,6 +447,16 @@ $("btn-reveal-hide").addEventListener("click", hideReveal);
 
 // ---- payment confirmation
 
+onSubmit("form-trust", () => answerTrust("always"));
+$("btn-trust-refuse").addEventListener("click", () => void answerTrust("refuse").catch(fail));
+
+async function answerTrust(choice: "always" | "refuse") {
+  const id = $("view-trust").dataset.id;
+  if (!id) return;
+  await call({ type: "confirmPayment", id, choice, dailySats: Number(input("trust-limit").value) });
+  await refresh();
+}
+
 async function confirmPending(choice: "once" | "always" | "refuse") {
   const id = $("pending-box").dataset.id;
   if (!id) return;
@@ -422,7 +472,7 @@ $("btn-decline").addEventListener("click", () => void confirmPending("refuse").c
 
 let polling = false;
 async function live() {
-  if (polling || (current !== "view-main" && current !== "view-history")) return;
+  if (polling || (current !== "view-main" && current !== "view-history" && current !== "view-trust")) return;
   polling = true;
   try {
     const snap = await call<Snapshot>({ type: "getState" });

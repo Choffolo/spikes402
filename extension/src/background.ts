@@ -15,6 +15,8 @@ import {
   spendForToday,
   todayLocal,
   withSiteAllowance,
+  withSiteRule,
+  withoutSite,
   type ConfirmChoice,
   type Decision,
 } from "./budget";
@@ -24,6 +26,7 @@ import { InvoiceError, isBolt11, parseBolt11AmountSats } from "./invoice";
 import { looksLikeLightningAddress, parseLightningAddress, resolveLightningAddress, UNSUPPORTED_ADDRESS } from "./lnaddress";
 import { lightningHint } from "./backend";
 import { isExtensionPage, pageOrigin, sanitizeSettings } from "./sender";
+import { siteKey } from "./site";
 import { maxFeeSatsFor } from "./spark-util";
 import {
   appendHistory,
@@ -61,7 +64,8 @@ type PopupMsg =
   | { type: "saveSettings"; settings: Partial<Settings> }
   | { type: "receive"; amountSats: number }
   | { type: "send"; destination: string; amountSats?: number }
-  | { type: "confirmPayment"; id: string; choice: ConfirmChoice };
+  | { type: "confirmPayment"; id: string; choice: ConfirmChoice; dailySats?: number }
+  | { type: "forgetSite"; site: string };
 
 type PageMsg = { type: "webln"; method: "enable" | "getInfo" | "sendPayment"; origin: string; invoice?: string };
 type PagePriceMsg = { type: "pagePrice"; amountSats: number | null };
@@ -133,7 +137,9 @@ async function handle(msg: PopupMsg | PageMsg | PagePriceMsg | AutoPayMsg, sende
     case "send":
       return sendFromPopup(msg.destination, msg.amountSats);
     case "confirmPayment":
-      return resolvePending(msg.id, msg.choice);
+      return resolvePending(msg.id, msg.choice, msg.dailySats);
+    case "forgetSite":
+      return forgetSite(msg.site);
     case "webln":
       return handleWebln(msg, sender);
     default:
@@ -282,6 +288,11 @@ async function sendFromPopup(destination: string, amountSats?: number): Promise<
 async function handleWebln(msg: PageMsg, sender: chrome.runtime.MessageSender): Promise<unknown> {
   const origin = pageOrigin(sender);
   if (!origin) throw new Error("This payment request has no page origin.");
+  const site = siteKey(origin);
+  if (!site) throw new Error("The Spikes402 wallet only works on https sites (and http://localhost for development).");
+  // Before anything else, and whether or not the wallet is unlocked, so an
+  // unknown site learns nothing about the wallet: it must be trusted first.
+  await requireTrust(site, origin, sender.tab?.id);
 
   const host = await walletCall<{ unlocked?: boolean }>("status").catch(() => ({ unlocked: false }));
   if (!host.unlocked) throw new Error("The Spikes402 wallet is locked. Open the extension and unlock it.");
@@ -304,7 +315,7 @@ async function handleWebln(msg: PageMsg, sender: chrome.runtime.MessageSender): 
   // One fee rule: the amount we count in every cap is the amount we allow the wallet to spend.
   const feeSats = amountSats === null ? 0 : maxFeeSatsFor(amountSats);
 
-  let reserved = await reserve({ origin, amountSats, feeSats, invoice, force: false });
+  let reserved = await reserve({ origin, site, amountSats, feeSats, invoice, force: false });
   if (reserved.action === "refuse") {
     await log(origin, amountSats ?? 0, invoice, "refused", reserved.reason);
     throw new Error(reserved.reason);
@@ -322,7 +333,7 @@ async function handleWebln(msg: PageMsg, sender: chrome.runtime.MessageSender): 
       await log(origin, amountSats ?? 0, invoice, "refused", "You declined the payment.");
       throw new Error("Payment declined.");
     }
-    reserved = await reserve({ origin, amountSats, feeSats, invoice, force: true });
+    reserved = await reserve({ origin, site, amountSats, feeSats, invoice, force: true });
   }
   if (reserved.action !== "reserved") throw new Error("The payment could not be reserved.");
   const reservation = reserved.reservation;
@@ -352,6 +363,57 @@ async function handleWebln(msg: PageMsg, sender: chrome.runtime.MessageSender): 
   }
 }
 
+const NOT_ALLOWED = "This site is not allowed to use the Spikes402 wallet.";
+// One question per site at a time: further calls from the same site wait for the same answer.
+const trustAsks = new Map<string, Promise<void>>();
+
+/**
+ * A site may use the wallet only after the user said so. The first request
+ * from a site (enable or sendPayment) asks; "Allow" stores the site with its
+ * daily limit, "Don't allow" stores it as turned down so it does not nag.
+ * No answer in time rejects this call and stores nothing.
+ */
+async function requireTrust(site: string, origin: string, tabId: number | undefined): Promise<void> {
+  const rule = (await loadState()).settings.sites[site];
+  if (rule) {
+    if (rule.trusted) return;
+    throw new Error(NOT_ALLOWED);
+  }
+  let ask = trustAsks.get(site);
+  if (!ask) {
+    ask = (async () => {
+      try {
+        const s = await loadState();
+        await askUser({
+          kind: "trust",
+          site,
+          origin,
+          invoice: "",
+          amountSats: 0,
+          costSats: 0,
+          reason: `Allow automatic payments on ${site}, up to ${s.settings.maxSatsPerSitePerDay} sats a day?`,
+          tabId,
+        });
+      } finally {
+        trustAsks.delete(site);
+      }
+    })();
+    trustAsks.set(site, ask);
+  }
+  await ask;
+  // The answer is in the stored list (askUser alone only says what was clicked).
+  if (!(await loadState()).settings.sites[site]?.trusted) throw new Error(NOT_ALLOWED);
+}
+
+/** Remove a site from the list: it is no longer trusted (or turned down) and asks again next time. */
+async function forgetSite(site: string): Promise<{ ok: true }> {
+  if (typeof site !== "string") throw new Error("Unknown site.");
+  await updateState((s) => {
+    s.settings = withoutSite(s.settings, site);
+  });
+  return { ok: true };
+}
+
 /**
  * Will this page be paid without asking? The page content script uses the
  * answer to cover the 402 page with a "Paying…" notice at once, instead of
@@ -360,7 +422,8 @@ async function handleWebln(msg: PageMsg, sender: chrome.runtime.MessageSender): 
  */
 async function autoPayCheck(msg: AutoPayMsg, sender: chrome.runtime.MessageSender): Promise<{ willPay: boolean; amountSats?: number }> {
   const origin = pageOrigin(sender);
-  if (!origin || typeof msg.invoice !== "string") return { willPay: false };
+  const site = origin ? siteKey(origin) : undefined;
+  if (!site || typeof msg.invoice !== "string") return { willPay: false };
   const host = await walletCall<{ unlocked?: boolean }>("status").catch(() => ({ unlocked: false }));
   if (!host.unlocked) return { willPay: false };
   let amountSats: number | null;
@@ -374,7 +437,7 @@ async function autoPayCheck(msg: AutoPayMsg, sender: chrome.runtime.MessageSende
   const today = todayLocal();
   const d = decidePayment({
     amountSats,
-    origin,
+    site,
     settings: s.settings,
     spend: spendForToday(s.spend, today),
     today,
@@ -391,6 +454,7 @@ type Reserved = Decision | { action: "reserved"; reservation: Reservation };
  */
 function reserve(p: {
   origin: string;
+  site: string;
   amountSats: number | null;
   feeSats: number;
   invoice: string;
@@ -401,7 +465,7 @@ function reserve(p: {
     const spend = spendForToday(s.spend, today);
     const d = decidePayment({
       amountSats: p.amountSats,
-      origin: p.origin,
+      site: p.site,
       settings: s.settings,
       spend,
       today,
@@ -419,7 +483,7 @@ function reserve(p: {
       state: "in_flight",
       time: new Date().toISOString(),
     };
-    s.spend = recordSpend(spend, today, p.origin, cost);
+    s.spend = recordSpend(spend, today, p.site, cost);
     // A payment without a request id cannot be looked up; its day is over, so is its budget.
     s.reservations = [...s.reservations.filter((r) => r.requestId || r.day === today), reservation];
     return { action: "reserved", reservation };
@@ -438,7 +502,7 @@ function finishReservation(
     s.reservations = s.reservations.filter((x) => x.id !== id);
     const reserved = paymentCost(r.amountSats, r.feeSats);
     const actual = outcome.settled ? paymentCost(r.amountSats, outcome.feeSats ?? r.feeSats) : 0;
-    s.spend = adjustSpend(spendForToday(s.spend, todayLocal()), r.day, r.origin, actual - reserved);
+    s.spend = adjustSpend(spendForToday(s.spend, todayLocal()), r.day, siteKey(r.origin) ?? r.origin, actual - reserved);
     pushHistory(s, {
       time: new Date().toISOString(),
       origin: r.origin,
@@ -562,16 +626,27 @@ function askUser(p: Omit<PendingPayment, "id" | "createdAt">): Promise<ConfirmCh
   });
 }
 
-async function resolvePending(id: string, choice: ConfirmChoice): Promise<{ ok: true }> {
+async function resolvePending(id: string, choice: ConfirmChoice, dailySats?: number): Promise<{ ok: true }> {
   let answered: { pending: PendingPayment; waiter: { resolve: (c: ConfirmChoice) => void } } | undefined;
   await updateState((s) => {
     const pending = s.prompts.find((x) => x.id === id);
     const waiter = waiters.get(id);
     // No waiter means it expired or the worker restarted: drop it and store nothing.
+    if (!pending || !waiter) {
+      s.prompts = s.prompts.filter((x) => x.id !== id);
+      return;
+    }
+    // A bad answer throws before anything is taken, so the question stays open.
+    if (pending.kind === "trust") {
+      if (!pending.site || (choice !== "always" && choice !== "refuse")) throw new Error("Choose to allow or not to allow this site.");
+      const limit = dailySats ?? s.settings.maxSatsPerSitePerDay;
+      if (choice === "always" && (!Number.isSafeInteger(limit) || limit < 1)) throw new Error("The daily limit must be a whole number of sats, at least 1.");
+      s.settings = withSiteRule(s.settings, pending.site, { trusted: choice === "always", dailySats: limit, since: new Date().toISOString() });
+    } else if (choice === "always") {
+      s.settings = { ...s.settings, ...withSiteAllowance(s.settings, pending.site ?? siteKey(pending.origin) ?? pending.origin, pending.costSats) };
+    }
     s.prompts = s.prompts.filter((x) => x.id !== id);
-    if (!pending || !waiter) return;
     waiters.delete(id); // same synchronous step as the check: the timer cannot slip in
-    if (choice === "always") s.settings = { ...s.settings, ...withSiteAllowance(s.settings, pending.origin, pending.costSats) };
     answered = { pending, waiter };
   });
   if (!answered) throw new Error("This confirmation has expired.");
@@ -634,20 +709,22 @@ async function log(
   });
 }
 
-async function openPopup(pending?: { origin: string; amountSats: number; costSats: number }) {
+async function openPopup(pending?: { kind?: "trust"; site?: string; origin: string; amountSats: number; costSats: number }) {
   try {
     if (chrome.action.openPopup) await chrome.action.openPopup();
   } catch {
     /* some Chrome views refuse this; the toolbar badge still shows the page price */
   }
-  const summary = pending
+  const summary = pending?.kind === "trust"
+    ? `${pending.site ?? pending.origin} wants to pay with your wallet. Open the wallet to allow or refuse.`
+    : pending
     ? `${pending.origin} asks for ${pending.amountSats} sats + a fee of up to ${pending.costSats - pending.amountSats}. Open the wallet to pay or decline.`
     : "Open the wallet to pay or decline.";
   try {
     await chrome.notifications.create("spikes402-confirm", {
       type: "basic",
       iconUrl: "icons/icon-128.png",
-      title: "Spikes402: a payment needs your OK",
+      title: pending?.kind === "trust" ? "Spikes402: a site wants to pay" : "Spikes402: a payment needs your OK",
       message: summary,
       priority: 2,
     });

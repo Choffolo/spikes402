@@ -40,7 +40,8 @@
       return enabled;
     },
     async enable() {
-      await call("enable");
+      const res = (await call("enable")) as { enabled?: boolean } | undefined;
+      if (!res || res.enabled !== true) throw new Error("This site is not allowed to use the Spikes402 wallet.");
       enabled = true;
     },
     async getInfo() {

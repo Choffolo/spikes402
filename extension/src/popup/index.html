@@ -82,6 +82,23 @@
       </form>
     </section>
 
+    <section id="view-trust" hidden>
+      <h2>Allow this site to pay?</h2>
+      <p>A website wants to use your wallet.</p>
+      <p class="mono" id="trust-site"></p>
+      <p id="trust-origin" class="muted"></p>
+      <form id="form-trust">
+        <label>Allow automatic payments, up to this many sats a day
+          <input id="trust-limit" type="number" min="1" step="1" />
+        </label>
+        <div class="pending-actions">
+          <button type="submit">Allow</button>
+          <button id="btn-trust-refuse" type="button" class="secondary">Don't allow</button>
+        </div>
+      </form>
+      <p class="muted">Allowed sites can take payments up to this limit without asking again; this includes every subpage and subdomain of the site. Only allow sites you trust. You can remove a site later under "Trusted sites".</p>
+    </section>
+
     <section id="view-main" hidden>
       <div id="pending-box" class="pending" hidden>
         <h2>Please confirm</h2>
@@ -124,10 +141,14 @@
 
       <h2>Limits</h2>
       <label>Most to pay for one page, fee included <input id="set-per-pay" type="number" min="1" step="1" /></label>
-      <label>Most to pay one site per day <input id="set-per-site" type="number" min="1" step="1" /></label>
+      <label>Daily limit offered for a newly trusted site <input id="set-per-site" type="number" min="1" step="1" /></label>
       <label>Most to pay per day, all sites <input id="set-per-day" type="number" min="1" step="1" /></label>
       <p class="muted">A page is paid for you when its price plus the biggest possible fee fits these limits. Otherwise the wallet asks you first. You only pay the real fee, which is often lower.</p>
       <button id="btn-save-budget" type="button" class="secondary">Save limits</button>
+
+      <h2>Trusted sites</h2>
+      <ul id="sites" class="history"></ul>
+      <p class="muted">Only these sites can be paid automatically. Each has its own daily limit, shared by all its subdomains. Remove a site and it will ask again.</p>
 
       <h2>Network</h2>
       <label>Network
