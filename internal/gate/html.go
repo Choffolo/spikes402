@@ -62,11 +62,11 @@ var page = template.Must(template.New("402").Parse(`<!doctype html>
 Pay a few sats with the <a href="https://github.com/Choffolo/spikes402#browser-wallet-extension-prototype">Spikes402 extension</a>,
 or solve a math puzzle with your computer&rsquo;s power.</p>
 {{with .Preview}}<article>
+<p><small>A taste of what is behind the energy wall.</small></p>
 {{with .Title}}<h2>{{.}}</h2>
 {{end}}{{with .Description}}<p>{{.}}</p>
 {{end}}{{with .Excerpt}}<p>{{.}}</p>
-{{end}}<p><small>A taste of what is behind the wall.</small></p>
-</article>
+{{end}}</article>
 {{end}}<div class="paywall">
 <p>This page costs <strong>{{.PriceSats}} sats</strong>.</p>
 <div class="ways">
