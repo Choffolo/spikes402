@@ -12,8 +12,9 @@ Spikes402 is a small reverse proxy. On the paths the operator chooses, a
 client must **pay** a few sats over Lightning or **do proof-of-work**. The
 aim is to raise the cost of abuse. Do not trade away these principles:
 
-- **Pay or PoW.** One request, one payment or one puzzle. No accounts, no
-  subscriptions, no time passes.
+- **Pay or PoW.** One request, one payment or one puzzle. Short access only,
+  chosen by the site operator (0-60 s pass, default 10 s); never accounts
+  or subscriptions.
 - **Never custodial.** We never hold anyone's keys or funds, and we must
   not become a honeypot. Payments go to the operator's own Lightning node.
   The browser wallet keeps keys on the user's machine.
