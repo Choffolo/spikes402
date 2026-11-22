@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spikes402: Pay or PoW</title>
+<meta name="description" content="Spikes402 is an open-source reverse proxy: AI bots and scrapers either pay a few sats over Lightning or do some proof-of-work.">
+<link rel="icon" href="/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<h1><img src="/logo.svg" alt="Spikes402" width="40" height="40"> Spikes402</h1>
+<p><strong>Pay or PoW.</strong> A friendly site wearing a spiked collar.</p>
+
+<p>Spikes402 is a small open-source reverse proxy that sits in front of a website.
+On the paths you choose, bots and scrapers must either <strong>pay a few sats</strong>
+over the Bitcoin Lightning Network (<a href="https://github.com/lightninglabs/L402">L402</a>)
+or <strong>do some work</strong> (a proof-of-work puzzle, like Bitcoin mining in miniature).
+Everything else passes through untouched. Payments go straight to your own node;
+Spikes402 never holds anyone's money.</p>
+
+<h2>Try it</h2>
+<p>This page is free. The <a href="/premium/">premium section</a> is protected by
+Spikes402 itself: you will get an HTTP <code>402 Payment Required</code>, then you can pay 1 sat or solve a short puzzle.</p>
+<p class="note">This demo accepts a <strong>1 sat Lightning payment</strong> from any wallet, or a proof-of-work puzzle (about 10 seconds of one CPU core). The premium content is a short note, not a real paywalled product.</p>
+
+<p>From a terminal, the example bot in the repository solves it for you:</p>
+<pre>git clone https://github.com/Choffolo/spikes402
+cd spikes402 &amp;&amp; go build -o bin/ ./cmd/...
+bin/spikes-bot -mode pow https://spikes402.dev/premium/</pre>
+
+<h2>Status</h2>
+<p>Experimental prototype (AGPLv3). Not independently reviewed yet, so do not use it
+with real money on mainnet. Code, docs and security policy:
+<a href="https://github.com/Choffolo/spikes402">github.com/Choffolo/spikes402</a>.</p>
+
+<footer>
+Inspired by <a href="https://dspace.mit.edu/handle/1721.1/153030" target="_blank" rel="noopener">Jason Lowery's Softwar</a>
+·
+Made by <a href="https://x.com/Choffolo" target="_blank" rel="noopener">Choffolo</a> with Grok Bot
+</footer>
+</body>
+</html>
