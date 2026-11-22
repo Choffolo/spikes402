@@ -430,8 +430,8 @@ Bingbot, GPTBot, OAI-SearchBot, ChatGPT-User, ClaudeBot, PerplexityBot,
 Perplexity-User, Applebot, DuckDuckBot, CCBot. Replace the list with
 `known_bots`. Reverse DNS has a 1.5 s timeout, at most 16 lookups at once
 and a cache of 10,000 addresses (positive and negative). For Googlebot, a
-PTR name must end in `googlebot.com`, `google.com` or `googleusercontent.com`
-([Google's documentation](https://developers.google.com/crawling/docs/crawlers-fetchers/verify-google-requests)), and a forward lookup of that name must return the same address.
+PTR name must end in `googlebot.com` or `google.com` (not `googleusercontent.com`),
+and a forward lookup of that name must return the same address.
 
 ### Web Bot Auth
 

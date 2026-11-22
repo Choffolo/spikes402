@@ -31,7 +31,7 @@ type Bot struct {
 // DefaultBots are checked with the IP range lists their operators
 // publish, and reverse DNS where the operator documents it.
 var DefaultBots = []Bot{
-	{"Googlebot", "Googlebot", "https://developers.google.com/static/search/apis/ipranges/googlebot.json", []string{"googlebot.com", "google.com", "googleusercontent.com"}},
+	{"Googlebot", "Googlebot", "https://developers.google.com/static/search/apis/ipranges/googlebot.json", []string{"googlebot.com", "google.com"}},
 	{"Bingbot", "bingbot", "https://www.bing.com/toolbox/bingbot.json", []string{"search.msn.com"}},
 	{"GPTBot", "GPTBot", "https://openai.com/gptbot.json", nil},
 	{"OAI-SearchBot", "OAI-SearchBot", "https://openai.com/searchbot.json", nil},

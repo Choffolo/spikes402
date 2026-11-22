@@ -137,9 +137,8 @@ func TestReverseDNSWhenNotInList(t *testing.T) {
 		},
 	}
 	c.resolver = dns
-	// The test bots only allow googlebot.com; use DefaultBots suffixes
-	// so google.com and googleusercontent.com can also confirm.
-	c.bots = []Bot{{Name: "Googlebot", UserAgent: "Googlebot", IPRangesURL: "x", ReverseDNS: []string{"googlebot.com", "google.com", "googleusercontent.com"}}}
+	// Use the production Googlebot suffixes (googlebot.com and google.com).
+	c.bots = []Bot{{Name: "Googlebot", UserAgent: "Googlebot", IPRangesURL: "x", ReverseDNS: []string{"googlebot.com", "google.com"}}}
 
 	cases := []struct {
 		ip     string
@@ -148,7 +147,7 @@ func TestReverseDNSWhenNotInList(t *testing.T) {
 	}{
 		{"203.0.113.10", Verified, "reverse-dns"}, // PTR under googlebot.com, confirmed
 		{"203.0.113.11", Verified, "reverse-dns"}, // PTR under google.com, confirmed
-		{"203.0.113.12", Verified, "reverse-dns"}, // PTR under googleusercontent.com, confirmed
+		{"203.0.113.12", Impostor, "reverse-dns"}, // PTR under googleusercontent.com is not accepted
 		{"203.0.113.13", Impostor, "reverse-dns"}, // suffix not at the end
 		{"203.0.113.14", Impostor, "reverse-dns"}, // forward lookup does not confirm
 		{"203.0.113.15", Impostor, "reverse-dns"}, // no PTR: a definite no
