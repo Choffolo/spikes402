@@ -85,6 +85,73 @@ func TestProtectedCacheControl(t *testing.T) {
 	}
 }
 
+// captureWriter records the Cache-Control header sent with each WriteHeader,
+// including 1xx informational responses that httptest.ResponseRecorder folds away.
+type captureWriter struct {
+	h     http.Header
+	codes []int
+	cc    []string
+	wrote bool
+	body  []byte
+}
+
+func (w *captureWriter) Header() http.Header {
+	if w.h == nil {
+		w.h = make(http.Header)
+	}
+	return w.h
+}
+
+func (w *captureWriter) WriteHeader(code int) {
+	cc := w.Header().Get("Cache-Control")
+	w.codes = append(w.codes, code)
+	w.cc = append(w.cc, cc)
+	if code >= 200 {
+		w.wrote = true
+	}
+}
+
+func (w *captureWriter) Write(p []byte) (int, error) {
+	if !w.wrote {
+		w.WriteHeader(http.StatusOK)
+	}
+	w.body = append(w.body, p...)
+	return len(p), nil
+}
+
+func TestNoCacheControlOn1xx(t *testing.T) {
+	var inner captureWriter
+	w := noStore(&inner)
+	w.Header().Set("Link", "</style.css>; rel=preload; as=style")
+	w.WriteHeader(http.StatusEarlyHints)
+	w.Header().Set("Content-Type", "text/plain")
+	w.Write([]byte("ok"))
+
+	if len(inner.codes) != 2 || inner.codes[0] != http.StatusEarlyHints || inner.codes[1] != http.StatusOK {
+		t.Fatalf("codes: %v", inner.codes)
+	}
+	if inner.cc[0] != "" {
+		t.Fatalf("103 carried Cache-Control %q", inner.cc[0])
+	}
+	if inner.cc[1] != protectedCacheControl {
+		t.Fatalf("final response Cache-Control %q, want %q", inner.cc[1], protectedCacheControl)
+	}
+	if string(inner.body) != "ok" {
+		t.Fatalf("body %q", inner.body)
+	}
+
+	// A 1xx must not suppress Cache-Control on the final response,
+	// and a later 1xx still must not carry it.
+	inner = captureWriter{}
+	w = noStore(&inner)
+	w.WriteHeader(http.StatusContinue)
+	w.WriteHeader(http.StatusProcessing)
+	w.WriteHeader(http.StatusNoContent)
+	if len(inner.codes) != 3 || inner.cc[0] != "" || inner.cc[1] != "" || inner.cc[2] != protectedCacheControl {
+		t.Fatalf("codes %v Cache-Control %q", inner.codes, inner.cc)
+	}
+}
+
 func TestTokenNotBoundToRequestHost(t *testing.T) {
 	f := newFixture(t)
 	req := httptest.NewRequest(http.MethodGet, "http://www.example.com/premium/a", nil)
