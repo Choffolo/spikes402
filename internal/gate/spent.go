@@ -12,9 +12,11 @@ import (
 )
 
 // spentSet remembers redeemed token IDs until they expire, so that each
-// token can be used only once. When a SpentStore is set, uses and releases
-// are written to disk before memory is updated, so a restart cannot replay
-// a spent token.
+// token can be used only once. When a SpentStore is set, a use is written
+// to disk before use returns, so a restart cannot replay a spent token.
+// The id is reserved in memory first and the (slow) disk write happens
+// without holding mu, so a slow disk never blocks other lookups; if the
+// write fails the reservation is undone and the token is not spent.
 //
 // One exception, for payers: if the origin fails to answer (see release),
 // the token can be used again, a few times and only for a short while.
@@ -112,17 +114,22 @@ var errBusy = errors.New("server busy, try again later")
 // or errBusy if the set is full: refusing is safer than forgetting.
 func (s *spentSet) use(id string, expires, now time.Time) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	key := compactID(id)
 	if e, seen := s.ids[key]; seen {
 		if e.released && now.Unix() < e.first+int64(retryWindow.Seconds()) {
+			prev := e
 			e.released = false
-			if err := s.persistLocked(id, e); err != nil {
+			s.ids[key] = e // reserve
+			s.mu.Unlock()
+			if err := s.persist(id, e); err != nil {
+				s.mu.Lock()
+				s.ids[key] = prev
+				s.mu.Unlock()
 				return err
 			}
-			s.ids[key] = e
 			return nil
 		}
+		s.mu.Unlock()
 		return errReplay
 	}
 	s.inserts++
@@ -138,17 +145,23 @@ func (s *spentSet) use(id string, expires, now time.Time) error {
 		s.lastSweep = now
 	}
 	if len(s.ids) >= s.max {
+		s.mu.Unlock()
 		return errBusy
 	}
 	e := spentEntry{expires: expires.Unix(), first: now.Unix()}
-	if err := s.persistLocked(id, e); err != nil {
+	s.ids[key] = e // reserve: a concurrent use of the same id is a replay
+	s.mu.Unlock()
+	if err := s.persist(id, e); err != nil {
+		s.mu.Lock()
+		delete(s.ids, key)
+		s.mu.Unlock()
 		return err
 	}
-	s.ids[key] = e
 	return nil
 }
 
-func (s *spentSet) persistLocked(id string, e spentEntry) error {
+// persist writes a record to disk. It must be called without s.mu held.
+func (s *spentSet) persist(id string, e spentEntry) error {
 	if s.store == nil {
 		return nil
 	}
@@ -163,16 +176,17 @@ func (s *spentSet) persistLocked(id string, e spentEntry) error {
 // window are used up. The caller only calls it when nothing was delivered.
 func (s *spentSet) release(id string, now time.Time) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	key := compactID(id)
 	e, ok := s.ids[key]
 	if !ok || e.released || e.retries >= maxRetries || now.Unix() >= e.first+int64(retryWindow.Seconds()) {
+		s.mu.Unlock()
 		return
 	}
 	e.retries++
 	e.released = true
-	_ = s.persistLocked(id, e) // if disk fails, still release in this process
 	s.ids[key] = e
+	s.mu.Unlock()
+	_ = s.persist(id, e) // if disk fails, still release in this process
 }
 
 func (s *spentSet) len() int {

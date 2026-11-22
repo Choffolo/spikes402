@@ -33,10 +33,14 @@ type SpentRecord struct {
 type Spent struct {
 	dir      string
 	key      []byte
-	mu       sync.Mutex
+	mu       sync.Mutex // guards the fields below
 	entries  map[string]SpentRecord
 	logLines int
 	logBytes int64
+	written  uint64 // records appended so far
+	synced   uint64 // records known to be on disk
+
+	syncMu sync.Mutex // one fsync at a time; see syncTo
 }
 
 // OpenSpent prepares the journal in dir. Call Load before Persist.
@@ -132,32 +136,64 @@ func (s *Spent) Load(now time.Time) ([]SpentRecord, error) {
 	return out, nil
 }
 
-// Persist appends a record (a use or a release) and fsyncs.
+// Persist appends a record (a use or a release) and returns once it is
+// fsynced. The fsync happens outside s.mu and is shared: records appended
+// while one fsync runs are covered by the next, so concurrent callers
+// cost one fsync, not one each.
 func (s *Spent) Persist(r SpentRecord) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.entries == nil {
 		s.entries = make(map[string]SpentRecord)
 	}
 	if s.logBytes >= maxLogBytes || s.logLines >= maxLogLines {
 		if err := s.compactLocked(); err != nil {
+			s.mu.Unlock()
 			return err
 		}
 	}
 	payload, err := json.Marshal(r)
 	if err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	line := Seal(s.key, payload)
 	if err := appendLine(filepath.Join(s.dir, spentLogName), line); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	s.entries[r.ID] = r
 	s.logLines++
 	s.logBytes += int64(len(line) + 1)
+	s.written++
+	seq := s.written
+	s.mu.Unlock()
+	return s.syncTo(seq)
+}
+
+// syncTo returns once record number seq is on disk.
+func (s *Spent) syncTo(seq uint64) error {
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+	s.mu.Lock()
+	if s.synced >= seq { // an earlier fsync (or a compaction) covered it
+		s.mu.Unlock()
+		return nil
+	}
+	target := s.written
+	s.mu.Unlock()
+	if err := syncFile(filepath.Join(s.dir, spentLogName)); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if s.synced < target {
+		s.synced = target
+	}
+	s.mu.Unlock()
 	return nil
 }
 
+// compactLocked rewrites the snapshot from memory and empties the log.
+// The snapshot is fsynced, so everything appended so far is durable.
 func (s *Spent) compactLocked() error {
 	recs := make([]SpentRecord, 0, len(s.entries))
 	for _, r := range s.entries {
@@ -178,5 +214,6 @@ func (s *Spent) compactLocked() error {
 		return err
 	}
 	s.logLines, s.logBytes = 0, 0
+	s.synced = s.written
 	return syncDir(s.dir)
 }
