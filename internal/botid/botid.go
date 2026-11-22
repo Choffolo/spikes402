@@ -209,7 +209,11 @@ func (c *Classifier) check(b Bot, ip net.IP) (Kind, string, string) {
 				return Verified, "ip-list", ""
 			}
 		}
-		return Impostor, "ip-list", ""
+		if len(b.ReverseDNS) == 0 {
+			return Impostor, "ip-list", ""
+		}
+		// Not in the published list: lists can lag, so try the
+		// operator's forward-confirmed reverse DNS next.
 	}
 	if len(b.ReverseDNS) > 0 {
 		ok, err := c.reverseDNS(b, addr)

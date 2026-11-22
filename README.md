@@ -421,7 +421,7 @@ Spikes402-Class: unknown
 | Class | Meaning |
 |---|---|
 | `verified-signed` | The request carries a valid **Web Bot Auth** signature (below). Checked first |
-| `verified` | The User-Agent claims a known crawler and the address checks out against the operator's published IP list (or, where no list is loaded yet, forward-confirmed reverse DNS) |
+| `verified` | The User-Agent claims a known crawler and the address checks out against the operator's published IP list (or, if the address is not in the list or no list is loaded yet, forward-confirmed reverse DNS) |
 | `impostor` | The User-Agent claims a known crawler but the address definitely does not belong to it |
 | `unknown` | Everything else, including claims that could not be checked (DNS timeout, list not loaded); a `note` says why |
 
@@ -429,7 +429,9 @@ Built-in crawlers (IP lists refreshed daily, kept on failure): Googlebot,
 Bingbot, GPTBot, OAI-SearchBot, ChatGPT-User, ClaudeBot, PerplexityBot,
 Perplexity-User, Applebot, DuckDuckBot, CCBot. Replace the list with
 `known_bots`. Reverse DNS has a 1.5 s timeout, at most 16 lookups at once
-and a cache of 10,000 addresses.
+and a cache of 10,000 addresses (positive and negative). For Googlebot, a
+PTR name must end in `googlebot.com` or `google.com` (not `googleusercontent.com`),
+and a forward lookup of that name must return the same address.
 
 ### Web Bot Auth
 
