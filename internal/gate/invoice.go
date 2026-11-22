@@ -244,7 +244,7 @@ func (g *Gate) serveClaim(w http.ResponseWriter, r *http.Request) {
 			g.writeClaim(w, r, http.StatusConflict, claimBody{Status: "spent"})
 			return
 		}
-		g.observe(r, g.classify(r), OutcomePaid)
+		g.observe(r, g.classify(r), OutcomePaid, c.PriceSats)
 		g.pending.drop(c.ID)
 		g.issuePassFor(w, r, c.ID, c.Resource)
 		return

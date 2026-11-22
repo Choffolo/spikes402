@@ -73,13 +73,20 @@ type Event struct {
 	Class    botid.Class
 	Resource string
 	Outcome  Outcome
+	Sats     int64 // token price; counted as received only for OutcomePaid
 }
 
-func (g *Gate) observe(r *http.Request, class botid.Class, o Outcome) {
-	if g.opt.Observer == nil {
+func (g *Gate) observe(r *http.Request, class botid.Class, o Outcome, sats int64) {
+	if g.opt.Observer == nil && g.opt.PublicStats == nil {
 		return
 	}
-	g.opt.Observer(Event{Time: g.now(), Client: g.client(r), IP: g.clientIP(r), Class: class, Resource: resource(r), Outcome: o})
+	e := Event{Time: g.now(), Client: g.client(r), IP: g.clientIP(r), Class: class, Resource: resource(r), Outcome: o, Sats: sats}
+	if g.opt.PublicStats != nil {
+		g.opt.PublicStats.Observe(e)
+	}
+	if g.opt.Observer != nil {
+		g.opt.Observer(e)
+	}
 }
 
 // Status is a snapshot of the gate's internal state for the dashboard.

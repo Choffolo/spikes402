@@ -322,3 +322,18 @@ func TestSurgeConfig(t *testing.T) {
 		t.Fatalf("group override: %+v", c.Surge)
 	}
 }
+
+func TestPublicStatsFlag(t *testing.T) {
+	c, err := load(t, `{"origin":"http://o","price_sats":5,"protect":["/x/**"],"lightning":{"backend":"fake"}}`)
+	if err != nil || c.PublicStats {
+		t.Fatalf("default should be off: %+v err=%v", c.PublicStats, err)
+	}
+	c, err = load(t, `{"origin":"http://o","price_sats":5,"protect":["/x/**"],"public_stats":true,"lightning":{"backend":"fake"}}`)
+	if err != nil || !c.PublicStats {
+		t.Fatalf("true: %+v err=%v", c != nil && c.PublicStats, err)
+	}
+	c, err = Load("../../config.example.json")
+	if err != nil || c.PublicStats {
+		t.Fatalf("example should leave it off: %v err=%v", c != nil && c.PublicStats, err)
+	}
+}

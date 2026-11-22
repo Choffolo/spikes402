@@ -112,8 +112,21 @@ func main() {
 	}
 
 	// The admin dashboard, if enabled, watches every protected request.
+	// Public aggregate stats, if enabled, share the same events but keep
+	// only totals (no visitor or path data) and serve GET /.spikes402/stats.
 	var monitor *admin.Monitor
 	var observer func(gate.Event)
+	var pubStats *gate.PublicStats
+	if cfg.PublicStats {
+		s, err := gate.LoadPublicStats(cfg.StateDir, time.Now())
+		if err != nil {
+			log.Printf("public stats: starting fresh (%v)", err)
+			s = gate.NewPublicStats(time.Now())
+		}
+		s.StartPersisting(context.Background(), cfg.StateDir, 0)
+		pubStats = s
+		log.Print("public aggregate stats at /.spikes402/stats")
+	}
 	if cfg.AdminEnabled() {
 		monitor = admin.NewMonitor(cfg.Admin.VisitorIPs, time.Now())
 		observer = monitor.Observe
@@ -143,6 +156,7 @@ func main() {
 		Policies:           cfg.BotPolicies,
 		Surge:              cfg.Surge,
 		Observer:           observer,
+		PublicStats:        pubStats,
 		Argon2MaxMemoryMiB: cfg.Argon2MaxMemoryMiB,
 
 		SpentStore:   spentStore,

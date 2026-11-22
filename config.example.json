@@ -23,6 +23,7 @@
     "ai_can_apply": false,
     "visitor_ips": "hash"
   },
+  "public_stats": false,
   "withdraw": {
     "enabled": false
   },
