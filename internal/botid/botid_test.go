@@ -106,10 +106,75 @@ func TestReverseDNSWhenNoList(t *testing.T) {
 	if dns.calls.Load() != before {
 		t.Fatal("DNS result not cached")
 	}
-	// Once the list is loaded it is used instead of DNS.
+	// Once the list is loaded, an address in the list is verified
+	// from the list and does not need DNS.
 	c.SetRanges("Googlebot", []netip.Prefix{netip.MustParsePrefix("66.249.64.0/19")})
+	before = dns.calls.Load()
 	if got := c.Classify(req(googleUA), net.ParseIP("66.249.66.2"), "https"); got.Kind != Verified || got.Method != "ip-list" {
 		t.Fatalf("got %v", got)
+	}
+	if dns.calls.Load() != before {
+		t.Fatal("address in the IP list still triggered DNS")
+	}
+}
+
+func TestReverseDNSWhenNotInList(t *testing.T) {
+	c := New(bots, nil)
+	c.SetRanges("Googlebot", []netip.Prefix{netip.MustParsePrefix("66.249.64.0/19")})
+	dns := &fakeDNS{
+		ptr: map[string][]string{
+			"203.0.113.10": {"crawl-203-0-113-10.googlebot.com."},
+			"203.0.113.11": {"rate-limited-proxy-203-0-113-11.google.com."},
+			"203.0.113.12": {"1-2-3-4.gae.googleusercontent.com."},
+			"203.0.113.13": {"crawl.googlebot.com.evil.test."},
+			"203.0.113.14": {"fake.googlebot.com."},
+		},
+		a: map[string][]string{
+			"crawl-203-0-113-10.googlebot.com":           {"203.0.113.10"},
+			"rate-limited-proxy-203-0-113-11.google.com": {"203.0.113.11"},
+			"1-2-3-4.gae.googleusercontent.com":          {"203.0.113.12"},
+			"fake.googlebot.com":                         {"66.249.66.99"},
+		},
+	}
+	c.resolver = dns
+	// The test bots only allow googlebot.com; use DefaultBots suffixes
+	// so google.com and googleusercontent.com can also confirm.
+	c.bots = []Bot{{Name: "Googlebot", UserAgent: "Googlebot", IPRangesURL: "x", ReverseDNS: []string{"googlebot.com", "google.com", "googleusercontent.com"}}}
+
+	cases := []struct {
+		ip     string
+		want   Kind
+		method string
+	}{
+		{"203.0.113.10", Verified, "reverse-dns"}, // PTR under googlebot.com, confirmed
+		{"203.0.113.11", Verified, "reverse-dns"}, // PTR under google.com, confirmed
+		{"203.0.113.12", Verified, "reverse-dns"}, // PTR under googleusercontent.com, confirmed
+		{"203.0.113.13", Impostor, "reverse-dns"}, // suffix not at the end
+		{"203.0.113.14", Impostor, "reverse-dns"}, // forward lookup does not confirm
+		{"203.0.113.15", Impostor, "reverse-dns"}, // no PTR: a definite no
+		{"66.249.66.2", Verified, "ip-list"},      // in the published list
+	}
+	for _, tc := range cases {
+		got := c.Classify(req(googleUA), net.ParseIP(tc.ip), "https")
+		if got.Kind != tc.want || got.Method != tc.method {
+			t.Errorf("%s: got %v, want %s method=%s", tc.ip, got, tc.want, tc.method)
+		}
+	}
+	// Results (positive and negative) are cached.
+	before := dns.calls.Load()
+	c.Classify(req(googleUA), net.ParseIP("203.0.113.10"), "https")
+	c.Classify(req(googleUA), net.ParseIP("203.0.113.15"), "https")
+	if dns.calls.Load() != before {
+		t.Fatal("DNS result not cached")
+	}
+}
+
+func TestReverseDNSFailureWhenNotInList(t *testing.T) {
+	c := New(bots, nil)
+	c.SetRanges("Googlebot", []netip.Prefix{netip.MustParsePrefix("66.249.64.0/19")})
+	c.resolver = &fakeDNS{fail: true}
+	if got := c.Classify(req(googleUA), net.ParseIP("203.0.113.10"), "https"); got.Kind != Unknown || !strings.Contains(got.Note, "not checked") {
+		t.Fatalf("DNS failure must not verify (or stamp as impostor): got %v", got)
 	}
 }
 
