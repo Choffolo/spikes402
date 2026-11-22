@@ -1,6 +1,6 @@
 # Try the Spikes402 wallet
 
-A short guide to the prototype browser extension (version 0.1.4). **This is
+A short guide to the prototype browser extension (version 0.1.5). **This is
 unreviewed prototype software. On mainnet, use only tiny amounts. Do not
 store more than you can afford to lose.**
 

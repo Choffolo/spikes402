@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Spikes402 Wallet",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Non-custodial Lightning wallet for Spikes402 pages. Injects WebLN and keeps keys in this browser. No API key and no Spikes402 server: it talks to the Spark network, and to a Lightning address's server when you send to one.",
   "icons": {
     "16": "icons/icon-16.png",

@@ -895,7 +895,7 @@ withdrawals), `internal/mcp`, `internal/lightning` (fake + phoenixd),
 
 ## Browser wallet extension (prototype)
 
-[`extension/`](extension/) is a Manifest V3 wallet (v0.1.4) that injects
+[`extension/`](extension/) is a Manifest V3 wallet (v0.1.5) that injects
 WebLN so a 402 page can pay with one click. It uses the official Spark SDK
 (no API key). The phrase stays on the device; a site can pay only after
 you allow it, and default budgets are 10 sats per page, 100 per site per
