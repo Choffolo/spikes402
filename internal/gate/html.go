@@ -29,11 +29,13 @@ var page = template.Must(template.New("402").Parse(`<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{with .Preview}}{{with .Title}}{{.}} · {{end}}{{end}}402 Payment Required · Spikes402</title>
+<link rel="icon" href="{{.Favicon}}" type="image/svg+xml">
 {{with .Preview}}{{with .Description}}<meta name="description" content="{{.}}">
 {{end}}{{end}}{{.LD}}
 <style>
  body{font-family:system-ui,sans-serif;max-width:46rem;margin:.75rem auto;padding:0 1rem;color:#222;line-height:1.35}
- h1{font-size:1.35rem;margin:.2rem 0 .35rem}
+ h1{display:flex;align-items:center;gap:.45rem;font-size:1.35rem;margin:.2rem 0 .35rem}
+ h1 .logo{width:1.5em;height:1.5em;flex:none}
  h2{font-size:1.05rem;margin:.15rem 0 .3rem}
  p{margin:.3rem 0}
  code{word-break:break-all;background:#f3f3f3;padding:.15rem .3rem;border-radius:4px;font-size:.8rem}
@@ -55,7 +57,7 @@ var page = template.Must(template.New("402").Parse(`<!doctype html>
 </style>
 </head>
 <body>
-<h1>An invisible energy wall</h1>
+<h1>{{.Logo}} An invisible energy wall</h1>
 <p>This page is protected by an invisible energy wall built with Bitcoin.
 Pay a few sats with the <a href="https://github.com/Choffolo/spikes402#browser-wallet-extension-prototype">Spikes402 extension</a>,
 or solve a math puzzle with your computer&rsquo;s power.</p>
@@ -153,9 +155,16 @@ var (
 	invoiceJS string
 	//go:embed assets/pow-worker.js
 	powWorkerJS string
+	//go:embed assets/logo.svg
+	logoSVG string
 
 	wallHash    = base64.StdEncoding.EncodeToString(sha256Sum([]byte(wallJS)))
 	invoiceHash = base64.StdEncoding.EncodeToString(sha256Sum([]byte(invoiceJS)))
+
+	// logoInline sits next to the wall title; logoFavicon is a data URI
+	// so the icon needs no extra CSP source (img-src already allows data:).
+	logoInline  = template.HTML(inlineLogo(logoSVG))
+	logoFavicon = template.URL("data:image/svg+xml;base64," + base64.StdEncoding.EncodeToString([]byte(logoSVG)))
 
 	// workerSrc carries a content hash so a new release is never served
 	// from an old cached copy.
@@ -233,6 +242,20 @@ func sha256Sum(b []byte) []byte {
 	return s[:]
 }
 
+// inlineLogo turns the standalone SVG file into a decorative inline mark
+// (no XML declaration, no accessible name — the heading already has the title).
+func inlineLogo(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "<?xml") {
+		if i := strings.Index(s, "?>"); i >= 0 {
+			s = strings.TrimSpace(s[i+2:])
+		}
+	}
+	s = strings.Replace(s, ` role="img"`, "", 1)
+	s = strings.Replace(s, ` aria-label="Spikes402"`, ` class="logo" aria-hidden="true"`, 1)
+	return s
+}
+
 // invoiceQR is a data URI of the Lightning invoice as a QR code.
 // Wallets expect upper-case BOLT11 in QR codes (smaller code).
 func invoiceQR(invoice string) template.URL {
@@ -249,11 +272,13 @@ func writeHTML(w io.Writer, b challengeBody, qr template.URL) {
 		QR        template.URL
 		Script    template.HTML
 		LD        template.HTML
+		Logo      template.HTML
+		Favicon   template.URL
 		Solve     bool   // the browser can solve this puzzle (not Argon2id)
 		Attempts  string // expected attempts, for the page text
 		WorkerSrc string
 		Claim     string
-	}{challengeBody: b, QR: qr, LD: ldJSON(b.Preview), WorkerSrc: workerSrc, Claim: ClaimPath}
+	}{challengeBody: b, QR: qr, LD: ldJSON(b.Preview), Logo: logoInline, Favicon: logoFavicon, WorkerSrc: workerSrc, Claim: ClaimPath}
 	var scripts string
 	if b.L402 != nil {
 		scripts += "<script>" + weblnJS + "</script>\n"
