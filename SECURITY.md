@@ -103,9 +103,9 @@ A CycloneDX SBOM of the Go module, the browser extension's npm dependencies
 (including devDependencies), and the runtime Docker image is generated on
 every push and pull request by the `sbom` workflow and attached as the
 `spikes402-sbom` artifact (`spikes402-source.cdx.json` and
-`spikes402-image.cdx.json`). There is no separate release workflow; when a
-GitHub Release is published, the same job attaches those files (and the VEX
-document) to the release.
+`spikes402-image.cdx.json`). When a version tag is pushed, the `release`
+workflow publishes the multi-arch image to GHCR and attaches those files
+(and the VEX document) to the GitHub Release.
 
 To generate and scan locally (linux/amd64, Docker optional for the image):
 

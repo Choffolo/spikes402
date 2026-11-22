@@ -12,16 +12,16 @@ non-root runtime, no shell; linux/amd64 and linux/arm64) and an example
 digest.
 
 Released images are published to the GitHub Container Registry as
-`ghcr.io/choffolo/spikes402`. Tags follow the git tag (`v0.1.0` and
-`0.1.0`); `latest` points at the newest stable release (not a pre-release
-such as `v0.1.0-rc.1`).
+`ghcr.io/choffolo/spikes402`. Tags follow the git tag (`v0.2.0` and
+`0.2.0`); `latest` points at the newest stable release (not a pre-release
+such as `v0.2.0-rc.1`).
 
 ```sh
-docker pull ghcr.io/choffolo/spikes402:v0.1.0   # or :latest
+docker pull ghcr.io/choffolo/spikes402:v0.2.0   # or :latest
 ```
 
 To run the published image instead of building locally, in
-`docker-compose.yml` set `image: ghcr.io/choffolo/spikes402:v0.1.0` on the
+`docker-compose.yml` set `image: ghcr.io/choffolo/spikes402:v0.2.0` on the
 `spikes402` service and remove the `build: .` line. Volumes, environment
 and ports stay the same.
 
@@ -30,7 +30,7 @@ docker run --rm -p 127.0.0.1:8402:8402 \
   -v "$PWD/config.json:/etc/spikes402/config.json:ro" \
   -v spikes402-state:/var/lib/spikes402 \
   -e SPIKES402_SECRET_KEY -e PHOENIXD_PASSWORD \
-  ghcr.io/choffolo/spikes402:v0.1.0
+  ghcr.io/choffolo/spikes402:v0.2.0
 ```
 
 The package may be private until it is set public once in the GitHub
@@ -53,7 +53,7 @@ Each release image is signed keylessly with [cosign](https://docs.sigstore.dev/c
 index. A provenance attestation and an image SBOM are also attached.
 
 ```sh
-cosign verify ghcr.io/choffolo/spikes402:v0.1.0 \
+cosign verify ghcr.io/choffolo/spikes402:v0.2.0 \
   --certificate-identity-regexp '^https://github.com/Choffolo/spikes402/.github/workflows/release.yml@refs/tags/v.+$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
@@ -224,7 +224,7 @@ docker compose cp phoenixd:/phoenix/.phoenix/seed.dat ./seed.dat.bak
    docker compose pull spikes402
    docker compose up -d
    # if you still build locally:
-   git fetch --tags && git checkout v0.1.0
+   git fetch --tags && git checkout v0.2.0
    docker compose up --build -d
    ```
 

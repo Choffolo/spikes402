@@ -4,7 +4,7 @@
 #   docker compose up --build
 #
 # After a release you can skip the build and pull the published image:
-#   image: ghcr.io/choffolo/spikes402:v0.1.0   # or :latest
+#   image: ghcr.io/choffolo/spikes402:v0.2.0   # or :latest
 # and remove the "build: ." line. See docs/deploy.md.
 #
 # Put TLS in front (Caddy, nginx, or another reverse proxy). See docs/deploy.md.

@@ -748,16 +748,16 @@ To run the proxy and phoenixd with Docker, see [Deploying Spikes402](docs/deploy
 Published images are at `ghcr.io/choffolo/spikes402` (linux/amd64 and linux/arm64):
 
 ```sh
-docker pull ghcr.io/choffolo/spikes402:v0.1.0   # or :latest
+docker pull ghcr.io/choffolo/spikes402:v0.2.0   # or :latest
 docker run --rm -p 127.0.0.1:8402:8402 \
   -v "$PWD/config.json:/etc/spikes402/config.json:ro" \
   -v spikes402-state:/var/lib/spikes402 \
   -e SPIKES402_SECRET_KEY -e PHOENIXD_PASSWORD \
-  ghcr.io/choffolo/spikes402:v0.1.0
+  ghcr.io/choffolo/spikes402:v0.2.0
 ```
 
 The example [`docker-compose.yml`](docker-compose.yml) builds locally by default.
-To use a released image, set `image: ghcr.io/choffolo/spikes402:v0.1.0` (or
+To use a released image, set `image: ghcr.io/choffolo/spikes402:v0.2.0` (or
 `:latest`) on the `spikes402` service and drop `build: .`. How to verify the
 image signature is in the deploy guide.
 
