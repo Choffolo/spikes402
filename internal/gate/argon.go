@@ -67,3 +67,12 @@ func (a *argonBudget) release(mib int) {
 	default:
 	}
 }
+
+func (a *argonBudget) tight() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.max > 0 && a.used >= int(float64(a.max)*surgePressureFrac)
+}

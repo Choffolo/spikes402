@@ -77,6 +77,12 @@ func TestInvalid(t *testing.T) {
 		"bot without name":    `{"origin":"http://o","price_sats":5,"protect":["/x"],"known_bots":[{"user_agent":"x"}],"lightning":{"backend":"fake"}}`,
 		"bot list over http":  `{"origin":"http://o","price_sats":5,"protect":["/x"],"known_bots":[{"name":"x","user_agent":"x","ip_ranges_url":"http://x"}],"lightning":{"backend":"fake"}}`,
 		"dev mode in prod":    `{"origin":"http://o","price_sats":5,"protect":["/x"],"web_bot_auth_dev_mode":true,"secret_key":"` + strings.Repeat("k", 32) + `","lightning":{"backend":"phoenixd","phoenixd_password":"p"}}`,
+		"surge cap":           `{"origin":"http://o","price_sats":5,"protect":["/x"],"surge":{"enabled":true,"max_multiplier":11},"lightning":{"backend":"fake"}}`,
+		"surge step":          `{"origin":"http://o","price_sats":5,"protect":["/x"],"surge":{"enabled":true,"step":-1},"lightning":{"backend":"fake"}}`,
+		"surge floor":         `{"origin":"http://o","price_sats":5,"protect":["/x"],"surge":{"enabled":true,"min_per_minute":-5},"lightning":{"backend":"fake"}}`,
+		"surge ratio":         `{"origin":"http://o","price_sats":5,"protect":["/x"],"surge":{"enabled":true,"surge_ratio":1},"lightning":{"backend":"fake"}}`,
+		"surge interval":      `{"origin":"http://o","price_sats":5,"protect":["/x"],"surge":{"enabled":true,"step_interval_minutes":0.01},"lightning":{"backend":"fake"}}`,
+		"surge unknown group": `{"origin":"http://o","price_sats":5,"protect":["/x"],"surge":{"enabled":true,"groups":{"/nope/**":{"enabled":true}}},"lightning":{"backend":"fake"}}`,
 	}
 	for name, json := range cases {
 		if _, err := load(t, json); err == nil {
@@ -258,5 +264,40 @@ func TestTrailingSlashProtectPattern(t *testing.T) {
 	_, err := load(t, `{"origin":"http://o","price_sats":5,"protect":["/docs/"],"lightning":{"backend":"fake"}}`)
 	if err == nil || !strings.Contains(err.Error(), "trailing slash") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestSurgeConfig(t *testing.T) {
+	c, err := load(t, `{"origin":"http://o","price_sats":5,"protect":["/x"],"lightning":{"backend":"fake"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Surge.Active() {
+		t.Fatal("surge must be off by default")
+	}
+	c, err = load(t, `{"origin":"http://o","price_sats":5,"protect":["/articles/**","/premium/**"],`+
+		`"prices":[{"pattern":"/premium/**","price_sats":20}],`+
+		`"surge":{"enabled":true},"lightning":{"backend":"fake"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Surge.Active() || c.Surge.MaxMultiplier != 3 || c.Surge.MinPerMinute != 60 || c.Surge.SurgeRatio != 2 || c.Surge.Step != 0.25 || c.Surge.StepIntervalMinutes != 2 {
+		t.Fatalf("defaults: %+v", c.Surge)
+	}
+	if pub := c.Public(); !pub.Surge.Active() || pub.Surge.MaxMultiplier != 3 {
+		t.Fatalf("public: %+v", pub.Surge)
+	}
+	s := c.GateSettings()
+	if !s.Surge.Active() {
+		t.Fatal("gate settings lost surge")
+	}
+	c, err = load(t, `{"origin":"http://o","price_sats":5,"protect":["/articles/**","/premium/**"],`+
+		`"surge":{"enabled":false,"max_multiplier":3,"groups":{"/premium/**":{"enabled":true,"max_multiplier":5}}},`+
+		`"lightning":{"backend":"fake"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Surge.Active() || c.Surge.Groups["/premium/**"].MaxMultiplier != 5 {
+		t.Fatalf("group override: %+v", c.Surge)
 	}
 }

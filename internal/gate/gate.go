@@ -52,6 +52,7 @@ type Options struct {
 	// Policies empty (the default): everyone pays the same.
 	Classifier *botid.Classifier
 	Policies   map[string]Policy
+	Surge      SurgeConfig
 
 	// Observer, if set, is told about every request to a protected path.
 	// It is called synchronously and must be fast.
@@ -101,6 +102,7 @@ type Gate struct {
 
 	invoices *invoiceCache // looks up whether a 402 invoice has been paid
 	claimLim *rateLimiter  // polls of /.spikes402/claim, per client
+	surge    *surger       // optional per-group demand / price multiplier
 
 	nodeLog  rateLog // why no invoice was offered
 	classLog rateLog // bot classifications
@@ -131,12 +133,14 @@ func New(opt Options) *Gate {
 		claimLim: newRateLimiter(claimPerMinute),
 		nodeLog:  rateLog{perMinute: 1},
 		classLog: rateLog{perMinute: 60},
+		surge:    newSurger(opt.Surge),
 	}
 	g.invoices.now = func() time.Time { return g.now() }
 	g.live.Store(&Settings{
 		PriceSats: opt.PriceSats, Prices: append([]PriceRule(nil), opt.Prices...),
 		Protect: append([]string(nil), opt.Protect...), Paused: opt.Paused,
 		PoW: opt.PoW, Policies: opt.Policies, ChallengesPerMinute: opt.ChallengesPerMinute,
+		Surge: cloneSurge(opt.Surge),
 	})
 	return g
 }
@@ -193,7 +197,7 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.opt.Next.ServeHTTP(w, r)
 		return
 	}
-	price := pol.price(g.pathPrice(r.URL.Path, set))
+	price := pol.price(g.offerPrice(r.URL.Path, set))
 	if session == "" {
 		session = newSession(w, g.scheme(r) == "https")
 	}
@@ -558,6 +562,9 @@ func (g *Gate) challenge(w http.ResponseWriter, r *http.Request, set *Settings, 
 		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
 		http.Error(w, "too many requests", http.StatusTooManyRequests)
 		return
+	}
+	if g.surge != nil && set.Surge.Active() {
+		g.surge.hit(g.groupOf(r.URL.Path, set), now, g.underPressure())
 	}
 
 	// Same client, same page, offer still fresh: hand it out again rather

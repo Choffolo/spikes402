@@ -113,6 +113,7 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `origin` | The website to protect (`http://` or `https://` URL) | required |
 | `price_sats` | Default price of one request, in satoshis (used when no `prices` rule matches) | required, ≥ 1, at most 1,000,000 |
 | `prices` | Optional list of `{ "pattern", "price_sats" }` rules. Same pattern syntax and canonical path as `protect`. **The first matching rule wins**; put more specific patterns first. Unmatched protected paths use `price_sats`. | `[]` |
+| `surge` | Optional demand-based price multiplier, **off by default**. See [Dynamic pricing](#dynamic-pricing-optional-off-by-default). Config file only (not a dashboard control) | off |
 | `previews` | Optional list of `{ "pattern", "mode", "max_chars" }` rules that show a teaser of the page on its 402 page, see [The 402 page](#the-402-page-for-people). `mode`: `"none"`, `"title"` (title and meta description) or `"excerpt"` (also the first `max_chars` characters, default 300, at most 1000). Same patterns as `protect`; **the first matching rule wins**. Config file only | `[]` = no teaser |
 | `protect` | Path patterns that require payment. `"/premium/**"` = everything under `/premium`; other patterns use [glob syntax](https://pkg.go.dev/path#Match), e.g. `"/*.pdf"`. See [Path matching](#path-matching) | required |
 | `protect_case_sensitive` | Match `protect` patterns with exact letter case. Off by default, because many websites serve `/Premium` like `/premium` | `false` |
@@ -192,6 +193,57 @@ web server sits behind Spikes402. So:
   paid is still honoured at the old price until its token expires
   (`challenge_ttl_seconds`). A proof-of-work token is not: its difficulty was
   set for the old price, so it must cover the new one.
+
+## Dynamic pricing (optional, off by default)
+
+When `surge` is enabled, the price of a **rule group** (a `prices`
+pattern if one matches, otherwise the matching `protect` pattern — never
+a raw URL) can rise above its base under unusually high 402 demand, then
+step back to 1× when traffic returns to normal. The effective price is
+`ceil(base × multiplier)` whole sats; proof-of-work uses that same
+price. The HMAC token still records the quoted price.
+
+Each group keeps a short-term 402 rate (half-life **3 minutes**) and a
+slow baseline of the same rate (half-life **24 hours**). The multiplier
+steps up when the short rate is at least `surge_ratio` times the
+baseline **and** at least `min_per_minute`, for one
+`step_interval_minutes`, up to `max_multiplier` (hard cap 10). It steps
+down by the same `step` when that is no longer true. A short spike
+barely moves the short rate; a site with steady traffic, even a busy
+one, does not surge, because the two rates stay in line.
+
+Until a group has been observed for **one hour**, demand will not raise
+the price (the baseline is still being seeded from a simple average).
+After a restart the warm-up runs again; baselines are not written to
+disk. Global pressure (pending invoices or the Argon2id budget at or
+above 90%, or the node breaker open) can still step the multiplier up
+the same way. The slow baseline keeps updating during a surge, so a new
+normal is accepted over a day rather than frozen.
+
+Defaults when surge is on and a field is omitted: `max_multiplier` 3,
+`surge_ratio` 2, `min_per_minute` 60, `step` 0.25,
+`step_interval_minutes` 2.
+
+```json
+"surge": {
+  "enabled": true,
+  "max_multiplier": 3,
+  "surge_ratio": 2,
+  "min_per_minute": 60,
+  "groups": { "/articles/**": { "enabled": false } }
+}
+```
+
+`groups` keys must be a `protect` or `prices` pattern. A group may opt
+in or out with `enabled`; omitted knobs inherit the site-wide values.
+The live short rate, baseline, ratio and multiplier appear in the
+dashboard and `GET /api/status` (`gate.surge`), read-only. Surge
+settings stay in the config file.
+
+We count every 402, not unique visitors. A competitor can try to raise a
+group's price; `min_per_minute` (default 60, above one IP's usual 402
+budget), the ratio against that group's own baseline, the cap and the
+step interval limit how far that goes.
 
 ## Proof-of-work pricing
 
@@ -542,8 +594,9 @@ Everything else sits behind the discreet **Settings** link:
   file if you want the config file values back. Everything about money or
   the perimeter stays in the config file on purpose: passwords and keys,
   the Lightning node, the withdraw destination, node anti-flood limits
-  (`max_invoices_per_minute`, `max_pending_invoices`), ports, trusted
-  proxies / IP header, and admin allowed IPs. A stolen admin key can change
+  (`max_invoices_per_minute`, `max_pending_invoices`), surge pricing,
+  ports, trusted proxies / IP header, and admin allowed IPs. The live short rate, baseline, ratio and multiplier of each surge group are shown in status (read-only).
+  A stolen admin key can change
   prices, protection and pause, but cannot drain or flood the node.
   **Pause** serves protected paths free and creates no invoices at all
   (no load on the node). Only the human admin can toggle pause (on or
@@ -785,8 +838,9 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
 
 ## Known limits / not done yet
 
-- Pricing does not yet move between a min and a max with load. Today you
-  set a default `price_sats` and, optionally, fixed per-path prices.
+- Surge pricing is off until you enable it; baselines start a one-hour
+  warm-up after each restart (they are not saved to disk). See
+  [Dynamic pricing](#dynamic-pricing-optional-off-by-default).
 - If your website fails to answer (a 5xx status or no answer) for a GET or HEAD
   that carried a valid proof, the same proof can be sent again: up to 3 times
   within 30 seconds, and it is delivered at most once. Other methods get no
