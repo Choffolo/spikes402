@@ -284,3 +284,18 @@ func TestSyncDirNeverFails(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestWriteFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteFile(dir, "public-stats.json", []byte(`{"ok":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "public-stats.json"))
+	if err != nil || string(got) != `{"ok":true}` {
+		t.Fatalf("%q %v", got, err)
+	}
+	mode, err := fileMode(filepath.Join(dir, "public-stats.json"))
+	if err != nil || mode != 0o600 {
+		t.Fatalf("mode %o %v", mode, err)
+	}
+}

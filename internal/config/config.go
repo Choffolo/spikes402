@@ -72,6 +72,10 @@ type Config struct {
 
 	Paused bool `json:"paused,omitempty"` // serve protected paths free; no invoices (dashboard toggle)
 
+	// PublicStats exposes GET /.spikes402/stats with aggregate counters
+	// (unlocks and sats received). Off by default.
+	PublicStats bool `json:"public_stats,omitempty"`
+
 	ProtectCaseSensitive bool `json:"protect_case_sensitive"` // match "protect" patterns case-sensitively (default: case-insensitive)
 	MaxConnections       int  `json:"max_connections"`        // open client connections at once, default 10000
 	ReadTimeoutSeconds   int  `json:"read_timeout_seconds"`   // to read a whole request, default 60

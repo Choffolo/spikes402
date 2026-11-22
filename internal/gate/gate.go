@@ -59,6 +59,10 @@ type Options struct {
 	// It is called synchronously and must be fast.
 	Observer func(Event)
 
+	// PublicStats, if set, records aggregate counters and serves
+	// GET /.spikes402/stats. It is independent of the admin dashboard.
+	PublicStats *PublicStats
+
 	// Argon2MaxMemoryMiB is the most memory concurrent Argon2id checks may
 	// use together. 0 means DefaultArgonMaxMemoryMiB (256). A single check
 	// that needs more than this is refused (see config).
@@ -176,7 +180,7 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	class := g.classify(r)
 	w.Header().Set(ClassHeader, class.String())
 	if set.Paused {
-		g.observe(r, class, OutcomeFree)
+		g.observe(r, class, OutcomeFree, 0)
 		r.Header.Del("Authorization")
 		g.opt.Next.ServeHTTP(w, r)
 		return
@@ -184,11 +188,11 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	pol := g.policyFor(set, class)
 	switch pol.Action {
 	case ActionBlock:
-		g.observe(r, class, OutcomeBlocked)
+		g.observe(r, class, OutcomeBlocked, 0)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	case ActionFree:
-		g.observe(r, class, OutcomeFree)
+		g.observe(r, class, OutcomeFree, 0)
 		r.Header.Del("Authorization")
 		g.opt.Next.ServeHTTP(w, r)
 		return
@@ -206,31 +210,33 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var problem string
 	if auth := r.Header.Get("Authorization"); auth != "" {
-		id, err := g.redeem(r, auth, price)
+		c, err := g.redeem(r, auth, price)
 		if err == nil {
 			outcome := OutcomePaid
+			sats := c.PriceSats
 			scheme, _, _ := strings.Cut(auth, " ")
 			if strings.EqualFold(scheme, "PoW") {
 				outcome = OutcomePoW
+				sats = 0
 			}
-			g.observe(r, class, outcome)
-			g.pending.drop(id)
+			g.observe(r, class, outcome, sats)
+			g.pending.drop(c.ID)
 			r.Header.Del("Authorization") // our credential, not the origin's business
 			redeem := r.Header.Get(RedeemHeader)
 			r.Header.Del(RedeemHeader)
 			if redeem == redeemCookie && r.Method == http.MethodGet {
-				g.issuePass(w, r, id) // the page navigates next; the origin is not called yet
+				g.issuePass(w, r, c.ID) // the page navigates next; the origin is not called yet
 				return
 			}
-			g.deliver(w, r, id, scheme)
+			g.deliver(w, r, c.ID, scheme)
 			return
 		}
 		var busy *busyError
 		if errors.As(err, &busy) {
 			if busy.status == http.StatusTooManyRequests {
-				g.observe(r, class, OutcomeRateLimited)
+				g.observe(r, class, OutcomeRateLimited, 0)
 			} else {
-				g.observe(r, class, OutcomeBusy)
+				g.observe(r, class, OutcomeBusy, 0)
 			}
 			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(busy.wait.Seconds()))))
 			http.Error(w, busy.msg, busy.status)
@@ -411,20 +417,20 @@ func (e *busyError) Error() string { return e.msg }
 // paid the invoice can still use it once even if the puzzle of the same
 // offer was already solved (or burned by a wrong Argon2id answer), so a
 // paid invoice is never worthless. Work after payment is refused.
-func (g *Gate) redeem(r *http.Request, auth string, price int64) (string, error) {
+func (g *Gate) redeem(r *http.Request, auth string, price int64) (claims, error) {
 	c, err := g.check(r, auth, price)
 	if err != nil {
-		return "", err
+		return claims{}, err
 	}
 	scheme, _, _ := strings.Cut(auth, " ")
 	if strings.EqualFold(scheme, "PoW") && g.spent.has(spentKey("L402", c.ID)) {
-		return "", errReplay
+		return claims{}, errReplay
 	}
 	// Checked last, so a bad attempt does not burn a good token.
 	if err := g.spent.use(spentKey(scheme, c.ID), time.Unix(c.Expires, 0), g.now()); err != nil {
-		return "", err
+		return claims{}, err
 	}
-	return c.ID, nil
+	return c, nil
 }
 
 // spentKey is the entry in the spent set for one way of redeeming a token.
@@ -565,7 +571,7 @@ func (g *Gate) clientIP(r *http.Request) net.IP {
 func (g *Gate) challenge(w http.ResponseWriter, r *http.Request, set *Settings, class botid.Class, problem, key string, price int64, powOnly bool) {
 	now := g.now()
 	if ok, wait := g.limiter.allow(g.client(r), now); !ok {
-		g.observe(r, class, OutcomeRateLimited)
+		g.observe(r, class, OutcomeRateLimited, 0)
 		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
 		http.Error(w, "too many requests", http.StatusTooManyRequests)
 		return
@@ -585,9 +591,9 @@ func (g *Gate) challenge(w http.ResponseWriter, r *http.Request, set *Settings, 
 		}
 	}
 	if problem != "" {
-		g.observe(r, class, OutcomeRejected)
+		g.observe(r, class, OutcomeRejected, 0)
 	} else {
-		g.observe(r, class, OutcomeChallenged)
+		g.observe(r, class, OutcomeChallenged, 0)
 	}
 	g.writeChallenge(w, r, o, problem)
 }

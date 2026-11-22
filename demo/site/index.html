@@ -33,6 +33,35 @@ bin/spikes-bot -mode pow https://spikes402.dev/premium/</pre>
 <p>Experimental prototype (AGPLv3). Not independently reviewed yet, so do not use it
 with real money on mainnet. Code, docs and security policy:
 <a href="https://github.com/Choffolo/spikes402">github.com/Choffolo/spikes402</a>.</p>
+<p id="public-stats" class="note" hidden aria-live="polite"></p>
+<script>
+(function () {
+  fetch("/.spikes402/stats", { headers: { Accept: "application/json" } })
+    .then(function (r) { if (!r.ok) throw new Error("off"); return r.json(); })
+    .then(function (s) {
+      var el = document.getElementById("public-stats");
+      if (!el || typeof s.unlocks_pow !== "number") return;
+      function n(x) { return Number(x || 0).toLocaleString("en"); }
+      function sats(x) {
+        x = Number(x || 0);
+        return n(x) + (x === 1 ? " sat" : " sats");
+      }
+      function when(iso) {
+        var d = new Date(iso);
+        if (isNaN(d.getTime())) return "";
+        return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+      }
+      var day = s.last_24h || {};
+      var since = when(s.since);
+      el.hidden = false;
+      el.textContent = (since ? "Since " + since + ": " : "") +
+        n(s.unlocks_pow) + " pages unlocked by proof-of-work, " +
+        n(s.unlocks_lightning) + " by Lightning (" + sats(s.sats_received) + " received). " +
+        "Last 24 hours: " + n(day.unlocks_pow) + " PoW, " + n(day.unlocks_lightning) + " Lightning.";
+    })
+    .catch(function () { /* endpoint off or unreachable: keep the line hidden */ });
+})();
+</script>
 
 <footer>
 Inspired by <a href="https://dspace.mit.edu/handle/1721.1/153030" target="_blank" rel="noopener">Jason Lowery's Softwar</a>

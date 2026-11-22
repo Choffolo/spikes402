@@ -189,6 +189,12 @@ func (g *Gate) serveReserved(w http.ResponseWriter, r *http.Request) {
 		serveWorker(w, r)
 	case ClaimPath:
 		g.serveClaim(w, r)
+	case StatsPath:
+		if g.opt.PublicStats != nil {
+			g.opt.PublicStats.ServeHTTP(w, r)
+			return
+		}
+		http.NotFound(w, r)
 	default:
 		http.NotFound(w, r)
 	}
