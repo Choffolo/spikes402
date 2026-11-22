@@ -5,6 +5,7 @@ import {
   badgeTitle,
   flashPaidIcon,
   formatBadgeText,
+  satWord,
   ICON_FLASH_COUNT,
   ICON_FLASH_MS,
   pageKey,
@@ -33,6 +34,15 @@ describe("badge copy and color", () => {
     expect(badgeColor({ ...base, paid: true })).toBe("#0f766e");
     expect(badgeTitle({ ...base, needsConfirm: true })).toMatch(/Confirm in the popup/);
     expect(badgeColor({ ...base, needsConfirm: true })).toBe("#b45309");
+  });
+
+  it("uses sat for a price of 1, and sats otherwise", () => {
+    expect(satWord(1)).toBe("sat");
+    expect(satWord(2)).toBe("sats");
+    const one = { amountSats: 1, paid: false, needsConfirm: false };
+    expect(badgeTitle(one)).toBe("This page costs 1 sat to open.");
+    expect(badgeTitle({ ...one, paid: true })).toBe("Paid 1 sat to open this page.");
+    expect(badgeTitle({ ...one, needsConfirm: true })).toBe("This page costs 1 sat to open. Confirm in the popup.");
   });
 });
 

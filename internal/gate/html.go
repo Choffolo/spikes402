@@ -68,7 +68,7 @@ or solve a math puzzle with your computer&rsquo;s power.</p>
 {{end}}{{with .Excerpt}}<p>{{.}}</p>
 {{end}}</article>
 {{end}}<div class="paywall">
-<p>This page costs <strong>{{.PriceSats}} sats</strong>.</p>
+<p>This page costs <strong>{{.PriceSats}} {{.SatUnit}}</strong>.</p>
 <div class="ways">
 {{if .Solve}}<div>
 <h2>Solve the puzzle</h2>
@@ -278,7 +278,8 @@ func writeHTML(w io.Writer, b challengeBody, qr template.URL) {
 		Attempts  string // expected attempts, for the page text
 		WorkerSrc string
 		Claim     string
-	}{challengeBody: b, QR: qr, LD: ldJSON(b.Preview), Logo: logoInline, Favicon: logoFavicon, WorkerSrc: workerSrc, Claim: ClaimPath}
+		SatUnit   string
+	}{challengeBody: b, QR: qr, LD: ldJSON(b.Preview), Logo: logoInline, Favicon: logoFavicon, WorkerSrc: workerSrc, Claim: ClaimPath, SatUnit: satUnit(b.PriceSats)}
 	var scripts string
 	if b.L402 != nil {
 		scripts += "<script>" + weblnJS + "</script>\n"
@@ -290,6 +291,14 @@ func writeHTML(w io.Writer, b challengeBody, qr template.URL) {
 	}
 	data.Script = template.HTML(scripts)
 	page.Execute(w, data)
+}
+
+// satUnit is "sat" for a price of 1, and "sats" otherwise.
+func satUnit(n int64) string {
+	if n == 1 {
+		return "sat"
+	}
+	return "sats"
 }
 
 // humanCount writes n roughly: "65 thousand", "34 million".
