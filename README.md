@@ -23,6 +23,8 @@ miniature). Everything else passes through untouched.
   an [MCP server](#ai-admin-mcp) for an AI assistant, and optional
   [withdrawals](#withdrawals-optional-off-by-default) to one fixed address.
 
+**Protect a site in about five minutes:** the [Docker quickstart](docs/quickstart.md) (proof-of-work only, no Lightning node). The [local Go quick start](#quick-start-fake-lightning-no-real-money) is further down.
+
 ## How it works
 
 ```mermaid
