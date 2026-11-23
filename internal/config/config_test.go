@@ -338,6 +338,17 @@ func TestSurgeConfig(t *testing.T) {
 	}
 }
 
+func TestPublicSiegeFlag(t *testing.T) {
+	c, err := load(t, `{"origin":"http://o","price_sats":5,"protect":["/x/**"],"lightning":{"backend":"fake"}}`)
+	if err != nil || c.PublicSiege {
+		t.Fatalf("default should be off: %+v err=%v", c.PublicSiege, err)
+	}
+	c, err = load(t, `{"origin":"http://o","price_sats":5,"protect":["/x/**"],"public_siege":true,"lightning":{"backend":"fake"}}`)
+	if err != nil || !c.PublicSiege {
+		t.Fatalf("true: %+v err=%v", c != nil && c.PublicSiege, err)
+	}
+}
+
 func TestPublicStatsFlag(t *testing.T) {
 	c, err := load(t, `{"origin":"http://o","price_sats":5,"protect":["/x/**"],"lightning":{"backend":"fake"}}`)
 	if err != nil || c.PublicStats {

@@ -77,12 +77,15 @@ type Event struct {
 }
 
 func (g *Gate) observe(r *http.Request, class botid.Class, o Outcome, sats int64) {
-	if g.opt.Observer == nil && g.opt.PublicStats == nil {
+	if g.opt.Observer == nil && g.opt.PublicStats == nil && g.opt.PublicSiege == nil {
 		return
 	}
 	e := Event{Time: g.now(), Client: g.client(r), IP: g.clientIP(r), Class: class, Resource: resource(r), Outcome: o, Sats: sats}
 	if g.opt.PublicStats != nil {
 		g.opt.PublicStats.Observe(e)
+	}
+	if g.opt.PublicSiege != nil {
+		g.opt.PublicSiege.Observe(e)
 	}
 	if g.opt.Observer != nil {
 		g.opt.Observer(e)

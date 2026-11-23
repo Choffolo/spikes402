@@ -63,6 +63,11 @@ type Options struct {
 	// GET /.spikes402/stats. It is independent of the admin dashboard.
 	PublicStats *PublicStats
 
+	// PublicSiege, if set, records a delayed, anonymised per-second view
+	// of the siege and serves GET /.spikes402/siege (page) and
+	// /.spikes402/siege.json. The 402 page then links to it.
+	PublicSiege *PublicSiege
+
 	// Argon2MaxMemoryMiB is the most memory concurrent Argon2id checks may
 	// use together. 0 means DefaultArgonMaxMemoryMiB (256). A single check
 	// that needs more than this is refused (see config).
@@ -695,7 +700,11 @@ func (g *Gate) writeChallenge(w http.ResponseWriter, r *http.Request, o offer, p
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		h.Set("Content-Security-Policy", pageCSP)
 		w.WriteHeader(http.StatusPaymentRequired)
-		writeHTML(w, body, template.URL(o.qr), g.opt.WallMode == WallModePowFirst)
+		var siege string
+		if g.opt.PublicSiege != nil {
+			siege = SiegePagePath
+		}
+		writeHTML(w, body, template.URL(o.qr), g.opt.WallMode == WallModePowFirst, siege)
 		return
 	}
 	h.Set("Content-Type", "application/json")

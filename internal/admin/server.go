@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"maps"
@@ -23,6 +24,7 @@ import (
 	"github.com/Choffolo/spikes402/internal/config"
 	"github.com/Choffolo/spikes402/internal/gate"
 	"github.com/Choffolo/spikes402/internal/lightning"
+	"github.com/Choffolo/spikes402/internal/siegeart"
 )
 
 //go:embed web
@@ -144,6 +146,10 @@ func (s *Server) Handler() http.Handler {
 	for _, p := range []string{"GET /{$}", "GET /app.js", "GET /style.css"} {
 		mux.Handle(p, files)
 	}
+	mux.HandleFunc("GET /siege-art.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		io.WriteString(w, siegeart.JS)
+	})
 
 	mux.HandleFunc("GET /api/whoami", s.api(false, s.whoami))
 	mux.HandleFunc("GET /api/status", s.api(false, s.status))

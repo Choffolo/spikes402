@@ -77,6 +77,11 @@ type Config struct {
 	// (unlocks and sats received). Off by default.
 	PublicStats bool `json:"public_stats,omitempty"`
 
+	// PublicSiege exposes GET /.spikes402/siege: a delayed (8 s),
+	// anonymised view of the siege monitor for site visitors, linked from
+	// the 402 page. Off by default.
+	PublicSiege bool `json:"public_siege,omitempty"`
+
 	ProtectCaseSensitive bool `json:"protect_case_sensitive"` // match "protect" patterns case-sensitively (default: case-insensitive)
 	MaxConnections       int  `json:"max_connections"`        // open client connections at once, default 10000
 	ReadTimeoutSeconds   int  `json:"read_timeout_seconds"`   // to read a whole request, default 60

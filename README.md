@@ -142,6 +142,8 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `state_dir` | Directory for spent tokens, withdrawal intents, and dashboard overrides (mode 0700, files 0600). Created on startup if missing. Docker: must be a writable volume | `<directory of the config file>/state` |
 | `identify_bots` | Classify clients (Web Bot Auth, published IP lists, reverse DNS); see [Bot identification](#bot-identification) | `true` |
 | `known_bots` | Replace the built-in list of crawlers: `[{"name", "user_agent", "ip_ranges_url", "reverse_dns": [...]}]` | built-in list |
+| `public_stats` | Serve aggregate counters (unlocks and sats received, no visitor data) at `GET /.spikes402/stats` | `false` |
+| `public_siege` | Serve a delayed, anonymised [public siege view](#public-siege-view-optional-off-by-default) at `/.spikes402/siege` and link it from the 402 page | `false` |
 | `paused` | Serve protected paths free and create no invoices (dashboard toggle; also honoured in the file / overrides) | `false` |
 | `bot_policies` | Optional per-class treatment (see [Policies](#policies-off-by-default-open-for-discussion)) | `{}` = everyone pays the same |
 | `web_bot_auth_trusted_agents` | Domains whose Web Bot Auth key directories you trust, e.g. `["chatgpt.com"]` (subdomains included). Only those signatures make a request `verified-signed`; see [Web Bot Auth](#web-bot-auth) | `[]` = none |
@@ -664,6 +666,26 @@ a keyed hash that changes on every restart (`v-3fa2c1d9e07b`), no query
 strings. Use `"admin.visitor_ips": "truncate"` for networks
 (`203.0.113.0/24`) or `"full"` for addresses. The animation respects
 "reduce motion".
+
+### Public siege view (optional, off by default)
+
+With `"public_siege": true`, anyone can watch a read-only copy of the siege
+at `/.spikes402/siege`, and the 402 page shows a “See the siege in real
+time” link. It is served by the public proxy itself, not by the admin
+listener, and shares nothing with the admin API.
+
+It runs **8 seconds behind** and is **anonymised**: the JSON behind it
+(`/.spikes402/siege.json`) holds, per second, only four counts (paid,
+proof-of-work, stopped, repelled) and at most six names of crawlers from the
+bot list (`GPTBot`, or `Googlebot` marked fake). No addresses, hashes, paths,
+query strings or user agents; signed agents and unknown visitors get no
+name. The snapshot is rebuilt at most once per second and shared by every
+viewer (a few KB at most), so more viewers do not mean more work, and it
+never touches the Lightning node. The page has no external resources, a
+strict CSP, polls once a second only while the tab is visible, and respects
+"reduce motion".
+
+The delay is there so nobody can watch their own requests land in real time.
 
 ## AI admin (MCP)
 

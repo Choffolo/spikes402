@@ -127,6 +127,11 @@ func main() {
 		pubStats = s
 		log.Print("public aggregate stats at /.spikes402/stats")
 	}
+	var pubSiege *gate.PublicSiege
+	if cfg.PublicSiege {
+		pubSiege = gate.NewPublicSiege()
+		log.Print("public siege view at /.spikes402/siege (delayed, anonymised)")
+	}
 	if cfg.AdminEnabled() {
 		monitor = admin.NewMonitor(cfg.Admin.VisitorIPs, time.Now())
 		observer = monitor.Observe
@@ -158,6 +163,7 @@ func main() {
 		Surge:              cfg.Surge,
 		Observer:           observer,
 		PublicStats:        pubStats,
+		PublicSiege:        pubSiege,
 		Argon2MaxMemoryMiB: cfg.Argon2MaxMemoryMiB,
 
 		SpentStore:   spentStore,

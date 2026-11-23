@@ -177,6 +177,10 @@ keep the origin's cache headers.
   funds. Prefer phoenixd's own tools (`phoenix-cli`) for that.
 - `identify_bots` (on by default) fetches the crawlers' published IP lists
   over HTTPS, so the Spikes402 container needs outbound internet.
+- `public_stats` and `public_siege` (both off by default) are served by
+  the public proxy under `/.spikes402/`. They expose only aggregate,
+  anonymised data (the siege view runs 8 s behind) and never the admin
+  listener; keep the admin port on `127.0.0.1` either way.
 - Optional per-path prices (first matching rule wins; other protected
   paths use `price_sats`):
 
