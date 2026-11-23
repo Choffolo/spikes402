@@ -53,6 +53,7 @@ type Config struct {
 	Prices               []gate.PriceRule   `json:"prices,omitempty"`        // optional per-path prices; first match wins
 	Surge                gate.SurgeConfig   `json:"surge,omitempty"`         // optional demand-based price multiplier, off by default
 	Previews             []gate.PreviewRule `json:"previews,omitempty"`      // optional teaser of a protected page on its 402 page; first match wins
+	WallMode             string             `json:"wall_mode,omitempty"`     // "" = default two-door page; "pow_first" starts the puzzle automatically
 	PowSecondsPerSat     float64            `json:"pow_seconds_per_sat"`     // CPU-core seconds of work per sat, default 10
 	PowDifficulty        int                `json:"pow_difficulty"`          // 0 = derived from price and pow_seconds_per_sat
 	PowAlgorithm         string             `json:"pow_algorithm"`           // "sha256d" (default) or "argon2id"
@@ -298,6 +299,11 @@ func (c *Config) complete() error {
 		if err := r.Check(); err != nil {
 			return fmt.Errorf("previews[%d]: %w", i, err)
 		}
+	}
+	switch c.WallMode {
+	case "", gate.WallModePowFirst:
+	default:
+		return errors.New(`"wall_mode" must be "pow_first" or omitted`)
 	}
 	if c.PowSecondsPerSat < 0 {
 		return errors.New(`"pow_seconds_per_sat" must be positive`)
@@ -679,6 +685,7 @@ type Public struct {
 	Prices               []gate.PriceRule       `json:"prices"`
 	Surge                gate.SurgeConfig       `json:"surge"`
 	Paused               bool                   `json:"paused"`
+	WallMode             string                 `json:"wall_mode,omitempty"`
 	PowAlgorithm         string                 `json:"pow_algorithm"`
 	PowSecondsPerSat     float64                `json:"pow_seconds_per_sat"`
 	PowDifficulty        int                    `json:"pow_difficulty"`
@@ -702,7 +709,7 @@ type Public struct {
 // Public returns the configuration without secrets.
 func (c *Config) Public() Public {
 	p := Public{
-		Origin: c.Origin, Protect: append([]string(nil), c.Protect...), PriceSats: c.PriceSats, Prices: c.Prices, Surge: c.Surge, Paused: c.Paused, PowAlgorithm: c.PowAlgorithm,
+		Origin: c.Origin, Protect: append([]string(nil), c.Protect...), PriceSats: c.PriceSats, Prices: c.Prices, Surge: c.Surge, Paused: c.Paused, WallMode: c.WallMode, PowAlgorithm: c.PowAlgorithm,
 		PowSecondsPerSat: c.PowSecondsPerSat, PowDifficulty: c.PowDifficulty, Argon2MemoryMiB: c.Argon2MemoryMiB,
 		CurrentPoW: c.PoW(c.PriceSats), ChallengeTTLSeconds: c.ChallengeTTLSeconds, PassTTLSeconds: int(c.PassTTL() / time.Second), ChallengesPerMinute: c.ChallengesPerMinute,
 		MaxInvoicesPerMinute: c.MaxInvoicesPerMinute, MaxPendingInvoices: c.MaxPendingInvoices,

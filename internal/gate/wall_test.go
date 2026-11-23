@@ -88,6 +88,50 @@ func TestEnergyWallPage(t *testing.T) {
 	}
 }
 
+func TestPowFirstWallPage(t *testing.T) {
+	f := newFixture(t)
+	f.gate.opt.WallMode = WallModePowFirst
+	rec := f.get("/premium/article", "", "text/html")
+	body := rec.Body.String()
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("got %d, want 402", rec.Code)
+	}
+	for _, want := range []string{
+		`data-autostart="1"`,
+		"Tired of waiting? Pay this",
+		`id="webln-pay"`,
+		`data-invoice="`,
+		`id="open-wallet"`,
+		`id="pay-wait"`,
+		"Open in wallet",
+		"data:image/png;base64,",
+		`id="pow-go"`,
+		`data-challenge="`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("pow_first page lacks %q", want)
+		}
+	}
+	if strings.Contains(body, "Or pay with Lightning") {
+		t.Error("pow_first page still uses the two-door heading")
+	}
+	invoice, token := weblnAttrs(t, body)
+	if invoice == "" || !strings.Contains(body, `data-challenge="`+token+`"`) {
+		t.Error("puzzle and invoice should still share the same offer")
+	}
+}
+
+func TestDefaultWallPageHasNoAutostart(t *testing.T) {
+	f := newFixture(t)
+	body := f.get("/premium/article", "", "text/html").Body.String()
+	if strings.Contains(body, `data-autostart="1"`) || strings.Contains(body, "Tired of waiting?") {
+		t.Error("default wall should not autostart or use the pow_first caption")
+	}
+	if !strings.Contains(body, "Or pay with Lightning") || !strings.Contains(body, `id="webln-pay"`) {
+		t.Error("default wall should keep the two-door layout and invoice button")
+	}
+}
+
 func TestPaywallMarkup(t *testing.T) {
 	f := newFixture(t)
 	body := f.get("/premium/article", "", "text/html").Body.String()

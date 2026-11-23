@@ -85,6 +85,7 @@ func TestForPrice(t *testing.T) {
 		want          int
 	}{
 		{SHA256d, 0, 1, 10, 24},    // 2e7 attempts -> 2^24.25
+		{SHA256d, 0, 2, 5, 24},     // same work as 1 sat at 10 s/sat
 		{SHA256d, 0, 10, 10, 28},   // 2e8 -> 2^27.6
 		{SHA256d, 0, 100, 10, 31},  // 2e9 -> 2^30.9
 		{SHA256d, 0, 1000, 10, 32}, // capped
@@ -110,5 +111,20 @@ func TestExpectedSeconds(t *testing.T) {
 	}
 	if got := (Params{Algorithm: Argon2id, Difficulty: 10, MemoryMiB: 16}).ExpectedSeconds(); got < 10.9 || got > 11.0 { // 1024 x 16/1500
 		t.Fatalf("got %g", got)
+	}
+}
+
+func TestTwoSatsAtFiveSecondsMatchesOneSatAtTen(t *testing.T) {
+	two := ForPrice(SHA256d, 0, 2, 5)
+	one := ForPrice(SHA256d, 0, 1, 10)
+	if two != one || two.Difficulty != 24 {
+		t.Fatalf("got two=%+v one=%+v", two, one)
+	}
+	got, want := two.ExpectedSeconds(), (Params{Algorithm: SHA256d, Difficulty: 24}).ExpectedSeconds()
+	if got != want || got < 8.3 || got > 8.4 { // 2^24 / 2e6 = 8.388608
+		t.Fatalf("expected seconds: got %g, want %g", got, want)
+	}
+	if ForPrice(Argon2id, 16, 2, 5) != ForPrice(Argon2id, 16, 1, 10) {
+		t.Fatal("argon2id work should also match")
 	}
 }

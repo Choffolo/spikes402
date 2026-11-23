@@ -41,4 +41,9 @@ function start(){
   })(i);
 }
 go.addEventListener("click",function(){if(running)stop();else start()});
+if(box.getAttribute("data-autostart")==="1"){
+  var reduce=false;
+  try{reduce=window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches}catch(e){}
+  if(!reduce)start();
+}
 })();

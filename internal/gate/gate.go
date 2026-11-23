@@ -72,6 +72,12 @@ type Options struct {
 	// first matching rule wins; no match (or mode "none") shows no teaser.
 	Previews []PreviewRule
 
+	// WallMode selects the 402 page layout. Empty is the default two-door
+	// page (pay and puzzle side by side). WallModePowFirst starts the
+	// puzzle automatically and offers Lightning as a fallback. Invoices
+	// are still created when the page is served.
+	WallMode string
+
 	// SpentStore, if set, records spent tokens on disk. SpentRecords is
 	// the already-loaded contents (so New does not fail on a bad store).
 	SpentStore   SpentStore
@@ -689,7 +695,7 @@ func (g *Gate) writeChallenge(w http.ResponseWriter, r *http.Request, o offer, p
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		h.Set("Content-Security-Policy", pageCSP)
 		w.WriteHeader(http.StatusPaymentRequired)
-		writeHTML(w, body, template.URL(o.qr))
+		writeHTML(w, body, template.URL(o.qr), g.opt.WallMode == WallModePowFirst)
 		return
 	}
 	h.Set("Content-Type", "application/json")
