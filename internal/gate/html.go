@@ -130,7 +130,7 @@ Or pay this invoice with any Lightning wallet:</p>
 {{end}}
 <p><small>Bots: difficulty {{.PoW.Difficulty}} (~{{.PoW.ExpectedSeconds}}s on one core); details in the <code>WWW-Authenticate</code> headers. Expires {{.ExpiresAt.Format "15:04 MST"}}.</small></p>
 </div>
-<p><small>Protected by <a href="https://github.com/Choffolo/spikes402">Spikes402</a>.</small></p>
+<p><small>Protected by <a href="https://github.com/Choffolo/spikes402">Spikes402</a>.{{with .Siege}} <a href="{{.}}">See the siege in real time</a>{{end}}</small></p>
 {{.Script}}
 </body>
 </html>
@@ -222,6 +222,18 @@ func (g *Gate) serveReserved(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.NotFound(w, r)
+	case SiegePagePath:
+		if g.opt.PublicSiege != nil {
+			g.opt.PublicSiege.servePage(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	case SiegeJSONPath:
+		if g.opt.PublicSiege != nil {
+			g.opt.PublicSiege.serveJSON(w, r)
+			return
+		}
+		http.NotFound(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -303,7 +315,8 @@ func invoiceQR(invoice string) template.URL {
 // own, and paying is offered under "Tired of waiting? Pay this →".
 const WallModePowFirst = "pow_first"
 
-func writeHTML(w io.Writer, b challengeBody, qr template.URL, powFirst bool) {
+// siege is the public siege page path, or "" when that view is off.
+func writeHTML(w io.Writer, b challengeBody, qr template.URL, powFirst bool, siege string) {
 	data := struct {
 		challengeBody
 		QR        template.URL
@@ -317,7 +330,8 @@ func writeHTML(w io.Writer, b challengeBody, qr template.URL, powFirst bool) {
 		Claim     string
 		SatUnit   string
 		PowFirst  bool
-	}{challengeBody: b, QR: qr, LD: ldJSON(b.Preview), Logo: logoInline, Favicon: logoFavicon, WorkerSrc: workerSrc, Claim: ClaimPath, SatUnit: satUnit(b.PriceSats), PowFirst: powFirst}
+		Siege     string
+	}{Siege: siege, challengeBody: b, QR: qr, LD: ldJSON(b.Preview), Logo: logoInline, Favicon: logoFavicon, WorkerSrc: workerSrc, Claim: ClaimPath, SatUnit: satUnit(b.PriceSats), PowFirst: powFirst}
 	var scripts string
 	if b.L402 != nil {
 		scripts += "<script>" + weblnJS + "</script>\n"

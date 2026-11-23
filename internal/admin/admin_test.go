@@ -97,7 +97,7 @@ func (e *env) callFrom(remote, method, path, key string, body any) (*httptest.Re
 
 func TestDashboardStatic(t *testing.T) {
 	e := newEnv(t, "")
-	for _, p := range []string{"/", "/app.js", "/style.css"} {
+	for _, p := range []string{"/", "/app.js", "/style.css", "/siege-art.js"} {
 		rec, _ := e.call("GET", p, "", nil)
 		if rec.Code != 200 || !strings.Contains(rec.Header().Get("Content-Security-Policy"), "default-src 'self'") ||
 			rec.Header().Get("X-Frame-Options") != "DENY" {
@@ -111,8 +111,10 @@ func TestDashboardStatic(t *testing.T) {
 		t.Fatal("unexpected index.html")
 	}
 	// Visitor-controlled text (paths, bot names) must never be parsed as HTML.
-	if rec, _ := e.call("GET", "/app.js", "", nil); strings.Contains(rec.Body.String(), "innerHTML") {
-		t.Fatal("app.js uses innerHTML")
+	for _, p := range []string{"/app.js", "/siege-art.js"} {
+		if rec, _ := e.call("GET", p, "", nil); strings.Contains(rec.Body.String(), "innerHTML") {
+			t.Fatalf("%s uses innerHTML", p)
+		}
 	}
 }
 

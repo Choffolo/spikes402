@@ -25,6 +25,7 @@
     "visitor_ips": "hash"
   },
   "public_stats": false,
+  "public_siege": false,
   "withdraw": {
     "enabled": false
   },
