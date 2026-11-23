@@ -69,6 +69,32 @@ or solve a math puzzle with your computer&rsquo;s power.</p>
 {{end}}</article>
 {{end}}<div class="paywall">
 <p>This page costs <strong>{{.PriceSats}} {{.SatUnit}}</strong>.</p>
+{{if and .PowFirst .Solve}}
+<h2>Solve the puzzle</h2>
+<p>Your browser searches for a number that unlocks this page: about {{.Attempts}} attempts, using your CPU.
+<noscript>This needs JavaScript.</noscript></p>
+<div id="pow-box" hidden data-challenge="{{.PoW.Challenge}}" data-difficulty="{{.PoW.Difficulty}}" data-worker="{{.WorkerSrc}}" data-autostart="1">
+  <button type="button" id="pow-go">Solve the puzzle</button>
+  <progress id="pow-bar" max="1" value="0" hidden></progress>
+  <small id="pow-stats" aria-live="polite"></small>
+  <p id="pow-msg" role="status"></p>
+</div>
+{{if .L402}}<p>Tired of waiting? Pay this &rarr;</p>{{end}}
+{{with .L402}}
+<a href="lightning:{{.Invoice}}"><img src="{{$.QR}}" alt="QR code of the Lightning invoice" width="160" height="160"></a>
+<p><code>{{.Invoice}}</code></p>
+<p><a class="btn" id="open-wallet" href="lightning:{{.Invoice}}">Open in wallet</a></p>
+<p id="pay-wait" hidden data-token="{{.Token}}" data-expires="{{$.ExpiresAt.Unix}}" data-claim="{{.Claim}}">
+  <small id="pay-msg" role="status"></small>
+</p>
+<p id="wallet-box" hidden>
+  <button type="button" id="webln-pay" data-invoice="{{.Invoice}}" data-token="{{.Token}}">Pay with one click</button>
+  <small id="webln-msg"></small>
+</p>
+{{else}}
+<p>Lightning payments are unavailable right now.</p>
+{{end}}
+{{else}}
 <div class="ways">
 {{if .Solve}}<div>
 <h2>Solve the puzzle</h2>
@@ -101,6 +127,7 @@ Or pay this invoice with any Lightning wallet:</p>
 {{end}}
 </div>
 </div>
+{{end}}
 <p><small>Bots: difficulty {{.PoW.Difficulty}} (~{{.PoW.ExpectedSeconds}}s on one core); details in the <code>WWW-Authenticate</code> headers. Expires {{.ExpiresAt.Format "15:04 MST"}}.</small></p>
 </div>
 <p><small>Protected by <a href="https://github.com/Choffolo/spikes402">Spikes402</a>.</small></p>
@@ -272,7 +299,11 @@ func invoiceQR(invoice string) template.URL {
 	return template.URL("data:image/png;base64," + base64.StdEncoding.EncodeToString(png))
 }
 
-func writeHTML(w io.Writer, b challengeBody, qr template.URL) {
+// WallModePowFirst is the optional 402 layout: the puzzle starts on its
+// own, and paying is offered under "Tired of waiting? Pay this →".
+const WallModePowFirst = "pow_first"
+
+func writeHTML(w io.Writer, b challengeBody, qr template.URL, powFirst bool) {
 	data := struct {
 		challengeBody
 		QR        template.URL
@@ -285,7 +316,8 @@ func writeHTML(w io.Writer, b challengeBody, qr template.URL) {
 		WorkerSrc string
 		Claim     string
 		SatUnit   string
-	}{challengeBody: b, QR: qr, LD: ldJSON(b.Preview), Logo: logoInline, Favicon: logoFavicon, WorkerSrc: workerSrc, Claim: ClaimPath, SatUnit: satUnit(b.PriceSats)}
+		PowFirst  bool
+	}{challengeBody: b, QR: qr, LD: ldJSON(b.Preview), Logo: logoInline, Favicon: logoFavicon, WorkerSrc: workerSrc, Claim: ClaimPath, SatUnit: satUnit(b.PriceSats), PowFirst: powFirst}
 	var scripts string
 	if b.L402 != nil {
 		scripts += "<script>" + weblnJS + "</script>\n"

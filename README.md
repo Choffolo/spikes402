@@ -119,9 +119,10 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `prices` | Optional list of `{ "pattern", "price_sats" }` rules. Same pattern syntax and canonical path as `protect`. **The first matching rule wins**; put more specific patterns first. Unmatched protected paths use `price_sats`. | `[]` |
 | `surge` | Optional demand-based price multiplier, **off by default**. See [Dynamic pricing](#dynamic-pricing-optional-off-by-default). Config file only (not a dashboard control) | off |
 | `previews` | Optional list of `{ "pattern", "mode", "max_chars" }` rules that show a teaser of the page on its 402 page, see [The 402 page](#the-402-page-for-people). `mode`: `"none"`, `"title"` (title and meta description) or `"excerpt"` (also the first `max_chars` characters, default 300, at most 1000). Same patterns as `protect`; **the first matching rule wins**. Config file only | `[]` = no teaser |
+| `wall_mode` | 402 page layout. Omitted is the default two-door page (pay and puzzle side by side). `"pow_first"` starts the puzzle automatically (unless the visitor prefers reduced motion) and offers Lightning under “Tired of waiting? Pay this →”. The invoice is still created when the page is served. Config file only | omitted |
 | `protect` | Path patterns that require payment. `"/premium/**"` = everything under `/premium`; other patterns use [glob syntax](https://pkg.go.dev/path#Match), e.g. `"/*.pdf"`. See [Path matching](#path-matching) | required |
 | `protect_case_sensitive` | Match `protect` patterns with exact letter case. Off by default, because many websites serve `/Premium` like `/premium` | `false` |
-| `pow_seconds_per_sat` | How much work replaces one sat: seconds of one CPU core (see [Proof-of-work pricing](#proof-of-work-pricing)). Values below 1 are refused unless `unsafe_allow_dangerous_config` is set | `10` |
+| `pow_seconds_per_sat` | How much work replaces one sat: seconds of one CPU core (see [Proof-of-work pricing](#proof-of-work-pricing)). Values below 1 are refused unless `unsafe_allow_dangerous_config` is set. Example configs use `5` with `price_sats: 2`, which is the same puzzle as 1 sat at this default | `10` |
 | `pow_difficulty` | Leading zero bits for the puzzle. `0` = derive from the price and `pow_seconds_per_sat` | `0` |
 | `pow_algorithm` | `"sha256d"` or `"argon2id"` (memory-hard, see [Argon2id](#argon2id-memory-hard-proof-of-work)) | `"sha256d"` |
 | `argon2_memory_mib` | Memory per Argon2id attempt, 8–256 MiB | `16` |
@@ -272,7 +273,7 @@ than this Go reference for sha256d and about **1.3×** for argon2id, in an
 external benchmark; expected times for those solvers are shorter. The
 published calibration is unchanged.
 
-With the default `pow_seconds_per_sat: 10`:
+With the default `pow_seconds_per_sat: 10` (used when the key is omitted):
 
 | Price | Difficulty | One CPU core (average) | GPU (roughly) |
 |---|---|---|---|
@@ -280,6 +281,8 @@ With the default `pow_seconds_per_sat: 10`:
 | 10 sats | 28 bits | ~2 min | ~0.1 s |
 | 100 sats | 31 bits | ~18 min | ~1 s |
 | 1000 sats | 32 bits (max) | ~36 min | ~2 s |
+
+The example configs use `price_sats: 2` and `pow_seconds_per_sat: 5`: the same 24-bit puzzle as 1 sat at the default 10 seconds per sat (~8 s on one core). Existing sites that omit `pow_seconds_per_sat` keep the default of 10, so their wait time does not change.
 
 Why 10 seconds per sat: a rented CPU core costs about $0.02 per hour, and at
 $100,000 per bitcoin one sat is $0.001, the price of about **3 minutes** of
@@ -349,6 +352,14 @@ shows "Waiting for payment…", then "Paid — unlocking", and reloads into the
 content. It learns that the invoice is paid by polling `/.spikes402/claim`
 (see below); the preimage never has to be typed in.
 
+With `"wall_mode": "pow_first"` (off unless you set it; used in
+[`config.example.json`](config.example.json)) the puzzle starts on its own, and
+Lightning sits under the line “Tired of waiting? Pay this →”. The invoice, QR
+code, **Open in wallet** link and WebLN button are the same as on the default
+page, and are still created when the page is served. If the visitor has
+`prefers-reduced-motion: reduce`, the puzzle does not start until they press
+the button.
+
 The button runs the same sha256d puzzle as bots do, in Web Workers (one per
 core, at most 8), and shows the work: a progress bar against the expected
 number of attempts, attempts so far, hashes per second, elapsed time. When
@@ -367,9 +378,9 @@ from bots, and it cannot (`Accept: text/html` costs a bot nothing), so it
 would just be a cheaper price for scrapers. The knob stays `pow_seconds_per_sat`.
 The in-browser solver does about 1 million attempts per second per thread
 (about half of the Go reference core) and scales with cores: 8 threads
-measured ~7–10 million per second in Chrome. So difficulty 24 (the default
-for 1 sat) takes a few seconds on a laptop, 26 about 10 s, and 28 (10 sats)
-roughly a minute. If you want visitors to wait about 10 s, price pages so
+measured ~7–10 million per second in Chrome. So difficulty 24 (1 sat at the default 10 seconds per sat, or 2 sats at 5)
+takes a few seconds on a laptop, 26 about 10 s, and 28 (10 sats at the default
+10 seconds per sat) roughly a minute. If you want visitors to wait about 10 s, price pages so
 the difficulty is 25–26 or set `pow_difficulty`.
 
 **Teaser.** To tempt visitors (and search engines) you can show a few words of

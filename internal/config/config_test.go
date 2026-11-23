@@ -23,9 +23,24 @@ func TestExampleConfigLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Listen != "127.0.0.1:8402" || c.PowSecondsPerSat != 10 || c.PoW(c.PriceSats).Difficulty != 24 || c.ChallengeTTLSeconds != 600 || c.PassTTL() != 10*time.Second ||
+	if c.Listen != "127.0.0.1:8402" || c.PriceSats != 2 || c.PowSecondsPerSat != 5 || c.PoW(c.PriceSats).Difficulty != 24 || c.WallMode != "pow_first" || c.ChallengeTTLSeconds != 600 || c.PassTTL() != 10*time.Second ||
 		c.ChallengesPerMinute != 30 || c.MaxInvoicesPerMinute != 300 || c.MaxPendingInvoices != 10_000 || c.ClientIPHeader != "" {
 		t.Fatalf("unexpected defaults: %+v", c)
+	}
+}
+
+func TestWallMode(t *testing.T) {
+	base := `{"origin":"http://o","price_sats":2,"protect":["/x"],"lightning":{"backend":"fake"}}`
+	c, err := load(t, base)
+	if err != nil || c.WallMode != "" {
+		t.Fatalf("omitted: mode=%q err=%v", c.WallMode, err)
+	}
+	c, err = load(t, `{"origin":"http://o","price_sats":2,"protect":["/x"],"wall_mode":"pow_first","lightning":{"backend":"fake"}}`)
+	if err != nil || c.WallMode != "pow_first" || c.Public().WallMode != "pow_first" {
+		t.Fatalf("pow_first: mode=%q public=%q err=%v", c.WallMode, c.Public().WallMode, err)
+	}
+	if _, err := load(t, `{"origin":"http://o","price_sats":2,"protect":["/x"],"wall_mode":"lazy","lightning":{"backend":"fake"}}`); err == nil || (err != nil && !strings.Contains(err.Error(), "wall_mode")) {
+		t.Fatalf("want wall_mode error, got %v", err)
 	}
 }
 

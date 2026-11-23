@@ -137,6 +137,7 @@ func main() {
 		Protect:      cfg.Protect,
 		Prices:       cfg.Prices,
 		Previews:     cfg.Previews,
+		WallMode:     cfg.WallMode,
 		Paused:       cfg.Paused,
 		PoW:          cfg.PoW,
 		ChallengeTTL: cfg.ChallengeTTL(),

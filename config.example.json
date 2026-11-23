@@ -1,9 +1,10 @@
 {
   "listen": "127.0.0.1:8402",
   "origin": "http://localhost:8080",
-  "price_sats": 1,
+  "price_sats": 2,
   "protect": ["/premium/**"],
-  "pow_seconds_per_sat": 10,
+  "pow_seconds_per_sat": 5,
+  "wall_mode": "pow_first",
   "pow_difficulty": 0,
   "pow_algorithm": "sha256d",
   "challenge_ttl_seconds": 600,
