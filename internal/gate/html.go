@@ -36,6 +36,7 @@ var page = template.Must(template.New("402").Parse(`<!doctype html>
  body{font-family:system-ui,sans-serif;max-width:46rem;margin:.75rem auto;padding:0 1rem;color:#222;line-height:1.35}
  h1{display:flex;align-items:center;gap:.45rem;font-size:1.35rem;margin:.2rem 0 .35rem}
  h1 .logo{width:1.5em;height:1.5em;flex:none}
+ h1 a.logo-link{color:inherit;text-decoration:none;display:flex;flex:none}
  h2{font-size:1.05rem;margin:.15rem 0 .3rem}
  p{margin:.3rem 0}
  code{word-break:break-all;background:#f3f3f3;padding:.15rem .3rem;border-radius:4px;font-size:.8rem}
@@ -192,6 +193,11 @@ var (
 	// so the icon needs no extra CSP source (img-src already allows data:).
 	logoInline  = template.HTML(inlineLogo(logoSVG))
 	logoFavicon = template.URL("data:image/svg+xml;base64," + base64.StdEncoding.EncodeToString([]byte(logoSVG)))
+	// logoHome wraps the mark in a link to the site root. The proxy is
+	// self-hosted, so this must be "/", not a hard-coded spikes402.dev
+	// URL: on the official demo that is the project homepage; on any
+	// other site it is that site's own front page.
+	logoHome = template.HTML(`<a href="/" class="logo-link" aria-label="Back to the site">` + string(logoInline) + `</a>`)
 
 	// workerSrc carries a content hash so a new release is never served
 	// from an old cached copy.
@@ -331,7 +337,7 @@ func writeHTML(w io.Writer, b challengeBody, qr template.URL, powFirst bool, sie
 		SatUnit   string
 		PowFirst  bool
 		Siege     string
-	}{Siege: siege, challengeBody: b, QR: qr, LD: ldJSON(b.Preview), Logo: logoInline, Favicon: logoFavicon, WorkerSrc: workerSrc, Claim: ClaimPath, SatUnit: satUnit(b.PriceSats), PowFirst: powFirst}
+	}{Siege: siege, challengeBody: b, QR: qr, LD: ldJSON(b.Preview), Logo: logoHome, Favicon: logoFavicon, WorkerSrc: workerSrc, Claim: ClaimPath, SatUnit: satUnit(b.PriceSats), PowFirst: powFirst}
 	var scripts string
 	if b.L402 != nil {
 		scripts += "<script>" + weblnJS + "</script>\n"

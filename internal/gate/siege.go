@@ -293,7 +293,7 @@ start();
 const siegeCSS = `:root{--bg:#0b1020;--card:#141b33;--fg:#e6ebff;--dim:#8a93b8;--line:#222b4d;--paid:#ffc83d;--pow:#00e5ff;--held:#9aa3c7;--repelled:#ff4d6d}
 body{margin:0 auto;max-width:960px;padding:1rem;font:15px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
 a{color:var(--pow)}h1{font-size:1.4rem;margin:.2rem 0 .8rem;display:flex;align-items:center;gap:.5rem}
-h1 .logo{width:1.6em;height:1.6em;flex:none;background:var(--fg);border-radius:50%;padding:2px}.note{color:var(--dim);font-size:13px}
+h1 .logo{width:1.6em;height:1.6em;flex:none;background:var(--fg);border-radius:50%;padding:2px}h1 a.logo-link{color:inherit;text-decoration:none;display:flex;flex:none}.note{color:var(--dim);font-size:13px}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.8rem;margin-bottom:.8rem}
 .stats div{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:.5rem .9rem;color:var(--dim);font-size:13px}
 .stats b{display:block;font-size:1.8rem;color:var(--fg);font-variant-numeric:tabular-nums}
@@ -320,7 +320,7 @@ var (
 <style>` + siegeCSS + `</style>
 </head>
 <body>
-<h1>` + string(logoInline) + ` The siege</h1>
+<h1>` + string(logoHome) + ` The siege</h1>
 <p class="note">Every dot is a visit to a protected page. Delayed a few seconds (about ` + itoaWait(SiegeDelay) + ` s) and anonymised: no addresses, pages or user agents, only the names of well-known crawlers.</p>
 <div class="stats" aria-live="off">
 <div class="paid"><b id="s-paid">0</b>paid / min</div>
