@@ -78,6 +78,11 @@ func TestSiegePageAndLink(t *testing.T) {
 		!strings.Contains(page, "prefers-reduced-motion") || !strings.Contains(page, "document.hidden") {
 		t.Fatalf("unexpected page: %s", page)
 	}
+	for _, want := range []string{`class="logo-link"`, `aria-label="Back to the site"`, `<h1><a href="/" class="logo-link" aria-label="Back to the site">`} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("siege heading logo is not a home link, missing %q", want)
+		}
+	}
 	if rec := f.get(SiegePagePath, "", ""); rec.Header().Get("Set-Cookie") != "" {
 		t.Fatal("page sets a cookie")
 	}
