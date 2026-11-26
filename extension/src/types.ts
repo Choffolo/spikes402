@@ -1,5 +1,6 @@
 import type { BudgetSettings, SpendState } from "./budget";
 import type { EncryptedVault } from "./crypto";
+import type { GuardState } from "./guard";
 
 export type Network = "regtest" | "mainnet";
 
@@ -52,6 +53,9 @@ export type Reservation = {
   id: string;
   origin: string;
   day: string; // the budget day it was counted in
+  /** Page (site + path) and payment hash, for the repeat-payment guard. Absent on older records. */
+  page?: string;
+  hash?: string;
   amountSats: number;
   feeSats: number; // fee cap that was counted and given to the wallet
   invoice: string;
@@ -68,6 +72,8 @@ export type StoredState = {
   /** Payment confirmations waiting for the user, oldest first. */
   prompts: PendingPayment[];
   reservations: Reservation[];
+  /** Repeat-payment and clock guard (see guard.ts). */
+  guard: GuardState;
   /**
    * A wallet was created but its owner has not yet proved they saved the
    * words. The wallet cannot be unlocked until they do. The words

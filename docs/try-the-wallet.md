@@ -97,6 +97,11 @@ whether to **pay this time**, **always allow this price on this site**, or
 allow" raises the per-page cap for that site only; daily caps still apply.
 If several pages ask at once, the popup shows them one at a time.
 
+A page that was just paid is not paid again by itself for 60 seconds, and a
+site gets at most one automatic payment every 5 seconds: in those cases the
+popup asks. An invoice that was already paid, for another network, or that
+has expired is refused.
+
 If a payment is slow (no answer after 60 seconds) it is not counted as
 failed: it stays in your budget until the wallet confirms that it settled
 or failed, and the page shows an error. Do not pay the same invoice again.

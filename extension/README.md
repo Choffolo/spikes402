@@ -70,7 +70,8 @@ On mainnet, use only tiny amounts. To try it in your browser, see
   of the price, at least 5 sats, so with the default cap a page above 5
   sats asks first; you only pay the real fee, which is often lower. Each
   paid page is written to the history with its real fee.
-  Pages that fit all three caps are paid automatically. If a page costs
+  Pages that fit all three caps are paid automatically, unless one of the
+  repeat-payment guards below applies. If a page costs
   more, the popup asks whether to pay once, always allow this price on
   this site, or decline. "Always allow" raises the per-page cap for that
   site only; later visits still respect the daily caps.
@@ -233,6 +234,31 @@ Gaps compared to Chrome:
   `*.ck` or `co.uk`, and would go stale; this keeps the data current with
   each release of the dependency. Domains are shown in their ASCII form, so
   look-alike (IDN) names are visible.
+- **Repeat payments.** A page that keeps asking for small payments is
+  slowed down by guards that sit on top of the caps (`src/guard.ts`):
+  after a payment, the same page (site + path) is not paid again
+  automatically for 60 seconds, and each site gets at most one automatic
+  payment every 5 seconds; in both cases the popup asks instead. An invoice
+  (by payment hash) that was paid, or is being paid, is refused and never
+  asked about. Invoices for another network than the wallet's (mainnet
+  takes only `lnbc…`) and expired invoices are refused. The trust prompt
+  says that the site may make several small payments by itself, up to the
+  daily limit.
+- **Clock changes.** Cooldowns use the highest wall-clock time ever seen
+  (saved with the wallet state), and, while the service worker is alive,
+  the smaller of the wall-clock and the monotonic (`performance.now`)
+  elapsed time. A clock set back therefore never shortens a cooldown, and
+  while it is clearly behind the highest time seen (more than 30 seconds),
+  nothing is paid automatically: the popup asks each time. The daily
+  budget bucket is never replaced by an earlier day: if the date goes back,
+  the latest bucket keeps counting. **Residual risk:** a clock set forward
+  can start a new daily budget once (and, after a service-worker restart,
+  when the monotonic clock is gone, it also ends the cooldowns); setting it
+  back afterwards does not reset anything, but the wallet then asks for
+  every payment, and keeps counting against that later day, until real time
+  catches up. The invoice-expiry check uses the clock as it is now, so a
+  clock far ahead makes invoices look expired. Whoever can set the clock
+  can also change the extension itself, so this only blunts casual tricks.
 - **Origin in prompts.** Confirmation text and the desktop notification
   include the page origin and the amount, not just the invoice.
 - **No remote code.** Manifest V3 CSP for extension pages is

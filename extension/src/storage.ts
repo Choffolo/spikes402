@@ -1,6 +1,7 @@
 import { defaultBudget, emptySpend, type SpendState } from "./budget";
 import { defaultSettings, type PaymentRecord, type PendingPayment, type Settings, type StoredState } from "./types";
 import type { EncryptedVault } from "./crypto";
+import { emptyGuard } from "./guard";
 
 const KEY = "spikes402";
 const HISTORY_MAX = 20;
@@ -11,6 +12,7 @@ const fallback = (): StoredState => ({
   history: [],
   prompts: [],
   reservations: [],
+  guard: emptyGuard(),
 });
 
 /** A plain read. For a change, use updateState so it cannot be lost. */
@@ -30,6 +32,7 @@ export async function loadState(): Promise<StoredState> {
     history: Array.isArray(s.history) ? s.history : [],
     prompts: Array.isArray(s.prompts) ? s.prompts : [],
     reservations: Array.isArray(s.reservations) ? s.reservations : [],
+    guard: { ...emptyGuard(), ...(s.guard ?? {}) },
   };
 }
 
