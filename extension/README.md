@@ -14,6 +14,8 @@ signup are required.
 This is an early prototype. Do not store more than you can afford to lose.
 On mainnet, use only tiny amounts. To try it in your browser, see
 [Try the wallet](../docs/try-the-wallet.md).
+What the wallet stores, who it talks to, and how to delete it:
+[spikes402.dev/privacy](https://spikes402.dev/privacy/).
 
 ## What works today
 
