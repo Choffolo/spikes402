@@ -136,6 +136,8 @@ function render(snap: Snapshot, full: boolean) {
     const more = pendingCount > 1 ? ` (${pendingCount - 1} more waiting)` : "";
     $("pending-text").textContent = `This page costs ${pending.amountSats} ${satWord(pending.amountSats)} + a fee of up to ${fee} ${satWord(fee)}. ${pending.reason}${more}`;
     $("pending-origin").textContent = pending.origin;
+    $("pending-foot").textContent = pendingFoot(pending.cause);
+    $("btn-accept-always").hidden = pending.cause !== "over_payment_cap";
     pendingBox.dataset.id = pending.id;
   } else {
     pendingBox.hidden = true;
@@ -150,6 +152,25 @@ function render(snap: Snapshot, full: boolean) {
     $<HTMLSelectElement>("set-network").value = settings.network;
   }
   if (current === "view-history") renderHistory(snap.history);
+}
+
+function pendingFoot(cause: string | undefined): string {
+  switch (cause) {
+    case "over_payment_cap":
+      return "You only see this when a page costs more than your limit for one page.";
+    case "over_site_day":
+      return "Paying would go over today's limit for this site.";
+    case "over_global_day":
+      return "Paying would go over your daily limit across all sites.";
+    case "same_page":
+      return "The same page is not paid again automatically for 60 seconds.";
+    case "rate_limit":
+      return "A site gets at most one automatic payment every 5 seconds.";
+    case "clock_rollback":
+      return "Automatic payments are paused because the clock of this computer moved backwards.";
+    default:
+      return "This payment needs your confirmation.";
+  }
 }
 
 function renderSites(sites: Settings["sites"]) {

@@ -701,15 +701,82 @@ describe("repeat payments from one page", () => {
     const before = sends.length;
     const prompt = await asked("https://a.example", "/p", small());
     expect(prompt.reason).toMatch(/paid a moment ago/);
+    expect(prompt.cause).toBe("same_page");
     expect(sends).toHaveLength(before);
     await later(51_000);
     expect((await payAt("https://a.example", "/p", small())).error).toBeUndefined();
   });
 
+  it("rejects 'always allow' on a repeat or rate-limit prompt, stores no allowance, and later checks still ask", async () => {
+    expect((await payAt("https://a.example", "/p", small())).error).toBeUndefined();
+    await later(10_000);
+    const again = payAt("https://a.example", "/p", small());
+    await later(20);
+    const prompt = state().prompts![0];
+    expect(prompt.cause).toBe("same_page");
+    expect((await answer(prompt.id, "always")).error).toMatch(/this time/);
+    expect(state().settings?.siteAllowances ?? {}).toEqual({});
+    expect(state().prompts).toHaveLength(1); // the question stays open
+    await answer(prompt.id, "once");
+    expect((await again).error).toBeUndefined();
+    // Paying once did not disable the guard: the same page still asks.
+    const third = payAt("https://a.example", "/p", small());
+    await later(20);
+    expect(state().prompts![0].cause).toBe("same_page");
+    expect((await answer(state().prompts![0].id, "always")).error).toMatch(/this time/);
+    await answer(state().prompts![0].id, "refuse");
+    await third;
+
+    await later(61_000);
+    expect((await payAt("https://a.example", "/one", small())).error).toBeUndefined();
+    await later(2_000);
+    const fast = payAt("https://a.example", "/two", small());
+    await later(20);
+    expect(state().prompts![0].cause).toBe("rate_limit");
+    expect((await answer(state().prompts![0].id, "always")).error).toMatch(/this time/);
+    expect(state().settings?.siteAllowances ?? {}).toEqual({});
+    await answer(state().prompts![0].id, "refuse");
+    await fast;
+  });
+
+  it("'always allow' on a per-page cap raises that cap, but does not skip later repeat or rate-limit checks", async () => {
+    const over = inv("70n"); // 7 sats + 5 fee = 12, just over the 10 sat per-page cap, under the daily cap
+    const first = payAt("https://a.example", "/p", over);
+    await later(20);
+    const prompt = state().prompts![0];
+    expect(prompt.cause).toBe("over_payment_cap");
+    expect((await answer(prompt.id, "always")).error).toBeUndefined();
+    expect((await first).error).toBeUndefined();
+    expect(state().settings?.siteAllowances?.["a.example"]).toBe(prompt.costSats);
+    // Same page, still inside the 60s window: must ask, even with the new cap.
+    const again = payAt("https://a.example", "/p", inv("70n"));
+    await later(20);
+    expect(state().prompts![0].cause).toBe("same_page");
+    expect((await answer(state().prompts![0].id, "always")).error).toMatch(/this time/);
+    expect(state().settings?.siteAllowances?.["a.example"]).toBe(prompt.costSats); // unchanged
+    await answer(state().prompts![0].id, "refuse");
+    await again;
+  });
+
+  it("does not store an allowance when the question is a daily cap", async () => {
+    await call({ type: "saveSettings", settings: { maxSatsPerDay: 15 } }, ext);
+    expect((await payAt("https://a.example", "/p", small())).error).toBeUndefined(); // costs 10
+    await later(6_000);
+    const second = payAt("https://one.example", "/q", small(), 2); // 10+10 would be 20
+    await later(20);
+    expect(state().prompts![0].cause).toBe("over_global_day");
+    expect((await answer(state().prompts![0].id, "always")).error).toMatch(/this time/);
+    expect(state().settings?.siteAllowances ?? {}).toEqual({});
+    await answer(state().prompts![0].id, "refuse");
+    await second;
+  });
+
   it("allows one automatic payment per site every 5 seconds, whatever the page", async () => {
     expect((await payAt("https://a.example", "/one", small())).error).toBeUndefined();
     await later(2_000);
-    expect((await asked("https://a.example", "/two", small())).reason).toMatch(/too fast/);
+    const rate = await asked("https://a.example", "/two", small());
+    expect(rate.reason).toMatch(/too fast/);
+    expect(rate.cause).toBe("rate_limit");
     expect(sends).toHaveLength(1);
     await later(4_000);
     expect((await payAt("https://a.example", "/two", small())).error).toBeUndefined();
@@ -824,8 +891,12 @@ describe("the system clock moved", () => {
     await later(20);
     const prompt = state().prompts![0];
     expect(prompt.reason).toMatch(/clock of this computer moved backwards/);
+    expect(prompt.cause).toBe("clock_rollback");
     expect(sends).toHaveLength(1); // not paid by itself
     expect(await call({ type: "autoPayCheck", invoice: fresh() }, at("https://one.example", "/p", 2))).toEqual({ willPay: false });
+    expect((await answer(prompt.id, "always")).error).toMatch(/this time/);
+    expect(state().settings?.siteAllowances ?? {}).toEqual({});
+    expect(state().prompts).toHaveLength(1);
 
     await answer(prompt.id, "once"); // the user says yes
     expect((await q).error).toBeUndefined();

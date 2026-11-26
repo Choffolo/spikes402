@@ -73,10 +73,13 @@ What the wallet stores, who it talks to, and how to delete it:
   sats asks first; you only pay the real fee, which is often lower. Each
   paid page is written to the history with its real fee.
   Pages that fit all three caps are paid automatically, unless one of the
-  repeat-payment guards below applies. If a page costs
-  more, the popup asks whether to pay once, always allow this price on
-  this site, or decline. "Always allow" raises the per-page cap for that
-  site only; later visits still respect the daily caps.
+  repeat-payment guards below applies. If a page costs more than the
+  per-page cap, the popup asks whether to pay once, always allow this
+  price on this site, or decline. "Always allow" raises the per-page cap
+  for that site only; later visits still respect the daily caps and the
+  repeat-payment guards. If a daily cap would be exceeded, or a
+  repeat-payment guard applies, the popup asks only to pay this time or
+  decline.
 - How a payment is booked: the full cost (invoice amount plus the fee cap)
   is counted in the budget **before** the payment is sent, and the same
   fee cap is given to the wallet. When the payment settles, the real cost

@@ -1,4 +1,4 @@
-import type { BudgetSettings, SpendState } from "./budget";
+import type { BudgetSettings, ConfirmCause, SpendState } from "./budget";
 import type { EncryptedVault } from "./crypto";
 import type { GuardState } from "./guard";
 
@@ -39,6 +39,8 @@ export type PendingPayment = {
   amountSats: number;
   costSats: number;
   reason: string;
+  /** Why the wallet is asking; omitted on the first-time site-trust prompt. */
+  cause?: ConfirmCause;
   createdAt: number;
   tabId?: number;
 };
