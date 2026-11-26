@@ -17,14 +17,14 @@
 <p>There is no Spikes402 server for the wallet, and no account with us. The extension has no analytics and no ads. We do not sell or share your data, because we do not receive it. Keys stay on your computer. When you pay or get paid, the official Spark SDK talks to the public Spark network, not to us.</p>
 
 <h2>What stays on your computer</h2>
-<p>The extension keeps one record in the browser's local extension storage (the key is <code>spikes402</code>). That record can include:</p>
+<p>The extension keeps one record in the browser's local extension storage. That record can include:</p>
 <ul>
 <li>An encrypted copy of your recovery phrase (encrypted with your password; the password itself is not stored).</li>
 <li>A flag that you still need to confirm you saved the words, if you have just created a wallet.</li>
 <li>Your settings: Bitcoin network, spend limits, trusted and refused sites, and any higher per-page limit you approved for a site.</li>
 <li>How much has been spent today (in total and per site).</li>
 <li>The last 20 payments: site, time, price, fee, total, a shortened invoice or address, and whether it was sent, failed, refused or is still pending. The full invoice and the payment preimage are not kept.</li>
-<li>Questions waiting for your confirmation, payments still in flight, and a short local record used only to stop repeat payments (recent sites, pages, invoice identifiers, and a clock mark).</li>
+<li>Questions waiting for your confirmation, payments still in flight, and a short local record used only to stop repeat payments.</li>
 </ul>
 <p>The extension also injects a small script on HTTPS pages you visit (and on <code>localhost</code> for development) so a site can ask the wallet to pay through <code>window.webln</code>. If a page shows a Lightning invoice, the script may read that invoice to show the price on the toolbar icon and to pay it. We do not receive your browsing history. The wallet only stores the sites you allow or refuse, and the origins of payments you make or decline.</p>
 <p>Chrome may show a local notification when a site asks to use the wallet or a payment needs your confirmation. That notification stays on your computer.</p>
@@ -34,7 +34,7 @@
 <p>There is no in-app button to reset or delete the wallet. To erase the wallet and everything stored, remove the extension from the browser, or clear this extension's data in the browser's extension settings. That deletion is permanent unless you still have your recovery words. We cannot recover a password or a phrase.</p>
 
 <h2>Who is contacted (not us)</h2>
-<p>When you unlock the wallet, receive funds, or send funds, the official Spark SDK contacts public Spark operators and the Lightning service provider: Lightspark (<code>api.lightspark.com</code>, including a websocket, and <code>0.spark.lightspark.com</code>), Breez (<code>spark-operator.breez.technology</code>), and Flashnet (<code>2.spark.flashnet.xyz</code>). They see the invoices and payment data needed to move the funds. The same SDK is configured to use <code>mempool.space</code> on mainnet, and a Spark-run host on the test network, for Bitcoin chain lookups (an electrs interface), for example when checking an on-chain deposit. The extension does not call mempool.space itself to fetch fee estimates.</p>
+<p>When you unlock the wallet, receive funds, or send funds, the official Spark SDK contacts public Spark operators and the Lightning service provider: Lightspark, Breez and Flashnet. They see the invoices and payment data needed to move the funds. The same SDK is configured to use <code>mempool.space</code> on mainnet, and a Spark-run host on the test network, for Bitcoin chain lookups, for example when checking an on-chain deposit. The extension does not call mempool.space itself to fetch fee estimates.</p>
 <p>When you send to a Lightning address (<code>name@domain</code>), the wallet contacts that domain only, over HTTPS, with no redirects, to request an invoice for the exact amount you typed. The payment then goes through Spark, as above.</p>
 <p>When you pay a website through WebLN, that site learns that the payment succeeded: it receives the payment preimage, which is how Lightning and L402 work. It does not receive your recovery phrase, your password, or your balance.</p>
 
