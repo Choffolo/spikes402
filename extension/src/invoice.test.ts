@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   InvoiceError,
   assertPreimageMatchesInvoice,
+  buildInvoiceForTest,
   encodeBolt11ForTest,
   isBolt11,
+  invoiceExpired,
+  invoiceMatchesNetwork,
   parseBolt11AmountSats,
+  parseBolt11Info,
   parseBolt11PaymentHash,
   preimageMatchesInvoice,
   verifyBolt11Checksum,
@@ -129,3 +133,32 @@ function makeInvoiceWithPaymentHash(hash: Uint8Array): string {
   bits.push(...Array(104).fill(0)); // signature
   return encodeBolt11ForTest("lnbc", bits);
 }
+
+describe("invoice network, age and hash", () => {
+  const hash = new Uint8Array(32).fill(9);
+  const hashHex = "09".repeat(32);
+
+  it("reads the network prefix, timestamp, expiry and payment hash", () => {
+    const i = parseBolt11Info(buildInvoiceForTest({ prefix: "bcrt", amount: "20n", hash, timestampSec: 1_800_000_000, expirySec: 120 }));
+    expect(i).toEqual({ prefix: "bcrt", timestampSec: 1_800_000_000, expirySec: 120, paymentHash: hashHex });
+    expect(parseBolt11Info(buildInvoiceForTest({ hash, timestampSec: 1_800_000_000 })).expirySec).toBe(3600); // BOLT11 default
+    expect(parseBolt11AmountSats(buildInvoiceForTest({ amount: "20n", hash }))).toBe(2);
+  });
+
+  it("refuses a string that is not a whole invoice", () => {
+    expect(() => parseBolt11Info(encodeBolt11ForTest("lnbc50n"))).toThrow(InvoiceError);
+  });
+
+  it("mainnet takes only real-bitcoin invoices; regtest takes test ones", () => {
+    expect(invoiceMatchesNetwork("bc", "mainnet")).toBe(true);
+    for (const p of ["bcrt", "tb", "tbs"]) expect(invoiceMatchesNetwork(p, "mainnet")).toBe(false);
+    expect(invoiceMatchesNetwork("bc", "regtest")).toBe(false);
+    for (const p of ["bcrt", "tb", "tbs"]) expect(invoiceMatchesNetwork(p, "regtest")).toBe(true);
+  });
+
+  it("is expired once timestamp + expiry has passed", () => {
+    const info = parseBolt11Info(buildInvoiceForTest({ hash, timestampSec: 1_000, expirySec: 60 }));
+    expect(invoiceExpired(info, 1_060_000)).toBe(false);
+    expect(invoiceExpired(info, 1_060_001)).toBe(true);
+  });
+});

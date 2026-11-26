@@ -46,7 +46,7 @@ export const emptySpend = (day: string): SpendState => ({
   perSite: {},
 });
 
-export type ConfirmCause = "over_payment_cap" | "over_site_day" | "over_global_day";
+export type ConfirmCause = "over_payment_cap" | "over_site_day" | "over_global_day" | "clock_rollback" | "same_page" | "rate_limit";
 
 export type Decision =
   | { action: "refuse"; reason: string }
@@ -62,9 +62,14 @@ export function todayLocal(now = new Date()): string {
   return `${y}-${m}-${d}`;
 }
 
-/** Spend figures for today (resets if the stored day is not today). */
+/**
+ * Spend figures for today. They start again only when the stored day is
+ * *before* today. If the clock moved backwards (stored day is later than
+ * today), the latest bucket is kept and keeps counting: setting the clock
+ * back never gives a fresh budget.
+ */
 export function spendForToday(stored: SpendState | undefined, today: string): SpendState {
-  if (!stored || stored.day !== today) return emptySpend(today);
+  if (!stored || stored.day < today) return emptySpend(today);
   return stored;
 }
 
@@ -204,7 +209,7 @@ export function adjustSpend(spend: SpendState, day: string, site: string, delta:
 export function recordSpend(spend: SpendState, today: string, site: string, amountSats: number): SpendState {
   const base = spendForToday(spend, today);
   return {
-    day: today,
+    day: base.day,
     globalSats: base.globalSats + amountSats,
     perSite: { ...base.perSite, [site]: (base.perSite[site] ?? 0) + amountSats },
   };

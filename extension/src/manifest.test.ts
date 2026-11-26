@@ -24,6 +24,10 @@ describe("manifest", () => {
     }
   });
 
+  it("has a description of at most 132 characters, the Chrome Web Store limit", () => {
+    expect(manifest.description.length).toBeLessThanOrEqual(132);
+  });
+
   it("has the same version as package.json", () => {
     expect(manifest.version).toBe(pkg.version);
   });

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { encodeBolt11ForTest } from "./invoice";
+import { SAME_PAGE_MS } from "./guard";
+import { buildInvoiceForTest, encodeBolt11ForTest } from "./invoice";
 import { maxFeeSatsFor } from "./spark-util";
 import type { PendingPayment, Reservation } from "./types";
 
@@ -100,7 +101,7 @@ const pay = (origin: string, invoice: string, tab = 1) =>
 const answer = (id: string, choice: "once" | "always" | "refuse") => call({ type: "confirmPayment", id, choice }, ext);
 
 type Stored = {
-  spend?: { globalSats: number; perSite: Record<string, number> };
+  spend?: { day?: string; globalSats: number; perSite: Record<string, number> };
   history?: { result: string; detail: string; amountSats: number; priceSats?: number; feeSats?: number; origin?: string }[];
   vault?: unknown;
   backupPending?: boolean;
@@ -111,8 +112,13 @@ type Stored = {
 const state = () => (store["spikes402"] ?? {}) as Stored;
 const tick = (ms = 20) => new Promise((r) => setTimeout(r, ms));
 
-const small = () => encodeBolt11ForTest("lnbc50n"); // 5 sats, fee cap 5: costs 10, fits the default caps
-const big = () => encodeBolt11ForTest("lnbc2500n"); // 250 sats: above the 10 sat cap, asks the user
+// A whole invoice with its own payment hash, so no two are the same one.
+let seed = 0;
+const hashOf = (n: number) => new Uint8Array(32).map((_, i) => (i < 4 ? (n >> (8 * i)) & 255 : 7));
+const inv = (amount: string, o: { prefix?: string; timestampSec?: number; expirySec?: number; hash?: Uint8Array } = {}) =>
+  buildInvoiceForTest({ amount, hash: hashOf(++seed), ...o });
+const small = () => inv("50n"); // 5 sats, fee cap 5: costs 10, fits the default caps
+const big = () => inv("2500n"); // 250 sats: above the 10 sat cap, asks the user
 
 async function boot() {
   vi.resetModules();
@@ -147,7 +153,7 @@ describe("a payment that does not finish in time", () => {
     expect(s.history?.[0].result).toBe("pending");
 
     walletSend = async () => OK();
-    expect((await pay("https://evil.example", small())).error).toBeUndefined();
+    expect((await pay("https://a.example", small())).error).toBeUndefined(); // another site: no cooldown
     expect(state().spend?.globalSats).toBe(20); // the first payment was not forgotten
   });
 
@@ -312,14 +318,14 @@ describe("fee cap", () => {
 describe("history and prompts show the fee", () => {
   it("records price, real fee and total of a paid page, without the preimage", async () => {
     walletSend = async () => OK(4);
-    expect((await pay("https://a.example", encodeBolt11ForTest("lnbc20n"))).error).toBeUndefined(); // 2 sats
+    expect((await pay("https://a.example", inv("20n"))).error).toBeUndefined(); // 2 sats
     expect(state().history?.at(-1)).toMatchObject({ result: "sent", priceSats: 2, feeSats: 4, amountSats: 6, origin: "https://a.example" });
     expect(JSON.stringify(state().history)).not.toMatch(/preimage|0000/);
   });
 
   it("the page price and the biggest fee must fit the per-page cap together", async () => {
     // 6 sats + fee cap 5 = 11 > 10: asks, and the prompt carries both numbers.
-    const p = pay("https://a.example", encodeBolt11ForTest("lnbc60n"));
+    const p = pay("https://a.example", inv("60n"));
     await tick();
     const prompt = state().prompts![0];
     expect(prompt).toMatchObject({ amountSats: 6, costSats: 11 });
@@ -417,13 +423,13 @@ describe("sending from the popup", () => {
   });
 
   it("a Lightning address is turned into an invoice for the typed amount, then paid with the fee cap", async () => {
-    const inv = encodeBolt11ForTest("lnbc210n"); // 21 sats
+    const invoice = inv("210n"); // 21 sats
     const calls: string[] = [];
     vi.stubGlobal("fetch", async (url: string) => {
       calls.push(String(url));
       const body = String(url).includes("/.well-known/")
         ? { tag: "payRequest", callback: "https://example.com/cb", minSendable: 1000, maxSendable: 1_000_000 }
-        : { pr: inv };
+        : { pr: invoice };
       return new Response(JSON.stringify(body));
     });
     try {
@@ -431,7 +437,7 @@ describe("sending from the popup", () => {
       const r = await call({ type: "send", destination: "₿bob@example.com", amountSats: 21 }, ext);
       expect(r.detail).toBe("Sent 21 sats (fee 1).");
       expect(calls).toEqual(["https://example.com/.well-known/lnurlp/bob", "https://example.com/cb?amount=21000"]);
-      expect(sends[0]).toMatchObject({ destination: inv, maxFeeSats: maxFeeSatsFor(21) });
+      expect(sends[0]).toMatchObject({ destination: invoice, maxFeeSats: maxFeeSatsFor(21) });
       expect(state().history?.at(-1)).toMatchObject({ result: "sent", priceSats: 21, feeSats: 1 });
     } finally {
       vi.unstubAllGlobals();
@@ -470,7 +476,7 @@ describe("toolbar badge after a page is paid", () => {
   const report = (amount: number | null, href = url, tab = 1) =>
     call({ type: "pagePrice", amountSats: amount }, sender(href, tab));
   const payHere = () =>
-    call({ type: "webln", method: "sendPayment", origin: "https://a.example", invoice: encodeBolt11ForTest("lnbc20n") }, sender());
+    call({ type: "webln", method: "sendPayment", origin: "https://a.example", invoice: inv("20n") }, sender());
 
   it("shows the muted price on the 402 page, then keeps a teal paid badge after the unlock reload", async () => {
     await report(2);
@@ -547,7 +553,7 @@ describe("trusted sites", () => {
     expect(settled).toBe(false);
     const prompt = state().prompts?.[0];
     expect(prompt).toMatchObject({ kind: "trust", site: "example.org", origin: "https://shop.example.org" });
-    expect(prompt?.reason).toMatch(/Allow automatic payments on example\.org, up to 100 sats a day\?/);
+    expect(prompt?.reason).toMatch(/Allow example\.org to pay automatically\? It may make several small payments on its own, without asking each time, up to 100 sats a day \(fees included\)\./);
 
     expect((await answerTrust(prompt!.id, "always", 25)).error).toBeUndefined();
     expect(await p).toEqual({ enabled: true });
@@ -632,10 +638,15 @@ describe("trusted sites", () => {
   it("subdomains share one daily cap: minting subdomains does not buy more", async () => {
     store["spikes402"] = { settings: { sites: { "evil.example": { trusted: true, dailySats: 100, since: "2026-11-01T00:00:00.000Z" } } } };
     await boot();
-    for (let i = 0; i < 10; i++) expect((await pay(`https://sub${i}.evil.example`, small(), 1 + i)).error).toBeUndefined();
+    vi.useFakeTimers();
+    for (let i = 0; i < 10; i++) {
+      await vi.advanceTimersByTimeAsync(SAME_PAGE_MS + 1); // past the same-page and rate cooldowns
+      expect((await pay(`https://sub${i}.evil.example`, small(), 1 + i)).error).toBeUndefined();
+    }
     expect(sends).toHaveLength(10); // 10 x (5 + fee cap 5) = the 100 sat cap
+    await vi.advanceTimersByTimeAsync(SAME_PAGE_MS + 1);
     void pay("https://sub10.evil.example", small(), 20);
-    await tick();
+    await vi.advanceTimersByTimeAsync(20);
     expect(sends).toHaveLength(10); // the 11th is asked about, not paid
     expect(state().prompts?.[0]).toMatchObject({ origin: "https://sub10.evil.example" });
     expect(state().spend?.perSite).toEqual({ "evil.example": 100 });
@@ -660,5 +671,204 @@ describe("trusted sites", () => {
     store["spikes402"] = { settings: { sites: { "ok.example": { trusted: true, dailySats: 100, since: "2026-11-01T00:00:00.000Z" } } } };
     expect(await check("https://ok.example")).toMatchObject({ willPay: true });
     expect(await check("http://ok.example")).toEqual({ willPay: false });
+  });
+});
+
+describe("repeat payments from one page", () => {
+  const NOON = new Date("2026-11-26T12:00:00");
+  const at = (origin: string, path: string, tab = 1) => ({ origin, url: origin + path, tab: { id: tab, url: origin + path } });
+  const payAt = (origin: string, path: string, invoice: string, tab = 1) =>
+    call({ type: "webln", method: "sendPayment", origin, invoice }, at(origin, path, tab));
+  const later = (ms: number) => vi.advanceTimersByTimeAsync(ms);
+  /** Ask for a payment that must wait for the user; answer "no" and return the question. */
+  async function asked(origin: string, path: string, invoice: string) {
+    const p = payAt(origin, path, invoice);
+    await later(20);
+    const prompt = state().prompts!.at(-1)!;
+    await answer(prompt.id, "refuse");
+    await p;
+    return prompt;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOON);
+  });
+
+  it("does not pay the same page again for 60 seconds: it asks, and pays by itself after that", async () => {
+    expect((await payAt("https://a.example", "/p", small())).error).toBeUndefined();
+    await later(10_000); // past the rate limit, inside the page window
+    const before = sends.length;
+    const prompt = await asked("https://a.example", "/p", small());
+    expect(prompt.reason).toMatch(/paid a moment ago/);
+    expect(sends).toHaveLength(before);
+    await later(51_000);
+    expect((await payAt("https://a.example", "/p", small())).error).toBeUndefined();
+  });
+
+  it("allows one automatic payment per site every 5 seconds, whatever the page", async () => {
+    expect((await payAt("https://a.example", "/one", small())).error).toBeUndefined();
+    await later(2_000);
+    expect((await asked("https://a.example", "/two", small())).reason).toMatch(/too fast/);
+    expect(sends).toHaveLength(1);
+    await later(4_000);
+    expect((await payAt("https://a.example", "/two", small())).error).toBeUndefined();
+    expect((await payAt("https://other.example", "/two", small(), 2)).error).toBeUndefined(); // another site is not slowed
+  });
+
+  it("100 requests for the same content cost one payment", async () => {
+    let paid = 0;
+    for (let i = 0; i < 100; i++) {
+      const p = payAt("https://evil.example", "/same", small());
+      await later(20);
+      const prompt = state().prompts?.[0];
+      if (prompt) await answer(prompt.id, "refuse");
+      if (!(await p).error) paid++;
+      await later(500);
+    }
+    expect(paid).toBe(1);
+    expect(sends).toHaveLength(1);
+  });
+
+  it("never pays an invoice twice: not after it was paid, not while it is in flight, but again after a certain failure", async () => {
+    const once = small();
+    expect((await payAt("https://a.example", "/p", once)).error).toBeUndefined();
+    await later(61_000);
+    expect((await payAt("https://a.example", "/p", once)).error).toMatch(/already paid/);
+    expect(sends).toHaveLength(1);
+
+    const stuck = small();
+    walletSend = async () => PENDING_REPLY;
+    expect((await payAt("https://one.example", "/p", stuck, 2)).error).toMatch(/not been confirmed/);
+    await later(61_000);
+    expect((await payAt("https://one.example", "/p", stuck, 2)).error).toMatch(/already paid, or is being paid/);
+
+    const failing = small();
+    walletSend = async () => ({ error: "Insufficient balance" });
+    expect((await payAt("https://two.example", "/p", failing, 3)).error).toMatch(/Insufficient/);
+    walletSend = async () => OK();
+    await later(6_000); // the site's rate limit stays after a failure
+    expect((await payAt("https://two.example", "/p", failing, 3)).error).toBeUndefined();
+  });
+
+  it("is not even asked about an invoice that was already paid: the user cannot say yes to it", async () => {
+    const once = small();
+    await payAt("https://a.example", "/p", once);
+    await later(61_000);
+    await payAt("https://a.example", "/p", once);
+    expect(state().prompts).toEqual([]);
+  });
+
+  it("refuses an invoice for the wrong network and an expired one, and does not cover the page", async () => {
+    const wrong = inv("50n", { prefix: "bcrt" });
+    expect((await payAt("https://a.example", "/p", wrong)).error).toMatch(/another Bitcoin network/);
+    const old = inv("50n", { timestampSec: Math.floor(Date.now() / 1000) - 7_200 });
+    expect((await payAt("https://one.example", "/p", old, 2)).error).toMatch(/expired/);
+    expect(sends).toHaveLength(0);
+    expect(state().prompts).toEqual([]);
+    const check = (invoice: string) => call({ type: "autoPayCheck", invoice }, at("https://two.example", "/p", 3));
+    expect(await check(wrong)).toEqual({ willPay: false });
+    expect(await check(old)).toEqual({ willPay: false });
+    expect(await check(small())).toEqual({ willPay: true, amountSats: 5 });
+  });
+
+  it("an invoice that expires while the question is open is refused after the yes", async () => {
+    await call({ type: "saveSettings", settings: { maxSatsPerPayment: 1 } }, ext); // cost 10 > 1: the user is asked
+    const soon = inv("50n", { timestampSec: Math.floor(Date.now() / 1000), expirySec: 60 });
+    const q = payAt("https://a.example", "/p", soon);
+    await later(20);
+    const prompt = state().prompts![0];
+    await later(120_000); // longer than the invoice lives
+    await answer(prompt.id, "once");
+    expect((await q).error).toMatch(/expired/);
+    expect(sends).toHaveLength(0);
+  });
+
+  it("the 'Paying' notice is not shown for a page that was just paid", async () => {
+    await payAt("https://a.example", "/p", small());
+    await later(10_000);
+    expect(await call({ type: "autoPayCheck", invoice: small() }, at("https://a.example", "/p"))).toEqual({ willPay: false });
+    await later(51_000);
+    expect(await call({ type: "autoPayCheck", invoice: small() }, at("https://a.example", "/p"))).toEqual({ willPay: true, amountSats: 5 });
+  });
+});
+
+describe("the system clock moved", () => {
+  const NOON = new Date("2026-11-26T12:00:00");
+  const DAY = 24 * 3600_000;
+  const later = (ms: number) => vi.advanceTimersByTimeAsync(ms);
+  const at = (origin: string, path: string, tab = 1) => ({ origin, url: origin + path, tab: { id: tab, url: origin + path } });
+  const payAt = (origin: string, path: string, invoice: string, tab = 1) =>
+    call({ type: "webln", method: "sendPayment", origin, invoice }, at(origin, path, tab));
+  // Invoices come from a server whose clock is right, whatever this computer's clock says.
+  const fresh = () => inv("50n", { timestampSec: Math.floor(NOON.getTime() / 1000) - 100, expirySec: 600_000 });
+  const restartWorker = async () => {
+    vi.resetModules();
+    await import("./background");
+    await later(1);
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOON);
+  });
+
+  it("a clock set back does not give a fresh daily budget, and automatic payments pause", async () => {
+    expect((await payAt("https://a.example", "/p", fresh())).error).toBeUndefined();
+    const day = state().spend?.day;
+    expect(state().spend?.globalSats).toBe(10);
+
+    vi.setSystemTime(new Date(NOON.getTime() - 3 * DAY)); // three days back
+    await later(61_000);
+    const q = payAt("https://one.example", "/p", fresh(), 2);
+    await later(20);
+    const prompt = state().prompts![0];
+    expect(prompt.reason).toMatch(/clock of this computer moved backwards/);
+    expect(sends).toHaveLength(1); // not paid by itself
+    expect(await call({ type: "autoPayCheck", invoice: fresh() }, at("https://one.example", "/p", 2))).toEqual({ willPay: false });
+
+    await answer(prompt.id, "once"); // the user says yes
+    expect((await q).error).toBeUndefined();
+    expect(state().spend?.day).toBe(day); // still the latest bucket
+    expect(state().spend?.globalSats).toBe(20); // counted on top, not from zero
+  });
+
+  it("a clock set back cannot end the cooldown of a page, also after the service worker restarted", async () => {
+    await payAt("https://a.example", "/p", fresh());
+    vi.setSystemTime(new Date(NOON.getTime() - 3600_000));
+    await restartWorker(); // the monotonic clock is gone; only the saved time is left
+    await later(20_000);
+    const q = payAt("https://a.example", "/p", fresh());
+    await later(20);
+    expect(state().prompts![0].reason).toMatch(/moved backwards/);
+    await answer(state().prompts![0].id, "refuse");
+    await q;
+    expect(sends).toHaveLength(1);
+  });
+
+  it("a clock set forward cannot end a cooldown while the worker keeps running, and resets the day at most once", async () => {
+    await payAt("https://a.example", "/p", fresh());
+    vi.setSystemTime(new Date(NOON.getTime() + 2 * DAY)); // two days ahead, 0.02 s later by the monotonic clock
+    await later(20);
+    const q = payAt("https://a.example", "/p", fresh());
+    await later(20);
+    expect(state().prompts![0].reason).toMatch(/paid a moment ago|too fast/); // the monotonic clock still counts
+    await answer(state().prompts![0].id, "refuse");
+    await q;
+    expect(sends).toHaveLength(1);
+    // The day did move on the wall clock, so the daily budget starts again once (documented residual risk).
+    await later(61_000);
+    expect((await payAt("https://one.example", "/p", fresh(), 2)).error).toBeUndefined();
+    expect(state().spend?.globalSats).toBe(10);
+    // Going back to the real date does not reset it again.
+    const day = state().spend?.day;
+    vi.setSystemTime(NOON);
+    await later(61_000);
+    const r = payAt("https://two.example", "/p", fresh(), 3);
+    await later(20);
+    await answer(state().prompts![0].id, "once");
+    await r;
+    expect(state().spend?.day).toBe(day);
+    expect(state().spend?.globalSats).toBe(20);
   });
 });

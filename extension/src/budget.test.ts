@@ -94,6 +94,25 @@ describe("decidePayment", () => {
   });
 });
 
+describe("the day bucket and the clock", () => {
+  const spent = recordSpend(emptySpend("2026-11-20"), "2026-11-20", site, 90);
+
+  it("a clock moved back never starts a fresh day: the latest bucket keeps counting", () => {
+    expect(spendForToday(spent, "2026-11-19")).toBe(spent); // one day back
+    expect(spendForToday(spent, "2026-01-01")).toBe(spent); // months back
+    const more = recordSpend(spent, "2026-11-19", site, 5); // a payment made while the clock is back
+    expect(more).toMatchObject({ day: "2026-11-20", globalSats: 95 });
+    expect(decidePayment({ ...base, amountSats: 5, feeSats: 5, spend: more, today: "2026-11-19" }).action).toBe("confirm"); // 95 + 10 > 100
+  });
+
+  it("a forward jump starts a new day once; going back afterwards keeps that new bucket", () => {
+    const fresh = spendForToday(spent, "2026-11-25");
+    expect(fresh).toEqual(emptySpend("2026-11-25"));
+    const again = recordSpend(fresh, "2026-11-25", site, 10);
+    expect(spendForToday(again, "2026-11-20")).toBe(again); // back to the real date: not reset
+  });
+});
+
 describe("withSiteAllowance", () => {
   it("keeps the higher of the existing allowance and the new price", () => {
     const once = withSiteAllowance(trusted, site, 15);

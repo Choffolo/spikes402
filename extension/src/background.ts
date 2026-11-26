@@ -22,7 +22,8 @@ import {
 } from "./budget";
 import { encryptMnemonic, generateMnemonic, isValidMnemonic, normalizeMnemonic } from "./crypto";
 import type { QuizAnswer } from "./backup";
-import { InvoiceError, isBolt11, parseBolt11AmountSats } from "./invoice";
+import { checkAuto, checkInvoice, pageId, readClock, recordFailed, recordPayment, recordSettled } from "./guard";
+import { InvoiceError, isBolt11, parseBolt11AmountSats, parseBolt11Info, type Bolt11Info } from "./invoice";
 import { looksLikeLightningAddress, parseLightningAddress, resolveLightningAddress, UNSUPPORTED_ADDRESS } from "./lnaddress";
 import { lightningHint } from "./backend";
 import { isExtensionPage, pageOrigin, sanitizeSettings } from "./sender";
@@ -305,17 +306,20 @@ async function handleWebln(msg: PageMsg, sender: chrome.runtime.MessageSender): 
   const invoice = msg.invoice;
 
   let amountSats: number | null;
+  let info: Bolt11Info;
   try {
     amountSats = parseBolt11AmountSats(invoice);
+    info = parseBolt11Info(invoice);
   } catch (e) {
     const reason = e instanceof InvoiceError ? e.message : "Invoice could not be read.";
     await log(origin, 0, invoice, "refused", reason);
     throw new Error(reason);
   }
+  const page = pageId(site, sender.tab?.url ?? sender.url);
   // One fee rule: the amount we count in every cap is the amount we allow the wallet to spend.
   const feeSats = amountSats === null ? 0 : maxFeeSatsFor(amountSats);
 
-  let reserved = await reserve({ origin, site, amountSats, feeSats, invoice, force: false });
+  let reserved = await reserve({ origin, site, page, info, amountSats, feeSats, invoice, force: false });
   if (reserved.action === "refuse") {
     await log(origin, amountSats ?? 0, invoice, "refused", reserved.reason);
     throw new Error(reserved.reason);
@@ -333,7 +337,11 @@ async function handleWebln(msg: PageMsg, sender: chrome.runtime.MessageSender): 
       await log(origin, amountSats ?? 0, invoice, "refused", "You declined the payment.");
       throw new Error("Payment declined.");
     }
-    reserved = await reserve({ origin, site, amountSats, feeSats, invoice, force: true });
+    reserved = await reserve({ origin, site, page, info, amountSats, feeSats, invoice, force: true });
+  }
+  if (reserved.action === "refuse") {
+    await log(origin, amountSats ?? 0, invoice, "refused", reserved.reason);
+    throw new Error(reserved.reason);
   }
   if (reserved.action !== "reserved") throw new Error("The payment could not be reserved.");
   const reservation = reserved.reservation;
@@ -391,7 +399,7 @@ async function requireTrust(site: string, origin: string, tabId: number | undefi
           invoice: "",
           amountSats: 0,
           costSats: 0,
-          reason: `Allow automatic payments on ${site}, up to ${s.settings.maxSatsPerSitePerDay} sats a day?`,
+          reason: `Allow ${site} to pay automatically? It may make several small payments on its own, without asking each time, up to ${s.settings.maxSatsPerSitePerDay} sats a day (fees included).`,
           tabId,
         });
       } finally {
@@ -427,14 +435,18 @@ async function autoPayCheck(msg: AutoPayMsg, sender: chrome.runtime.MessageSende
   const host = await walletCall<{ unlocked?: boolean }>("status").catch(() => ({ unlocked: false }));
   if (!host.unlocked) return { willPay: false };
   let amountSats: number | null;
+  let info: Bolt11Info;
   try {
     amountSats = parseBolt11AmountSats(msg.invoice);
+    info = parseBolt11Info(msg.invoice);
   } catch {
     return { willPay: false };
   }
   if (amountSats === null) return { willPay: false };
   const s = await loadState();
   const today = todayLocal();
+  const clock = readClock();
+  if (checkInvoice(info, s.settings.network, s.guard, clock)) return { willPay: false };
   const d = decidePayment({
     amountSats,
     site,
@@ -443,7 +455,9 @@ async function autoPayCheck(msg: AutoPayMsg, sender: chrome.runtime.MessageSende
     today,
     feeSats: maxFeeSatsFor(amountSats),
   });
-  return d.action === "pay" ? { willPay: true, amountSats } : { willPay: false };
+  if (d.action !== "pay") return { willPay: false };
+  if (checkAuto(s.guard, clock, site, pageId(site, sender.tab?.url ?? sender.url))) return { willPay: false };
+  return { willPay: true, amountSats };
 }
 
 type Reserved = Decision | { action: "reserved"; reservation: Reservation };
@@ -455,6 +469,8 @@ type Reserved = Decision | { action: "reserved"; reservation: Reservation };
 function reserve(p: {
   origin: string;
   site: string;
+  page: string;
+  info: Bolt11Info;
   amountSats: number | null;
   feeSats: number;
   invoice: string;
@@ -463,6 +479,10 @@ function reserve(p: {
   return updateState((s): Reserved => {
     const today = todayLocal();
     const spend = spendForToday(s.spend, today);
+    const clock = readClock();
+    // Refused even after a yes: wrong network, expired, or already paid.
+    const bad = checkInvoice(p.info, s.settings.network, s.guard, clock);
+    if (bad) return { action: "refuse", reason: bad };
     const d = decidePayment({
       amountSats: p.amountSats,
       site: p.site,
@@ -472,11 +492,17 @@ function reserve(p: {
       feeSats: p.feeSats,
     });
     if (d.action === "refuse" || (d.action === "confirm" && !p.force)) return d;
+    if (!p.force) {
+      const ask = checkAuto(s.guard, clock, p.site, p.page);
+      if (ask) return { action: "confirm", ...ask };
+    }
     const cost = paymentCost(p.amountSats ?? 0, p.feeSats);
     const reservation: Reservation = {
       id: crypto.randomUUID(),
       origin: p.origin,
-      day: today,
+      day: spend.day, // the bucket it is counted in (never earlier than today)
+      page: p.page,
+      hash: p.info.paymentHash,
       amountSats: p.amountSats ?? 0,
       feeSats: p.feeSats,
       invoice: p.invoice,
@@ -484,8 +510,9 @@ function reserve(p: {
       time: new Date().toISOString(),
     };
     s.spend = recordSpend(spend, today, p.site, cost);
+    s.guard = recordPayment(s.guard, clock, { site: p.site, page: p.page, hash: p.info.paymentHash });
     // A payment without a request id cannot be looked up; its day is over, so is its budget.
-    s.reservations = [...s.reservations.filter((r) => r.requestId || r.day === today), reservation];
+    s.reservations = [...s.reservations.filter((r) => r.requestId || r.day === spend.day), reservation];
     return { action: "reserved", reservation };
   });
 }
@@ -503,6 +530,7 @@ function finishReservation(
     const reserved = paymentCost(r.amountSats, r.feeSats);
     const actual = outcome.settled ? paymentCost(r.amountSats, outcome.feeSats ?? r.feeSats) : 0;
     s.spend = adjustSpend(spendForToday(s.spend, todayLocal()), r.day, siteKey(r.origin) ?? r.origin, actual - reserved);
+    s.guard = outcome.settled ? recordSettled(s.guard, readClock(), r.page) : recordFailed(s.guard, r.page, r.hash);
     pushHistory(s, {
       time: new Date().toISOString(),
       origin: r.origin,
@@ -716,7 +744,7 @@ async function openPopup(pending?: { kind?: "trust"; site?: string; origin: stri
     /* some Chrome views refuse this; the toolbar badge still shows the page price */
   }
   const summary = pending?.kind === "trust"
-    ? `${pending.site ?? pending.origin} wants to pay with your wallet. Open the wallet to allow or refuse.`
+    ? `${pending.site ?? pending.origin} wants to pay automatically with your wallet. Open the wallet to allow or refuse.`
     : pending
     ? `${pending.origin} asks for ${pending.amountSats} sats + a fee of up to ${pending.costSats - pending.amountSats}. Open the wallet to pay or decline.`
     : "Open the wallet to pay or decline.";

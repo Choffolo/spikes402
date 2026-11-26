@@ -9,6 +9,9 @@ export class InvoiceError extends Error {
 const BECH32 = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 /** BOLT11 tagged-field type for the 32-byte payment hash. */
 const TAG_PAYMENT_HASH = 1;
+/** BOLT11 tagged-field type for the expiry, in seconds. */
+const TAG_EXPIRY = 6;
+const DEFAULT_EXPIRY_SEC = 3600;
 
 /**
  * Reads the amount encoded in a BOLT11 invoice, in satoshis, rounded up.
@@ -25,6 +28,51 @@ export function parseBolt11AmountSats(invoice: string): number | null {
 
 /** 32-byte payment hash as lowercase hex, from the invoice's `p` field. */
 export function parseBolt11PaymentHash(invoice: string): string {
+  const field = parseBolt11Fields(invoice).fields.get(TAG_PAYMENT_HASH);
+  if (!field) throw new InvoiceError("Invoice has no payment hash");
+  const bytes = wordsToBytes(field);
+  if (bytes.length < 32) throw new InvoiceError("Invoice payment hash is truncated");
+  return hex(bytes.subarray(0, 32));
+}
+
+/** What the extension needs to know about an invoice before it may pay it. */
+export type Bolt11Info = {
+  /** The letters after "ln": bc (mainnet), bcrt (regtest), tb / tbs (testnet, signet). */
+  prefix: string;
+  /** When the invoice was made, in seconds since 1970. */
+  timestampSec: number;
+  /** How long it stays payable, in seconds (BOLT11 default: 3600). */
+  expirySec: number;
+  paymentHash: string;
+};
+
+/** Network, age and payment hash of an invoice. Throws InvoiceError if it is not a whole invoice. */
+export function parseBolt11Info(invoice: string): Bolt11Info {
+  const raw = requireBolt11(invoice);
+  const prefix = raw.match(/^ln([a-z]+)/)?.[1];
+  if (!prefix) throw new InvoiceError("Invoice is malformed");
+  const { timestampSec, fields } = parseBolt11Fields(invoice);
+  const expiry = fields.get(TAG_EXPIRY);
+  return {
+    prefix,
+    timestampSec,
+    expirySec: expiry ? wordsToNumber(expiry) : DEFAULT_EXPIRY_SEC,
+    paymentHash: parseBolt11PaymentHash(invoice),
+  };
+}
+
+/** True if the invoice is for the network the wallet is on. Mainnet takes only real-bitcoin invoices. */
+export function invoiceMatchesNetwork(prefix: string, network: "mainnet" | "regtest"): boolean {
+  return network === "mainnet" ? prefix === "bc" : prefix === "bcrt" || prefix === "tb" || prefix === "tbs";
+}
+
+/** True once timestamp + expiry has passed at nowMs (milliseconds since 1970). */
+export function invoiceExpired(info: Bolt11Info, nowMs: number): boolean {
+  return nowMs / 1000 > info.timestampSec + info.expirySec;
+}
+
+/** BOLT11 data part: 7-word timestamp, tagged fields (first one of each type wins), 104-word signature. */
+function parseBolt11Fields(invoice: string): { timestampSec: number; fields: Map<number, number[]> } {
   const raw = requireBolt11(invoice);
   const sep = raw.indexOf("1", 2);
   if (sep < 0 || sep + 7 >= raw.length) throw new InvoiceError("Invoice is malformed");
@@ -35,24 +83,25 @@ export function parseBolt11PaymentHash(invoice: string): string {
     if (v < 0) throw new InvoiceError("Invoice is malformed");
     words.push(v);
   }
-  // BOLT11: 7-word timestamp, tagged fields, 104-word signature.
   if (words.length < 7 + 104) throw new InvoiceError("Invoice is malformed");
+  const timestampSec = wordsToNumber(words.slice(0, 7));
   const tagged = words.slice(7, words.length - 104);
+  const fields = new Map<number, number[]>();
   let i = 0;
   while (i + 3 <= tagged.length) {
     const type = tagged[i];
     const len = tagged[i + 1] * 32 + tagged[i + 2];
     i += 3;
     if (i + len > tagged.length) throw new InvoiceError("Invoice is malformed");
-    const field = tagged.slice(i, i + len);
+    if (!fields.has(type)) fields.set(type, tagged.slice(i, i + len));
     i += len;
-    if (type === TAG_PAYMENT_HASH) {
-      const bytes = wordsToBytes(field);
-      if (bytes.length < 32) throw new InvoiceError("Invoice payment hash is truncated");
-      return hex(bytes.subarray(0, 32));
-    }
   }
-  throw new InvoiceError("Invoice has no payment hash");
+  return { timestampSec, fields };
+}
+
+/** Big-endian 5-bit words as one number (a timestamp has 35 bits, so no bit operators). */
+function wordsToNumber(words: number[]): number {
+  return words.reduce((n, w) => n * 32 + w, 0);
 }
 
 /**
@@ -116,6 +165,38 @@ export function verifyBolt11Checksum(invoice: string): boolean {
 export function encodeBolt11ForTest(hrp: string, dataWords: number[] = []): string {
   const checksumWords = bech32Checksum(hrp.toLowerCase(), dataWords);
   return hrp.toLowerCase() + "1" + [...dataWords, ...checksumWords].map((w) => BECH32[w]).join("");
+}
+
+/**
+ * A whole BOLT11-shaped invoice with a valid checksum but a zero signature.
+ * Used by tests: `prefix` is bc, bcrt, tb; `amount` such as "50n" or "".
+ */
+export function buildInvoiceForTest(o: { prefix?: string; amount?: string; hash: Uint8Array; timestampSec?: number; expirySec?: number }): string {
+  const bits: number[] = [];
+  const num = (n: number, count: number) => {
+    const out: number[] = [];
+    for (let k = 0; k < count; k++) {
+      out.unshift(n % 32);
+      n = Math.floor(n / 32);
+    }
+    return out;
+  };
+  bits.push(...num(o.timestampSec ?? Math.floor(Date.now() / 1000), 7));
+  if (o.expirySec !== undefined) bits.push(6, 0, 4, ...num(o.expirySec, 4)); // up to ~12 days
+  bits.push(1, 1, 20); // payment hash: type 1, length 52 words (260 bits)
+  let acc = 0;
+  let n = 0;
+  for (const b of o.hash) {
+    acc = (acc << 8) | b;
+    n += 8;
+    while (n >= 5) {
+      n -= 5;
+      bits.push((acc >> n) & 31);
+    }
+  }
+  if (n > 0) bits.push((acc << (5 - n)) & 31);
+  bits.push(...Array(104).fill(0));
+  return encodeBolt11ForTest(`ln${o.prefix ?? "bc"}${o.amount ?? ""}`, bits);
 }
 
 function splitBolt11(raw: string): { hrp: string; data: string } | null {
