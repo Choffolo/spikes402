@@ -54,7 +54,7 @@ const states = {
   },
   confirm: {
     info: info(), settings, history,
-    pending: { id: "p1", site: "spikes402.dev", origin: "https://spikes402.dev", invoice: "x", amountSats: 2, costSats: 7, reason: "This page was paid a moment ago and asks again.", createdAt: 1 },
+    pending: { id: "p1", site: "spikes402.dev", origin: "https://spikes402.dev", invoice: "x", amountSats: 2, costSats: 7, reason: "This page was paid a moment ago and asks again.", cause: "same_page", createdAt: 1 },
     pendingCount: 1,
   },
   limits: { info: info(), settings, history },

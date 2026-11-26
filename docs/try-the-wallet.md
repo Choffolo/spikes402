@@ -91,16 +91,18 @@ automatic payments on this site, up to N sats a day?"; choose **Allow** to
 continue. Allowed sites are listed under "Trusted sites", where you can
 remove them. If the wallet is unlocked and the price fits all three caps,
 the page is paid automatically, and the page shows "Paying N sats…" until it opens. If it
-would go over a cap, the popup asks (showing "N sats + a fee of up to M")
+would go over the per-page cap, the popup asks (showing "N sats + a fee of up to M")
 whether to **pay this time**, **always allow this price on this site**, or
 **not pay**. "Always
-allow" raises the per-page cap for that site only; daily caps still apply.
+allow" raises the per-page cap for that site only; daily caps still apply,
+and later visits still go through the repeat-payment checks below. If a daily
+cap would be exceeded, the popup asks only to **pay this time** or **not pay**.
 If several pages ask at once, the popup shows them one at a time.
 
 A page that was just paid is not paid again by itself for 60 seconds, and a
 site gets at most one automatic payment every 5 seconds: in those cases the
-popup asks. An invoice that was already paid, for another network, or that
-has expired is refused.
+popup asks only to **pay this time** or **not pay**. An invoice that was already
+paid, for another network, or that has expired is refused.
 
 If a payment is slow (no answer after 60 seconds) it is not counted as
 failed: it stays in your budget until the wallet confirms that it settled

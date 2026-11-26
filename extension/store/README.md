@@ -128,17 +128,19 @@ or any secret here.
 ```text
 No account or sign-in is needed. The extension is a self-custodial wallet; everything below works without contacting us.
 
-1. Open the extension popup, choose "Create a new wallet", choose any password (8+ characters), write down the 12 words shown (they only protect this empty test wallet), type the 3 words it asks for, then the wallet opens.
-2. To avoid any real money, scroll to "Network" in the popup, choose "Test network (no real money)", click "Save network", lock and unlock the wallet. "Receive" now creates a test-network invoice.
-3. Visit https://spikes402.dev/premium/ . It returns HTTP 402 and shows a Lightning invoice (2 sats). The extension asks "Allow this site to pay?" with a daily limit. Click "Allow" or "Don't allow", then open the popup: "Trusted sites" lists the choice and lets you remove it.
-4. That demo site runs on real bitcoin (mainnet) and costs 2 sats, so a test-network wallet will refuse the payment with a message that the invoice is for another network; this is the intended safety check. To see a payment succeed, switch the network to "Real bitcoin", fund the wallet with a few sats from any Lightning wallet using "Receive", and reload the page; it is paid automatically (2 sats) and the content opens. The demo can also be opened without a wallet by solving the proof-of-work puzzle shown on the page.
-5. Other checks: "Limits" (default 10 sats per page, 100 per site per day, 500 per day), "Transaction history", and the recovery-words screen (asks for the password).
+1. The recommended way to try the demo, with no wallet funds and no real money, is the proof-of-work path. Visit https://spikes402.dev/premium/ . The page returns HTTP 402 and offers a Lightning invoice (2 sats) or a short proof-of-work puzzle. Solve the puzzle shown on the page; the premium content opens and no payment is made.
+
+2. Optional, to look at the wallet itself: open the extension popup, choose "Create a new wallet", choose any password (8+ characters), write down the 12 words shown (they only protect this empty test wallet), type the 3 words it asks for, then the wallet opens. In Settings, set the network to "Test network (no real money)", save, lock and unlock. "Receive" then creates a test-network invoice.
+
+3. To see the first-time consent prompt without paying: with the wallet unlocked (any network), visit https://spikes402.dev/premium/ again. The extension asks "Allow this site to pay?" with a daily limit. Click "Allow" or "Don't allow", then open the popup: "Trusted sites" lists the choice and lets you remove it. The demo runs on real bitcoin (mainnet) and costs 2 sats, so a test-network wallet refuses the invoice with a message that it is for another Bitcoin network; this is the intended safety check.
+
+4. Other checks in the popup: "Limits" (default 10 sats per page, 100 per site per day, 500 per day), "Transaction history", and the recovery-words screen (asks for the password).
 ```
 
-If Andrea prefers reviewers to see a successful payment without funding anything, the
-alternative is to put a separate, pre-funded throw-away wallet's recovery phrase in that
-private field, with a few dozen sats on it. That is his decision; it is not done here and
-no phrase is stored in this repository.
+A funded throw-away wallet (a few dozen sats on mainnet, so a reviewer can see a 2-sat
+payment succeed) is optional and is the publisher's choice if they want to offer it. It is
+never stored in this repository. If used, put the recovery phrase only in the private
+"Test instructions" field, and only for a wallet that holds a tiny amount.
 
 ## Upload package
 

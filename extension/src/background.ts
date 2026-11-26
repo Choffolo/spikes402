@@ -327,10 +327,12 @@ async function handleWebln(msg: PageMsg, sender: chrome.runtime.MessageSender): 
   if (reserved.action === "confirm") {
     const choice = await askUser({
       origin,
+      site,
       invoice,
       amountSats: amountSats ?? 0,
       costSats: paymentCost(amountSats ?? 0, feeSats),
       reason: reserved.reason,
+      cause: reserved.cause,
       tabId: sender.tab?.id,
     });
     if (choice === "refuse") {
@@ -464,7 +466,9 @@ type Reserved = Decision | { action: "reserved"; reservation: Reservation };
 
 /**
  * Check the caps and book the full cost (amount plus fee cap) in one atomic
- * step. After a user confirmation (force) the caps are not asked again.
+ * step. After a user confirmation (force) the caps, and the repeat / rate /
+ * clock checks, are not asked again for this one reservation. Force is not
+ * stored: later payments still go through those checks.
  */
 function reserve(p: {
   origin: string;
@@ -671,6 +675,11 @@ async function resolvePending(id: string, choice: ConfirmChoice, dailySats?: num
       if (choice === "always" && (!Number.isSafeInteger(limit) || limit < 1)) throw new Error("The daily limit must be a whole number of sats, at least 1.");
       s.settings = withSiteRule(s.settings, pending.site, { trusted: choice === "always", dailySats: limit, since: new Date().toISOString() });
     } else if (choice === "always") {
+      // Only a genuine over-per-page-cap prompt may raise that cap.
+      // Repeat, rate-limit, clock-rollback and daily-cap prompts cannot.
+      if (pending.cause !== "over_payment_cap") {
+        throw new Error("This payment can only be paid this time, or declined.");
+      }
       s.settings = { ...s.settings, ...withSiteAllowance(s.settings, pending.site ?? siteKey(pending.origin) ?? pending.origin, pending.costSats) };
     }
     s.prompts = s.prompts.filter((x) => x.id !== id);
