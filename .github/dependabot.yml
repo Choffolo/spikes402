@@ -3,8 +3,29 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: monthly
+      interval: weekly
+    groups:
+      github-actions:
+        update-types:
+          - minor
+          - patch
+
   - package-ecosystem: gomod
     directory: /
     schedule:
-      interval: monthly
+      interval: weekly
+    groups:
+      gomod:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: npm
+    directory: /extension
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        update-types:
+          - minor
+          - patch
