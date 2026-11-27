@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spikes402 Wallet: install the browser extension</title>
+<meta name="description" content="How to install the Spikes402 Wallet, a prototype non-custodial Lightning wallet for paying Spikes402 pages.">
+<link rel="icon" href="/logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<h1><a href="/" class="logo-link"><img src="/logo.svg" alt="Spikes402" width="40" height="40"></a> Spikes402 Wallet</h1>
+<p>A small, non-custodial Lightning wallet that lives in your browser. It lets pages protected by Spikes402 take a few sats automatically, within limits you set, through the standard WebLN interface. Your recovery phrase is encrypted with your password and never leaves your computer. There is no account and no Spikes402 server for the wallet.</p>
+<p>This is unreviewed prototype software. On real bitcoin, use tiny amounts only, and do not keep more in it than you can afford to lose. A test-network mode with no real money is built in.</p>
+
+<h2>How to get it</h2>
+<p>Chrome Web Store: coming soon (in review).</p>
+<p>Until the listing is live, build it from the source and load it unpacked in Chrome. You need <a href="https://nodejs.org/">Node.js 22</a> or newer:</p>
+<pre>git clone https://github.com/Choffolo/spikes402
+cd spikes402/extension
+npm ci
+npm run pack</pre>
+<p>Then open <code>chrome://extensions</code>, turn on Developer mode, click Load unpacked, and choose the <code>extension/dist</code> folder (the one that contains <code>manifest.json</code>). <code>npm run pack</code> also writes <code>spikes402-extension.zip</code>; you can unzip that into a folder and load the folder instead.</p>
+
+<h2>First steps</h2>
+<ol>
+<li>Open the popup, choose <strong>Create a new wallet</strong>, and set a password.</li>
+<li>Write the 12 recovery words on paper and keep them safe. The wallet stays locked until you confirm you have them.</li>
+<li>In Settings, stay on mainnet or switch to the test network (no real money).</li>
+<li>Visit a protected page, such as the <a href="/premium/">premium section</a> of this demo (2 sats, or a short proof-of-work puzzle if you prefer not to pay). When the site asks, allow it and set a daily limit.</li>
+</ol>
+<p>Default limits are 10 sats per page, 100 sats per site per day, and 500 sats per day in total. Fees count towards the limits.</p>
+
+<h2>How it keeps you safe</h2>
+<ul>
+<li>A site can use the wallet only after you allow it, and you choose its daily limit in sats.</li>
+<li>Anything over a limit stops and asks you first.</li>
+<li>The same page is not paid again automatically for 60 seconds, and a site gets at most one automatic payment every 5 seconds.</li>
+<li>Invoices that are already paid, for another network, or expired are refused.</li>
+<li>The wallet locks itself after 15 minutes. You can remove a trusted site at any time, and the popup keeps a history of the last 20 payments.</li>
+</ul>
+
+<h2>Privacy and source</h2>
+<p>What the wallet stores, who it talks to, and how to delete it: the <a href="/privacy/">privacy policy</a>.</p>
+<p>The extension is free software (AGPL-3.0). Source, build notes and the issue tracker: <a href="https://github.com/Choffolo/spikes402">github.com/Choffolo/spikes402</a> (folder: <code>extension</code>). To report a problem, <a href="https://github.com/Choffolo/spikes402/issues">open an issue</a>.</p>
+
+<p><a href="/">Back to the home page</a></p>
+<footer>
+Inspired by <a href="https://dspace.mit.edu/handle/1721.1/153030" target="_blank" rel="noopener">Jason Lowery's Softwar</a>
+·
+Made by <a href="https://x.com/Choffolo" target="_blank" rel="noopener">Choffolo</a> with Grok Bot
+·
+Wallet
+·
+<a href="/privacy/">Privacy</a>
+</footer>
+</body>
+</html>
