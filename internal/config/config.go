@@ -54,6 +54,7 @@ type Config struct {
 	Surge                gate.SurgeConfig   `json:"surge,omitempty"`         // optional demand-based price multiplier, off by default
 	Previews             []gate.PreviewRule `json:"previews,omitempty"`      // optional teaser of a protected page on its 402 page; first match wins
 	WallMode             string             `json:"wall_mode,omitempty"`     // "" = default two-door page; "pow_first" starts the puzzle automatically
+	LoginRoutes          []gate.LoginRoute  `json:"login_routes,omitempty"`  // login endpoints: every attempt costs escalating Argon2id work
 	PowSecondsPerSat     float64            `json:"pow_seconds_per_sat"`     // CPU-core seconds of work per sat, default 10
 	PowDifficulty        int                `json:"pow_difficulty"`          // 0 = derived from price and pow_seconds_per_sat
 	PowAlgorithm         string             `json:"pow_algorithm"`           // "sha256d" (default) or "argon2id"
@@ -345,6 +346,12 @@ func (c *Config) complete() error {
 	}
 	if c.Argon2MaxMemoryMiB < 1 || c.Argon2MaxMemoryMiB > gate.MaxArgonMaxMemoryMiB {
 		return fmt.Errorf(`"argon2_max_memory_mib" must be between 1 and %d`, gate.MaxArgonMaxMemoryMiB)
+	}
+	if err := gate.CheckLoginRoutes(c.LoginRoutes); err != nil {
+		return err
+	}
+	if len(c.LoginRoutes) > 0 && c.Argon2MaxMemoryMiB < gate.LoginArgonMemoryMiB {
+		return fmt.Errorf(`"login_routes" need "argon2_max_memory_mib" of at least %d`, gate.LoginArgonMemoryMiB)
 	}
 	if c.PowAlgorithm == pow.Argon2id && c.Argon2MemoryMiB > c.Argon2MaxMemoryMiB {
 		return fmt.Errorf(`"argon2_memory_mib" (%d) is more than "argon2_max_memory_mib" (%d)`, c.Argon2MemoryMiB, c.Argon2MaxMemoryMiB)

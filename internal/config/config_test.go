@@ -363,3 +363,20 @@ func TestPublicStatsFlag(t *testing.T) {
 		t.Fatalf("example should leave it off: %v err=%v", c != nil && c.PublicStats, err)
 	}
 }
+
+func TestLoginRoutesConfig(t *testing.T) {
+	base := `{"origin":"http://o","price_sats":2,"protect":["/x"],"lightning":{"backend":"fake"},`
+	c, err := load(t, base+`"login_routes":[{"path":"/login","username_field":"email","success":{"status":[302]}}]}`)
+	if err != nil || len(c.LoginRoutes) != 1 || c.LoginRoutes[0].Method != "POST" {
+		t.Fatalf("valid route: %+v %v", c.LoginRoutes, err)
+	}
+	for _, bad := range []string{
+		`"login_routes":[{"path":"/login","success":{"status":[302]}}]}`,
+		`"login_routes":[{"path":"/login/*","username_field":"u","success":{"status":[302]}}]}`,
+		`"argon2_max_memory_mib":8,"login_routes":[{"path":"/login","username_field":"u","success":{"status":[302]}}]}`,
+	} {
+		if _, err := load(t, base+bad); err == nil {
+			t.Errorf("accepted: %s", bad)
+		}
+	}
+}

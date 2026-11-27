@@ -87,6 +87,14 @@ type Options struct {
 	// the already-loaded contents (so New does not fail on a bad store).
 	SpentStore   SpentStore
 	SpentRecords []persist.SpentRecord
+
+	// LoginRoutes are login endpoints where every attempt costs an
+	// Argon2id proof-of-work that grows with each failure (see login.go).
+	// They are checked before Protect, ignore Paused and bot policies,
+	// and fail closed. Validate them with CheckLoginRoutes.
+	LoginRoutes []LoginRoute
+	// LoginState holds the failure counters; nil starts empty.
+	LoginState *LoginState
 }
 
 // PriceRule maps a path pattern (same syntax as Protect) to a price.
@@ -120,6 +128,10 @@ type Gate struct {
 	claimLim *rateLimiter  // polls of /.spikes402/claim, per client
 	surge    *surger       // optional per-group demand / price multiplier
 
+	login       *LoginState                // failure counters of login routes
+	loginParams func(level int) pow.Params // the puzzle for a level (smaller in tests)
+	loginLim    *rateLimiter               // login challenges and checks, per client
+
 	nodeLog  rateLog // why no invoice was offered
 	classLog rateLog // bot classifications
 }
@@ -152,6 +164,17 @@ func New(opt Options) *Gate {
 		surge:    newSurger(opt.Surge),
 	}
 	g.invoices.now = func() time.Time { return g.now() }
+	if len(opt.LoginRoutes) > 0 {
+		if g.argon.max < LoginArgonMemoryMiB {
+			panic("gate: Argon2MaxMemoryMiB too small for login routes")
+		}
+		g.login = opt.LoginState
+		if g.login == nil {
+			g.login = NewLoginState()
+		}
+		g.loginLim = newRateLimiter(opt.ChallengesPerMinute)
+		g.loginParams = loginPoW
+	}
 	g.live.Store(&Settings{
 		PriceSats: opt.PriceSats, Prices: append([]PriceRule(nil), opt.Prices...),
 		Protect: append([]string(nil), opt.Protect...), Paused: opt.Paused,
@@ -176,8 +199,12 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	set := g.live.Load()         // one consistent snapshot for this request
 	// Refuse paths like "/free/../paid" or "/free%2f..%2fpaid": the origin
 	// could normalise them into a protected path we did not recognise.
-	if why := checkPath(r.URL, func(p string) bool { return g.protected(p, set) }); why != "" {
+	if why := checkPath(r.URL, func(p string) bool { return g.protected(p, set) || g.isLoginPath(p) }); why != "" {
 		http.Error(w, "bad path: "+why, http.StatusBadRequest)
+		return
+	}
+	if route := g.loginRoute(r.Method, r.URL.Path); route != nil {
+		g.serveLogin(w, r, route, passes)
 		return
 	}
 	if !g.protected(r.URL.Path, set) {

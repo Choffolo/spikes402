@@ -120,6 +120,7 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `surge` | Optional demand-based price multiplier, **off by default**. See [Dynamic pricing](#dynamic-pricing-optional-off-by-default). Config file only (not a dashboard control) | off |
 | `previews` | Optional list of `{ "pattern", "mode", "max_chars" }` rules that show a teaser of the page on its 402 page, see [The 402 page](#the-402-page-for-people). `mode`: `"none"`, `"title"` (title and meta description) or `"excerpt"` (also the first `max_chars` characters, default 300, at most 1000). Same patterns as `protect`; **the first matching rule wins**. Config file only | `[]` = no teaser |
 | `wall_mode` | 402 page layout. Omitted is the default two-door page (pay and puzzle side by side). `"pow_first"` starts the puzzle automatically (unless the visitor prefers reduced motion) and offers Lightning under “Tired of waiting? Pay this →”. The invoice is still created when the page is served. Config file only | omitted |
+| `login_routes` | Login endpoints where every attempt costs an Argon2id proof-of-work that grows with each failure; see [Login protection](#login-protection). Config file only | `[]` |
 | `protect` | Path patterns that require payment. `"/premium/**"` = everything under `/premium`; other patterns use [glob syntax](https://pkg.go.dev/path#Match), e.g. `"/*.pdf"`. See [Path matching](#path-matching) | required |
 | `protect_case_sensitive` | Match `protect` patterns with exact letter case. Off by default, because many websites serve `/Premium` like `/premium` | `false` |
 | `pow_seconds_per_sat` | How much work replaces one sat: seconds of one CPU core (see [Proof-of-work pricing](#proof-of-work-pricing)). Values below 1 are refused unless `unsafe_allow_dangerous_config` is set. Example configs use `5` with `price_sats: 2`, which is the same puzzle as 1 sat at this default | `10` |
@@ -341,6 +342,125 @@ cheaper ones.
 **Future option:** [RandomX](https://github.com/tevador/RandomX) (Monero's
 CPU-oriented PoW) narrows the gap to specialised hardware even further, but
 it needs ~256 MiB per verifier and a C library. Not implemented.
+
+## Login protection
+
+List your login endpoints in `login_routes` and every login attempt costs
+work, always, for everyone. Each failed attempt makes the next one cost
+more. Nothing is ever blocked: the wall only gets more expensive, so
+nobody can lock a real user out.
+
+```json
+"login_routes": [{
+  "method": "POST",
+  "path": "/login",
+  "username_field": "email",
+  "success": { "status": [302, 303], "location_not_prefix": "/login" }
+}]
+```
+
+**How the proxy checks a login**
+
+- **Matching.** `path` is matched exactly, ignoring a trailing slash and,
+  unless `protect_case_sensitive` is set, letter case. `method` defaults to
+  `POST`.
+- **Success and failure.** An answer whose status is in `success.status`,
+  and does not redirect under `location_not_prefix`, is a success. Anything
+  else is a failure.
+- **Username.** The proxy reads at most 16 KiB of an
+  `application/x-www-form-urlencoded` or `application/json` body, only to
+  find `username_field`. It never stores or logs the body.
+- **Precedence.** Login routes are checked before `protect`. Neither
+  `paused` nor bot policies apply to them.
+
+**Browser login forms**
+
+Add one tag to the login page. `data-field` is the `name` of the username
+input:
+
+```html
+<script src="/.spikes402/login.js" data-field="email" defer></script>
+```
+
+1. When the username field loses focus, the script asks
+   `POST /.spikes402/login-challenge` for a challenge bound to that account.
+2. It solves the challenge in Web Workers (`/.spikes402/argon2id-worker.js`)
+   while the password is typed.
+3. On submit it trades the solution at `POST /.spikes402/login-redeem` for a
+   one-use cookie, valid for 60 s, and submits the form as usual. Password
+   managers keep working.
+4. If the page has a Content-Security-Policy, it must allow `script-src`,
+   `worker-src` and `connect-src` from `'self'`.
+
+**API clients and bots**
+
+A login request without a proof gets `402` with a JSON challenge and a
+`WWW-Authenticate: PoW ...` header. Solve it (for example with `pow.Params.Solve`), then repeat the request with
+`Authorization: PoW <challenge>:<nonce>`.
+
+**Fail-closed**
+
+The proxy enforces everything, so a missing or broken script tag breaks the
+login, never the wall. A login request that cannot be checked never reaches
+the origin. That covers:
+
+- a body that is too large;
+- an unknown content type or no username;
+- a wrong, reused, expired or underpriced proof;
+- a full Argon2id budget (the answer is `503`).
+
+**Escalation**
+
+The level is counted in sha256d-equivalent bits. The puzzle is Argon2id at
+16 MiB with *level − 16* bits, and each level doubles the work.
+
+```
+level = 23 + max(pair, min(account, 4), min(network, 6)) + surge, at most 33
+```
+
+- `pair` counts failures for this account from this network (a /24 for
+  IPv4, a /64 for IPv6).
+- `account` counts failures for this account from anywhere. Its cap stops an
+  attacker from making a real user's login expensive.
+- `network` counts failures from this network on any account.
+- Failure counts map to extra levels as 0, 1, 2, 3, 4, 6, 8, 10 for
+  0, 1, 2 … 7+ failures.
+- `surge` adds 1 while the whole site sees 100 or more failed logins a
+  minute, and 2 at 1,000.
+- Every attempt counts as a failure until the origin answers success, so
+  parallel attempts cannot share one level.
+- After a success, the account counters start again from zero. The network
+  counter only decays.
+- Counters halve every 30 minutes (pair and account) and every 15 minutes
+  (network).
+
+| Failures | Level | Argon2id bits | One native core | Browser, 4 workers |
+|---:|---:|---:|---:|---:|
+| 0 | 23 | 7 | 1.4 s | 2.8 s |
+| 1 | 24 | 8 | 2.8 s | 5.5 s |
+| 2 | 25 | 9 | 5.6 s | 11 s |
+| 3 | 26 | 10 | 11 s | 22 s |
+| 4 | 27 | 11 | 23 s | 44 s |
+| 5 | 29 | 13 | 90 s | 3 min |
+| 6 | 31 | 15 | 6 min | 12 min |
+| 7+ | 33 | 17 | 24 min | 47 min |
+
+The native core figure is the measured ~11 ms per 16 MiB attempt. The
+browser figure assumes ~86 ms per attempt per worker, measured with the
+JavaScript solver in V8. Phones are slower; more cores are faster. All
+times are averages.
+
+**What is stored**
+
+- The counters live in memory, at most 1,000,000 entries.
+- Their keys are HMACs (with `secret_key`) of the account name and the
+  network. No username, password or IP address is kept.
+- When the table is full, accounts and networks it cannot track start at the
+  network cap (+6).
+- With a configured `secret_key`, the counters are saved every minute to
+  `state_dir/login-counters`, sealed with an HMAC, so a restart does not
+  forget an attack. A file that fails its seal stops the proxy at startup
+  rather than being ignored.
 
 ## The 402 page (for people)
 
@@ -925,6 +1045,11 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
   not yet against a real phoenixd node. Fee estimation is up to you
   (`feerate_sat_vbyte`); Lightning-address payments may fail if no route is
   found.
+- Login protection: proof-of-work only for now. A Lightning alternative
+  with the same escalating price, and solver fingerprinting for the siege
+  monitor, are planned. The browser solver is plain JavaScript, about 8x
+  slower per thread than native Argon2id, so attackers with native code get
+  a head start. Multipart login forms are not supported (they fail closed).
 - Not yet reviewed by Lightning security experts.
 
 ## Development
