@@ -1,7 +1,7 @@
 # Chrome Web Store listing materials
 
 Everything needed to fill in the Chrome Web Store (CWS) developer dashboard for
-**Spikes402 Wallet** (extension version 0.1.5). Nothing here is shipped inside the
+**Spikes402 Wallet** (extension version 0.1.6). Nothing here is shipped inside the
 extension; it is the text to paste into the dashboard, plus the images to upload.
 
 Keep this in step with `extension/src/manifest.json`, `extension/README.md` and the
