@@ -31,11 +31,12 @@ jobs:
           if-no-files-found: error
 
   # Attach the artifact when a GitHub Release is published from the UI or
-  # with a personal token. A tag-triggered run of .github/workflows/release.yml
-  # creates the release with GITHUB_TOKEN, which does not fire this event, so
-  # that workflow attaches the SBOM itself.
+  # with a personal token, and only for version tags (v*). Extension-only
+  # tags (extension-v*) must not run this job. A tag-triggered run of
+  # .github/workflows/release.yml creates the release with GITHUB_TOKEN,
+  # which does not fire this event, so that workflow attaches the SBOM itself.
   attach-release:
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'v')
     needs: sbom
     runs-on: ubuntu-latest
     permissions:

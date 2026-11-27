@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Spikes402 Wallet",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Non-custodial Lightning wallet for Spikes402 pages. Keys stay in this browser; no Spikes402 server or API key.",
   "icons": {
     "16": "icons/icon-16.png",
