@@ -95,6 +95,9 @@ type Options struct {
 	LoginRoutes []LoginRoute
 	// LoginState holds the failure counters; nil starts empty.
 	LoginState *LoginState
+	// LoginSurge are the site-wide failed logins per minute that add one
+	// and two levels for everyone. Zero means DefaultLoginSurge.
+	LoginSurge [2]int
 }
 
 // PriceRule maps a path pattern (same syntax as Protect) to a price.
@@ -171,6 +174,14 @@ func New(opt Options) *Gate {
 		g.login = opt.LoginState
 		if g.login == nil {
 			g.login = NewLoginState()
+		}
+		if opt.LoginSurge != [2]int{} {
+			if CheckLoginSurge(opt.LoginSurge) != nil {
+				panic("gate: invalid LoginSurge")
+			}
+			g.login.mu.Lock()
+			g.login.surge = opt.LoginSurge
+			g.login.mu.Unlock()
 		}
 		g.loginLim = newRateLimiter(opt.ChallengesPerMinute)
 		g.loginParams = loginPoW

@@ -367,16 +367,26 @@ func TestPublicStatsFlag(t *testing.T) {
 func TestLoginRoutesConfig(t *testing.T) {
 	base := `{"origin":"http://o","price_sats":2,"protect":["/x"],"lightning":{"backend":"fake"},`
 	c, err := load(t, base+`"login_routes":[{"path":"/login","username_field":"email","success":{"status":[302]}}]}`)
-	if err != nil || len(c.LoginRoutes) != 1 || c.LoginRoutes[0].Method != "POST" {
+	if err != nil || len(c.LoginRoutes) != 1 || c.LoginRoutes[0].Method != "POST" || *c.LoginSurge != [2]int{100, 1000} {
 		t.Fatalf("valid route: %+v %v", c.LoginRoutes, err)
 	}
 	for _, bad := range []string{
 		`"login_routes":[{"path":"/login","success":{"status":[302]}}]}`,
 		`"login_routes":[{"path":"/login/*","username_field":"u","success":{"status":[302]}}]}`,
 		`"argon2_max_memory_mib":8,"login_routes":[{"path":"/login","username_field":"u","success":{"status":[302]}}]}`,
+		`"login_surge_failures_per_minute":[1000,100]}`,
+		`"login_surge_failures_per_minute":[0,100]}`,
+		`"login_surge_failures_per_minute":[100]}`,
 	} {
 		if _, err := load(t, base+bad); err == nil {
 			t.Errorf("accepted: %s", bad)
 		}
+	}
+}
+
+func TestLoginSurgeConfig(t *testing.T) {
+	c, err := load(t, `{"origin":"http://o","price_sats":2,"protect":["/x"],"lightning":{"backend":"fake"},"login_surge_failures_per_minute":[20,200]}`)
+	if err != nil || *c.LoginSurge != [2]int{20, 200} {
+		t.Fatalf("%v %v", c.LoginSurge, err)
 	}
 }

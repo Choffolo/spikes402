@@ -30,6 +30,11 @@ type loginFixture struct {
 
 func newLoginFixture(t *testing.T) *loginFixture {
 	t.Helper()
+	return newLoginFixtureWith(t, [2]int{})
+}
+
+func newLoginFixtureWith(t *testing.T, surge [2]int) *loginFixture {
+	t.Helper()
 	f := &loginFixture{now: time.Unix(1_800_000_000, 0), succeed: func(string) bool { return false }}
 	origin := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.Header.Get("Authorization"), "PoW") || strings.Contains(r.Header.Get("Cookie"), loginPassCookie) {
@@ -51,6 +56,7 @@ func newLoginFixture(t *testing.T) *loginFixture {
 		ChallengesPerMinute: 1000, MaxInvoicesPerMinute: 6000, MaxPendingInvoices: 1000,
 		LoginRoutes: []LoginRoute{{Path: "/login", UsernameField: "user",
 			Success: LoginSuccess{Status: []int{302}, LocationNotPrefix: "/login"}}},
+		LoginSurge: surge,
 	})
 	if err := CheckLoginRoutes(f.gate.opt.LoginRoutes); err != nil {
 		t.Fatal(err)
@@ -287,13 +293,13 @@ func TestLoginBusyArgonIs503(t *testing.T) {
 func TestLoginStateLimitsAndSurge(t *testing.T) {
 	s := NewLoginState()
 	now := time.Unix(1_800_000_000, 0)
-	for range loginSurgeFailures {
+	for range DefaultLoginSurge[0] {
 		s.failed(now)
 	}
 	if got := s.Level("a", "n", now); got != LoginBaseLevel+1 {
 		t.Fatalf("surge: level %d", got)
 	}
-	for range 9 * loginSurgeFailures {
+	for range DefaultLoginSurge[1] - DefaultLoginSurge[0] {
 		s.failed(now)
 	}
 	if got := s.Level("a", "n", now.Add(time.Minute)); got != LoginBaseLevel+2 {
@@ -301,6 +307,13 @@ func TestLoginStateLimitsAndSurge(t *testing.T) {
 	}
 	if got := s.Level("a", "n", now.Add(3*time.Minute)); got != LoginBaseLevel {
 		t.Fatalf("surge over: level %d", got)
+	}
+	// Configured thresholds.
+	f := newLoginFixtureWith(t, [2]int{2, 3})
+	f.attempt(t, "a", "192.0.2.1")
+	f.attempt(t, "b", "198.51.100.1")
+	if got := f.gate.login.Level("c", "n", f.now); got != LoginBaseLevel+1 {
+		t.Fatalf("configured surge: level %d", got)
 	}
 	// A full table: unknown keys start at the network cap.
 	s = NewLoginState()
@@ -338,6 +351,17 @@ func TestLoginStateSnapshot(t *testing.T) {
 	}
 	if l, err := LoadLoginState(t.TempDir(), key); err != nil || len(l.m) != 0 {
 		t.Fatalf("missing file: %v", err)
+	}
+}
+
+func TestCheckLoginSurge(t *testing.T) {
+	for _, bad := range [][2]int{{0, 10}, {10, 10}, {100, 50}, {1, 200_000_000}} {
+		if CheckLoginSurge(bad) == nil {
+			t.Errorf("accepted %v", bad)
+		}
+	}
+	if err := CheckLoginSurge(DefaultLoginSurge); err != nil {
+		t.Fatal(err)
 	}
 }
 

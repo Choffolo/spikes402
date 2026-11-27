@@ -121,6 +121,7 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `previews` | Optional list of `{ "pattern", "mode", "max_chars" }` rules that show a teaser of the page on its 402 page, see [The 402 page](#the-402-page-for-people). `mode`: `"none"`, `"title"` (title and meta description) or `"excerpt"` (also the first `max_chars` characters, default 300, at most 1000). Same patterns as `protect`; **the first matching rule wins**. Config file only | `[]` = no teaser |
 | `wall_mode` | 402 page layout. Omitted is the default two-door page (pay and puzzle side by side). `"pow_first"` starts the puzzle automatically (unless the visitor prefers reduced motion) and offers Lightning under “Tired of waiting? Pay this →”. The invoice is still created when the page is served. Config file only | omitted |
 | `login_routes` | Login endpoints where every attempt costs an Argon2id proof-of-work that grows with each failure; see [Login protection](#login-protection). Config file only | `[]` |
+| `login_surge_failures_per_minute` | Failed logins per minute, site-wide, that add one and two levels for everyone. Two increasing counts. Config file only | `[100, 1000]` |
 | `protect` | Path patterns that require payment. `"/premium/**"` = everything under `/premium`; other patterns use [glob syntax](https://pkg.go.dev/path#Match), e.g. `"/*.pdf"`. See [Path matching](#path-matching) | required |
 | `protect_case_sensitive` | Match `protect` patterns with exact letter case. Off by default, because many websites serve `/Premium` like `/premium` | `false` |
 | `pow_seconds_per_sat` | How much work replaces one sat: seconds of one CPU core (see [Proof-of-work pricing](#proof-of-work-pricing)). Values below 1 are refused unless `unsafe_allow_dangerous_config` is set. Example configs use `5` with `price_sats: 2`, which is the same puzzle as 1 sat at this default | `10` |
@@ -370,6 +371,11 @@ nobody can lock a real user out.
 - **Username.** The proxy reads at most 16 KiB of an
   `application/x-www-form-urlencoded` or `application/json` body, only to
   find `username_field`. It never stores or logs the body.
+- **Multipart forms are refused.** A login sent as `multipart/form-data`
+  (a form with `enctype="multipart/form-data"`), or with any other content
+  type, gets `400` and never reaches the origin. This is deliberate, so
+  parsing stays small. Make the login form use the default encoding (no
+  `enctype`), or send JSON.
 - **Precedence.** Login routes are checked before `protect`. Neither
   `paused` nor bot policies apply to them.
 
@@ -425,8 +431,11 @@ level = 23 + max(pair, min(account, 4), min(network, 6)) + surge, at most 33
 - `network` counts failures from this network on any account.
 - Failure counts map to extra levels as 0, 1, 2, 3, 4, 6, 8, 10 for
   0, 1, 2 … 7+ failures.
-- `surge` adds 1 while the whole site sees 100 or more failed logins a
-  minute, and 2 at 1,000.
+- `surge` adds 1 for everyone while the whole site sees 100 or more failed
+  logins a minute, and 2 at 1,000. Set your own thresholds with
+  `"login_surge_failures_per_minute": [100, 1000]`. The two counts must
+  increase, and the first must be at least 1. Pick values well above your
+  normal failure rate.
 - Every attempt counts as a failure until the origin answers success, so
   parallel attempts cannot share one level.
 - After a success, the account counters start again from zero. The network
@@ -1049,7 +1058,8 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
   with the same escalating price, and solver fingerprinting for the siege
   monitor, are planned. The browser solver is plain JavaScript, about 8x
   slower per thread than native Argon2id, so attackers with native code get
-  a head start. Multipart login forms are not supported (they fail closed).
+  a head start. Multipart login forms are refused (fail-closed, see
+  [Login protection](#login-protection)).
 - Not yet reviewed by Lightning security experts.
 
 ## Development

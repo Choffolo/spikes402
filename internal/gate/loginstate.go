@@ -30,8 +30,6 @@ const (
 	loginStateFile   = "login-counters"
 	// A counter below this is forgotten (about 4.3 half-lives after one failure).
 	counterForget = 0.05
-	// Site-wide failures per minute that add one (×10: two) surge levels.
-	loginSurgeFailures = 100
 )
 
 type counterKey [17]byte // kind + 16-byte hash
@@ -64,11 +62,24 @@ type LoginState struct {
 	minute    int64 // unix minute of cur
 	cur, prev int   // site-wide failures this minute and the previous one
 	lastSweep int64
+	surge     [2]int // site-wide failures per minute for +1 and +2 levels
+}
+
+// DefaultLoginSurge is the default for login_surge_failures_per_minute.
+var DefaultLoginSurge = [2]int{100, 1000}
+
+// CheckLoginSurge validates surge thresholds: two failure counts per
+// minute, the first at least 1, the second larger than the first.
+func CheckLoginSurge(t [2]int) error {
+	if t[0] < 1 || t[1] <= t[0] || t[1] > 100_000_000 {
+		return errors.New(`"login_surge_failures_per_minute" must be two increasing counts, e.g. [100, 1000]`)
+	}
+	return nil
 }
 
 // NewLoginState returns empty counters.
 func NewLoginState() *LoginState {
-	return &LoginState{m: make(map[counterKey]counter), max: maxLoginCounters}
+	return &LoginState{m: make(map[counterKey]counter), max: maxLoginCounters, surge: DefaultLoginSurge}
 }
 
 func loginKey(kind byte, parts ...string) counterKey {
@@ -198,9 +209,9 @@ func (s *LoginState) rollLocked(now int64) {
 func (s *LoginState) surgeLocked(now int64) int {
 	s.rollLocked(now)
 	switch n := max(s.cur, s.prev); {
-	case n >= 10*loginSurgeFailures:
+	case n >= s.surge[1]:
 		return 2
-	case n >= loginSurgeFailures:
+	case n >= s.surge[0]:
 		return 1
 	}
 	return 0
