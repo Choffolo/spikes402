@@ -397,18 +397,38 @@ limits below (`429`) apply to everyone behind the same address or prefix.
   - it does not redirect under `location_not_prefix`;
   - if `location_prefix` is set, it redirects under it;
   - if `set_cookie` is set, it sets that cookie (non-empty, not expired);
+  - if `set_cookie` is not set, it does not redirect to the `Referer`
+    (which the client chooses, and where origins send failed logins
+    "back");
   - if neither `set_cookie` nor `location_prefix` is set, it does not
-    redirect to a place the request itself named: the `Referer`, or any
-    query or body value (a `next` parameter, say), so an origin that sends
-    failed logins back there cannot reset the counters.
+    redirect to any query or body value either (a `next` parameter, say).
 
   If `success.status` lists any `3xx`, the proxy refuses to start unless
   `set_cookie` or `location_prefix` is set: a redirect alone cannot tell
   a success from a failure, and the guess above would count honest logins
-  that follow `next` as failures. With either set, the guess is skipped.
-  `set_cookie` is the most robust; `location_prefix` trusts that the
-  origin never sends a failed login under that prefix, whatever `next`
-  says.
+  that follow `next` as failures. With `location_prefix` the `next` guess
+  is skipped but the `Referer` check stays; with `set_cookie` both are
+  skipped.
+
+  `location_prefix` is unsafe if the origin can send a failed login to
+  the previous page by any other means than the `Referer` header: an
+  attacker makes that page one under the prefix, and every failure counts
+  as a success. Use `set_cookie` for such an origin, with a cookie the
+  origin sets **only** on a successful login. A session cookie set on
+  every response (`laravel_session`, `PHPSESSID`, `connect.sid`, ...) is
+  the wrong choice: failures set it too.
+
+  Laravel: a failed login goes to `url()->previous()`, which is the
+  `Referer` or, without one, the last page the session visited (an
+  attacker sets it with one `GET` under the prefix). The safe setup is
+  `location_prefix` (your post-login area) plus the `Referer` check above,
+  **and** failed logins sent to the login page instead of "back", for
+  example `throw ValidationException::withMessages([...])->redirectTo(route('login'))`
+  in your `LoginRequest::authenticate()`:
+
+  ```json
+  "success": { "status": [302], "location_prefix": "/dashboard", "location_not_prefix": "/login" }
+  ```
 
   A relative `Location` is resolved against the route. Get this right: if
   a failed login can look like a success (for example a site that answers

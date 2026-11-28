@@ -592,10 +592,10 @@ func (g *Gate) serveLogin(w http.ResponseWriter, r *http.Request, route *LoginRo
 
 	// The origin gets exactly the body that was checked.
 	r.ContentLength, r.TransferEncoding, r.Trailer = int64(len(body)), nil, nil
-	steer := loginSteerValues(r, body)
+	referer, steer := r.Header.Values("Referer"), loginSteerValues(r, body)
 	ow := &outcomeWriter{ResponseWriter: w}
 	g.opt.Next.ServeHTTP(ow, r)
-	if route.succeeded(ow, steer, g.now()) {
+	if route.succeeded(ow, referer, steer, g.now()) {
 		g.login.succeeded(acct, net, g.now())
 	} else {
 		g.login.failed(g.now())
@@ -603,13 +603,14 @@ func (g *Gate) serveLogin(w http.ResponseWriter, r *http.Request, route *LoginRo
 }
 
 // succeeded reports whether the origin's answer is a success (see
-// LoginSuccess). An answer the origin never wrote is a failure. Without a
-// set_cookie or location_prefix criterion (allowed only when no 3xx
-// status counts, see CheckLoginRoutes), a redirect to a place the request
-// itself named (the Referer, a "next" parameter, any query or body value)
-// is a failure: an origin that sends failed logins back there must not
-// reset the counters.
-func (route *LoginRoute) succeeded(o *outcomeWriter, steer []string, now time.Time) bool {
+// LoginSuccess). An answer the origin never wrote is a failure. Unless
+// set_cookie is set, a redirect to the Referer is a failure: origins send
+// failed logins "back" there (Laravel's back()), and the client chooses
+// it. Without location_prefix either (allowed only when no 3xx status
+// counts, see CheckLoginRoutes), so is a redirect to any query or body
+// value the request named (a "next" parameter); with location_prefix
+// those are skipped, so honest logins that follow "next" succeed.
+func (route *LoginRoute) succeeded(o *outcomeWriter, referer, steer []string, now time.Time) bool {
 	s := route.Success
 	if o.status == 0 || !slices.Contains(s.Status, o.status) {
 		return false
@@ -636,11 +637,15 @@ func (route *LoginRoute) succeeded(o *outcomeWriter, steer []string, now time.Ti
 		}
 		return false
 	}
-	if loc != "" && s.LocationPrefix == "" {
-		for _, v := range steer {
-			if k, ok := route.redirectKey(v); ok && k == loc {
-				return false
-			}
+	if loc == "" {
+		return true
+	}
+	if s.LocationPrefix != "" {
+		steer = nil
+	}
+	for _, v := range slices.Concat(referer, steer) {
+		if k, ok := route.redirectKey(v); ok && k == loc {
+			return false
 		}
 	}
 	return true
@@ -657,10 +662,10 @@ func (route *LoginRoute) redirectKey(v string) (string, bool) {
 }
 
 // loginSteerValues are the values a client chose in a login request that
-// an origin may redirect to: the Referer and every query and body string
-// value (nested JSON included).
+// an origin may redirect to besides the Referer: every query and body
+// string value (nested JSON included).
 func loginSteerValues(r *http.Request, body []byte) []string {
-	v := append([]string(nil), r.Header.Values("Referer")...)
+	var v []string
 	q, _ := url.ParseQuery(r.URL.RawQuery)
 	for _, vs := range q {
 		v = append(v, vs...)

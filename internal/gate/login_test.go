@@ -606,7 +606,7 @@ func TestLoginUsernameAmbiguityRefused(t *testing.T) {
 func TestLoginRelativeFailureRedirect(t *testing.T) {
 	route := LoginRoute{Path: "/login", Success: LoginSuccess{Status: []int{302}, LocationNotPrefix: "/login"}}
 	for loc, want := range map[string]bool{"/home": true, "login?failed=1": false, "./login": false, "/login?e=1": false, "https://x.example/login": false, "": true} {
-		if got := route.succeeded(&outcomeWriter{status: 302, location: loc}, nil, time.Now()); got != want {
+		if got := route.succeeded(&outcomeWriter{status: 302, location: loc}, nil, nil, time.Now()); got != want {
 			t.Errorf("%q: got %v, want %v", loc, got, want)
 		}
 	}
@@ -823,7 +823,7 @@ func TestLoginBudgetSaturation(t *testing.T) {
 func TestLoginSuccessCriteria(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	route := LoginRoute{Path: "/login", Success: LoginSuccess{Status: []int{302, 200}, LocationNotPrefix: "/login"}}
-	ok := func(r LoginRoute, o *outcomeWriter, steer ...string) bool { return r.succeeded(o, steer, now) }
+	ok := func(r LoginRoute, o *outcomeWriter, steer ...string) bool { return r.succeeded(o, nil, steer, now) }
 	if ok(route, &outcomeWriter{}) {
 		t.Fatal("unwritten answer counted as success")
 	}
@@ -907,8 +907,14 @@ func TestLoginRedirectSuccessNeedsPositiveCriterion(t *testing.T) {
 	}
 	now := time.Unix(1_800_000_000, 0)
 	route := LoginRoute{Path: "/login", Success: LoginSuccess{Status: []int{302}, LocationPrefix: "/app"}}
-	if !route.succeeded(&outcomeWriter{status: 302, location: "/app/inbox"}, []string{"/app/inbox", "https://site.example/app/inbox"}, now) {
-		t.Fatal("location_prefix: a login back to the page the user came from counted as failure")
+	if !route.succeeded(&outcomeWriter{status: 302, location: "/app/inbox"}, nil, []string{"/app/inbox", "https://site.example/app/inbox"}, now) {
+		t.Fatal("location_prefix: a login that follows \"next\" counted as failure")
+	}
+	// The Referer check stays, location_prefix or not.
+	for _, ref := range []string{"https://x/app/inbox", "/app/inbox/", "/APP/inbox"} {
+		if route.succeeded(&outcomeWriter{status: 302, location: "/app/inbox"}, []string{ref}, nil, now) {
+			t.Fatalf("location_prefix: a redirect to the Referer %q counted as success", ref)
+		}
 	}
 	// End to end: the origin sends honest logins back to "next".
 	f := newLoginFixture(t)
@@ -955,6 +961,34 @@ func TestLoginJunkProofsCapped(t *testing.T) {
 	junk("198.51.100.1")
 	if rec := f.do(loginReq("dave", "198.51.100.1", "")); rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("junk proofs not rate-limited: %d", rec.Code)
+	}
+}
+
+// R4: the reviewer's PoC. location_prefix /account; the origin sends
+// failed logins back to the Referer (Laravel's back()); the attacker sends
+// a Referer under /account. Failures must still raise the level.
+func TestLoginLocationPrefixRefererPoC(t *testing.T) {
+	f := newLoginFixture(t)
+	f.gate.opt.LoginRoutes[0].Success = LoginSuccess{Status: []int{302}, LocationPrefix: "/account"}
+	if err := CheckLoginRoutes(f.gate.opt.LoginRoutes); err != nil {
+		t.Fatal(err)
+	}
+	f.respond = func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, r.Referer(), http.StatusFound) }
+	prev := 0
+	for i := range 6 {
+		ch := decodeChallenge(t, f.do(loginReq("alice", "192.0.2.1", "")))
+		if i > 0 && ch.Level <= prev {
+			t.Fatalf("attempt %d: level %d did not rise (was %d)", i+1, ch.Level, prev)
+		}
+		prev = ch.Level
+		r := loginReq("alice", "192.0.2.1", solveLogin(t, ch))
+		r.Header.Set("Referer", "https://x/account/")
+		if rec := f.do(r); rec.Code != http.StatusFound {
+			t.Fatalf("attempt %d: %d", i+1, rec.Code)
+		}
+	}
+	if ch := decodeChallenge(t, f.do(loginReq("alice", "192.0.2.1", ""))); ch.Level <= LoginBaseLevel+5 {
+		t.Fatalf("level after 6 Referer-steered failures: %d", ch.Level)
 	}
 }
 
