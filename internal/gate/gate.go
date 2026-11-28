@@ -569,7 +569,7 @@ func (g *Gate) checkArgon(r *http.Request, p pow.Params, token string, nonce uin
 	if g.spent.has(spentKey("PoW", c.ID)) {
 		return errReplay
 	}
-	if ok, wait := g.limiter.allow(g.client(r), now); !ok {
+	if ok, wait := g.limiter.allow(g.client(r), g.clientCoarse(r), now); !ok {
 		return &busyError{http.StatusTooManyRequests, wait, "too many requests"}
 	}
 	if !g.argon.acquire(p.MemoryMiB, argonAcquireWait) {
@@ -625,6 +625,10 @@ func (g *Gate) client(r *http.Request) string {
 	return clientKey(r, g.opt.ClientIPHeader, g.opt.TrustedProxies)
 }
 
+// clientCoarse is the client's IPv4 /16 or IPv6 /32: the rate limiters'
+// overflow bucket once they track too many clients.
+func (g *Gate) clientCoarse(r *http.Request) string { return g.loginPrefix(r, 16, 32) }
+
 func (g *Gate) clientIP(r *http.Request) net.IP {
 	return clientIP(r, g.opt.ClientIPHeader, g.opt.TrustedProxies)
 }
@@ -633,7 +637,7 @@ func (g *Gate) clientIP(r *http.Request) net.IP {
 // Many Requests if this client asked for too many challenges.
 func (g *Gate) challenge(w http.ResponseWriter, r *http.Request, set *Settings, class botid.Class, problem, key string, price int64, powOnly bool) {
 	now := g.now()
-	if ok, wait := g.limiter.allow(g.client(r), now); !ok {
+	if ok, wait := g.limiter.allow(g.client(r), g.clientCoarse(r), now); !ok {
 		g.observe(r, class, OutcomeRateLimited, 0)
 		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
 		http.Error(w, "too many requests", http.StatusTooManyRequests)

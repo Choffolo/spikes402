@@ -40,7 +40,7 @@ func checkPath(u *url.URL, protected func(string) bool) string {
 				return "encoded percent sign in path"
 			}
 			for i := 0; i < len(twice); i++ {
-				if c := twice[i]; c < 0x20 || c == 0x7f || c == '\\' {
+				if c := twice[i]; c < 0x20 || c == 0x7f || c == '\\' || c == '#' || c == '?' {
 					return "encoded percent sign in path"
 				}
 			}
@@ -52,6 +52,12 @@ func checkPath(u *url.URL, protected func(string) bool) string {
 	for i := 0; i < len(p); i++ {
 		if c := p[i]; c < 0x20 || c == 0x7f || c == '\\' {
 			return "control character or backslash in path"
+		}
+		// "#" (raw, which no browser sends, or %23) and "?" (%3F) in the
+		// decoded path: an origin that decodes and re-parses the target
+		// could cut the path there and serve "/login#x" as "/login".
+		if c := p[i]; c == '#' || c == '?' {
+			return "# or ? in path"
 		}
 	}
 	if c := path.Clean(p); c != p && c+"/" != p {

@@ -32,12 +32,14 @@ type spentSet struct {
 	mu        sync.Mutex
 	ids       map[spentID]spentEntry
 	max       int
+	logins    int // entries of kind spentKindLogin
+	maxLogin  int // at most this many of them
 	inserts   int
 	lastSweep time.Time
 	store     SpentStore
 }
 
-// spentID is "pay" or "pow" plus the 16-byte token id.
+// spentID is "pay", "pow" or "login" plus the 16-byte token id.
 type spentID [17]byte
 
 type spentEntry struct {
@@ -50,6 +52,7 @@ type spentEntry struct {
 const (
 	spentKindPay   byte = 1
 	spentKindPoW   byte = 2
+	spentKindLogin byte = 3
 	spentKindOther byte = 0 // tests and unexpected ids
 )
 
@@ -65,14 +68,32 @@ const (
 // per entry, measured with HeapAlloc at the cap).
 const maxSpent = 1_000_000
 
+// maxLoginSpent is the share of maxSpent login tokens may use, so a
+// flood of logins cannot make payers' tokens errBusy. Login entries are
+// bounded by the login Argon2id throughput (one entry per check) times
+// loginChallengeTTL for wrong proofs, which is well below this.
+const maxLoginSpent = 250_000
+
 func newSpentSet() *spentSet {
-	return &spentSet{ids: make(map[spentID]spentEntry), max: maxSpent}
+	return &spentSet{ids: make(map[spentID]spentEntry), max: maxSpent, maxLogin: maxLoginSpent}
 }
 
 func (s *spentSet) load(recs []persist.SpentRecord) {
 	for _, r := range recs {
-		s.ids[compactID(r.ID)] = spentEntry{expires: r.Expires, first: r.First, retries: r.Retries, released: r.Released}
+		k := compactID(r.ID)
+		if _, seen := s.ids[k]; !seen && k[0] == spentKindLogin {
+			s.logins++
+		}
+		s.ids[k] = spentEntry{expires: r.Expires, first: r.First, retries: r.Retries, released: r.Released}
 	}
+}
+
+// del forgets one entry. s.mu must be held.
+func (s *spentSet) del(k spentID) {
+	if _, ok := s.ids[k]; ok && k[0] == spentKindLogin {
+		s.logins--
+	}
+	delete(s.ids, k)
 }
 
 func toSpentRecord(id string, e spentEntry) persist.SpentRecord {
@@ -92,6 +113,8 @@ func compactID(id string) spentID {
 				k[0] = spentKindPay
 			case "pow":
 				k[0] = spentKindPoW
+			case "login":
+				k[0] = spentKindLogin
 			default:
 				k[0] = spentKindOther
 			}
@@ -111,7 +134,8 @@ func compactID(id string) spentID {
 var errBusy = errors.New("server busy, try again later")
 
 // use marks id as spent. It returns errReplay if id was already spent,
-// or errBusy if the set is full: refusing is safer than forgetting.
+// or errBusy if the set (or, for a login token, the login quota) is full:
+// refusing is safer than forgetting.
 func (s *spentSet) use(id string, expires, now time.Time) error {
 	s.mu.Lock()
 	key := compactID(id)
@@ -135,29 +159,54 @@ func (s *spentSet) use(id string, expires, now time.Time) error {
 	s.inserts++
 	// Forget entries that can no longer be replayed: every 1024 inserts,
 	// or when full (at most once a second, so a full set stays cheap).
-	if s.inserts%1024 == 0 || (len(s.ids) >= s.max && now.Sub(s.lastSweep) >= time.Second) {
+	login := key[0] == spentKindLogin
+	full := func() bool { return len(s.ids) >= s.max || (login && s.logins >= s.maxLogin) }
+	if s.inserts%1024 == 0 || (full() && now.Sub(s.lastSweep) >= time.Second) {
 		unix := now.Unix()
 		for k, e := range s.ids {
 			if unix > e.expires {
-				delete(s.ids, k)
+				s.del(k)
 			}
 		}
 		s.lastSweep = now
 	}
-	if len(s.ids) >= s.max {
+	if full() {
 		s.mu.Unlock()
 		return errBusy
 	}
 	e := spentEntry{expires: expires.Unix(), first: now.Unix()}
 	s.ids[key] = e // reserve: a concurrent use of the same id is a replay
+	if login {
+		s.logins++
+	}
 	s.mu.Unlock()
 	if err := s.persist(id, e); err != nil {
 		s.mu.Lock()
-		delete(s.ids, key)
+		s.del(key)
 		s.mu.Unlock()
 		return err
 	}
 	return nil
+}
+
+// extend keeps a spent id until a later expiry (see checkLoginWork). It
+// returns errBusy if id is not spent or the write fails.
+func (s *spentSet) extend(id string, expires time.Time) error {
+	s.mu.Lock()
+	key := compactID(id)
+	e, ok := s.ids[key]
+	if !ok {
+		s.mu.Unlock()
+		return errBusy
+	}
+	if expires.Unix() <= e.expires {
+		s.mu.Unlock()
+		return nil
+	}
+	e.expires = expires.Unix()
+	s.ids[key] = e
+	s.mu.Unlock()
+	return s.persist(id, e)
 }
 
 // persist writes a record to disk. It must be called without s.mu held.

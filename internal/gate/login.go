@@ -23,6 +23,7 @@ import (
 	"unicode"
 
 	"github.com/Choffolo/spikes402/pow"
+	"golang.org/x/text/unicode/norm"
 )
 
 // Login protection: every attempt on a configured login route costs an
@@ -70,7 +71,12 @@ const (
 	loginBusyFor  = 60      // seconds
 	loginNoIPKey  = "no-ip" // one shared bucket for clients without an IP
 
+	// A challenge lives long enough for a slow browser to solve it (see
+	// loginTTL): at least loginChallengeTTL, at most loginMaxTTL.
 	loginChallengeTTL = 120 * time.Second
+	loginMaxTTL       = 6 * time.Hour
+	loginTTLFactor    = 8  // times the expected solve time of a 4-worker browser
+	loginBrowserMs    = 86 // one 16 MiB Argon2id attempt in one browser worker (V8, measured)
 	loginPassTTL      = 60 * time.Second
 	loginMaxBody      = 16 << 10
 	loginMaxUsername  = 256
@@ -233,7 +239,32 @@ func (g *Gate) loginID(kind, v string) string {
 }
 
 func (g *Gate) loginAccount(username string) string {
-	return g.loginID("account", strings.ToLower(strings.TrimSpace(username)))
+	return g.loginID("account", loginAccountName(username))
+}
+
+// loginAccountName is the spelling of a username the counters use: every
+// spelling an origin or its database may treat as the same account gives
+// the same name, so an attacker cannot split one account's failures over
+// several spellings. It decomposes (NFKD: full-width letters, ligatures,
+// "ﬁ"), drops combining marks (accents, so "Élise" is "elise", as in
+// accent-insensitive collations like MySQL's utf8mb4_0900_ai_ci) and
+// invisible format characters (zero-width spaces, soft hyphens), trims
+// spaces and folds letter case (foldRune, plus "ß" as "ss"). Merging
+// too much only makes two spellings share counters. It does not strip
+// "+tag" from email addresses or dots in Gmail names: that is up to each
+// site.
+func loginAccountName(username string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(norm.NFKD.String(username)) {
+		switch {
+		case unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf, unicode.Other_Default_Ignorable_Code_Point, unicode.Variation_Selector):
+		case r == 'ß' || r == 'ẞ':
+			b.WriteString("SS")
+		default:
+			b.WriteRune(foldRune(r))
+		}
+	}
+	return b.String()
 }
 
 // loginNetwork is the client's /24 (IPv4) or /48 (IPv6): wide enough to
@@ -276,6 +307,20 @@ func loginPoW(level int) pow.Params {
 	return pow.Params{Algorithm: pow.Argon2id, Difficulty: level - loginLevelToArgon, MemoryMiB: LoginArgonMemoryMiB}
 }
 
+// loginTTL is how long a challenge of this level stays valid:
+// loginTTLFactor times the average solve time of a 4-worker browser,
+// within [loginChallengeTTL, loginMaxTTL]. A slower phone (2 workers,
+// slower cores) still gets about twice its average. A long life opens no
+// stockpile: a proof is bound to its account, network and level and is
+// refused as soon as the level is higher, which the first attempt makes it.
+func loginTTL(level int) time.Duration {
+	if level <= loginLevelToArgon {
+		return loginChallengeTTL
+	}
+	ms := float64(uint64(1)<<min(level-loginLevelToArgon, 40)) * loginBrowserMs / 4 * loginTTLFactor
+	return min(max(time.Duration(ms)*time.Millisecond, loginChallengeTTL), loginMaxTTL)
+}
+
 // newLoginChallenge signs a token for one attempt by acct from net.
 func (g *Gate) newLoginChallenge(route *LoginRoute, acct, net string) (loginChallenge, error) {
 	now := g.now()
@@ -287,7 +332,7 @@ func (g *Gate) newLoginChallenge(route *LoginRoute, acct, net string) (loginChal
 	}
 	id := make([]byte, 16)
 	rand.Read(id) // never fails (crypto/rand)
-	exp := now.Add(loginChallengeTTL)
+	exp := now.Add(loginTTL(level))
 	token, err := g.sign.sign(claims{
 		ID: hex.EncodeToString(id), Resource: loginResource(route), Expires: exp.Unix(),
 		PowBits: p.Difficulty, PowAlg: p.Algorithm, PowMem: p.MemoryMiB,
@@ -327,9 +372,11 @@ func (g *Gate) checkLoginClaims(value, kind, resHash, acct, net string) (claims,
 }
 
 // checkLoginWork verifies "<token>:<nonce>:<pre>" for a login challenge
-// and spends the token, right or wrong: one Argon2id check per token,
-// ever. Before that check come the cheap ones: the signature, binding,
-// spent set and the sha256d pre-check, then the rate limits. The Argon2id
+// and spends the token, right or wrong: one Argon2id check per token
+// (after a wrong nonce, another only once loginChallengeTTL has passed,
+// rate-limited like any other). Before that check come the cheap ones: the signature, binding,
+// level (a proof below the current level is refused at once), spent set
+// and the sha256d pre-check, then the rate limits. The Argon2id
 // check needs one of its network's few slots and room in the login
 // memory budget; otherwise the answer is 503, never a pass. A right
 // pre-check with a wrong nonce counts as junk from the network (worth at
@@ -344,14 +391,20 @@ func (g *Gate) checkLoginWork(r *http.Request, cred, resHash, acct, net string) 
 	if err != nil {
 		return claims{}, err
 	}
+	now := g.now()
+	// A proof below the level required now is refused before any costly
+	// step: no slot, no Argon2id check, nothing spent.
+	if c.Level < g.login.Level(c.Acct, net, now) {
+		return claims{}, errLoginLevel
+	}
 	nonce, err := strconv.ParseUint(nonceStr, 10, 64)
 	pre, err2 := strconv.ParseUint(preStr, 10, 64)
 	p := c.powParams()
 	if err != nil || err2 != nil || p != g.loginParams(c.Level) || p.Validate() != nil || c.Pre < g.loginPre {
 		return claims{}, errBadProof
 	}
-	now := g.now()
-	if g.spent.has(spentKey("PoW", c.ID)) {
+	key := loginSpentKey(c.ID)
+	if g.spent.has(key) {
 		return claims{}, errReplay
 	}
 	if !(pow.Params{Algorithm: pow.SHA256d, Difficulty: c.Pre}).Check(token, pre) {
@@ -370,15 +423,30 @@ func (g *Gate) checkLoginWork(r *http.Request, cred, resHash, acct, net string) 
 		return claims{}, &busyError{http.StatusServiceUnavailable, time.Second, "busy checking proofs of work, retry shortly"}
 	}
 	defer g.loginArgon.release(p.MemoryMiB)
-	if err := g.spent.use(spentKey("PoW", c.ID), time.Unix(c.Expires, 0), now); err != nil {
+	// Spent before the check, so one token never buys two checks at once.
+	// A wrong nonce keeps the token spent for loginChallengeTTL only, so
+	// junk cannot hold the spent set for a long challenge's whole life;
+	// a right one keeps it spent until the token expires.
+	short := min(c.Expires, now.Add(loginChallengeTTL).Unix())
+	if err := g.spent.use(key, time.Unix(short, 0), now); err != nil {
 		return claims{}, err
 	}
 	if !p.Check(token, nonce) {
 		g.login.junkProof(net, now)
 		return claims{}, errBadProof
 	}
+	if c.Expires > short {
+		if err := g.spent.extend(key, time.Unix(c.Expires, 0)); err != nil {
+			return claims{}, err
+		}
+	}
 	return c, nil
 }
+
+// loginSpentKey is a login token's entry in the spent set. Login entries
+// have their own quota there (maxLoginSpent), so logins can never fill
+// the room payers need.
+func loginSpentKey(id string) string { return "login:" + id }
 
 // loginAllow counts one login challenge or check against the client's
 // limit, its /24 or /48's and its /16 or /40's.
@@ -387,13 +455,14 @@ func (g *Gate) loginAllow(r *http.Request, now time.Time) (bool, time.Duration) 
 	if g.clientIP(r) != nil {
 		client = g.client(r)
 	}
-	if ok, wait := g.loginLim.allow(client, now); !ok {
+	coarse := g.clientCoarse(r)
+	if ok, wait := g.loginLim.allow(client, coarse, now); !ok {
 		return false, wait
 	}
-	if ok, wait := g.loginPrefixLim.allow(g.loginPrefix(r, 24, 48), now); !ok {
+	if ok, wait := g.loginPrefixLim.allow(g.loginPrefix(r, 24, 48), coarse, now); !ok {
 		return false, wait
 	}
-	return g.loginWideLim.allow(g.loginPrefix(r, 16, 40), now)
+	return g.loginWideLim.allow(g.loginPrefix(r, 16, 40), coarse, now)
 }
 
 // prefixSlots counts Argon2id checks in progress per network.
@@ -499,9 +568,6 @@ func (g *Gate) serveLoginRedeem(w http.ResponseWriter, r *http.Request) {
 	}
 	net := g.loginNetwork(r)
 	c, err := g.checkLoginWork(r, cred, c0.Resource, "", net)
-	if err == nil && c.Level < g.login.Level(c.Acct, net, g.now()) {
-		err = errLoginLevel
-	}
 	if err != nil {
 		if errors.Is(err, errBadPre) {
 			g.loginAllow(r, g.now()) // cheap to send, but still counted
@@ -543,6 +609,7 @@ func writeLoginError(w http.ResponseWriter, err error, status int) {
 // valid, unspent proof at the current level.
 func (g *Gate) serveLogin(w http.ResponseWriter, r *http.Request, route *LoginRoute, passes map[string]string) {
 	w = noStore(w)
+
 	if r.ContentLength > loginMaxBody {
 		http.Error(w, "login request too large", http.StatusRequestEntityTooLarge)
 		return
@@ -569,7 +636,7 @@ func (g *Gate) serveLogin(w http.ResponseWriter, r *http.Request, route *LoginRo
 	case passes[loginPassCookie] != "":
 		c, err = g.checkLoginClaims(passes[loginPassCookie], "loginpass", resHash, acct, net)
 		if err == nil {
-			err = g.spent.use(spentKey("PoW", c.ID), time.Unix(c.Expires, 0), g.now())
+			err = g.spent.use(loginSpentKey(c.ID), time.Unix(c.Expires, 0), g.now())
 		}
 	default:
 		g.writeLoginChallenge(w, r, route, acct, http.StatusPaymentRequired, "")
@@ -593,7 +660,7 @@ func (g *Gate) serveLogin(w http.ResponseWriter, r *http.Request, route *LoginRo
 	// The origin gets exactly the body that was checked.
 	r.ContentLength, r.TransferEncoding, r.Trailer = int64(len(body)), nil, nil
 	referer, steer := r.Header.Values("Referer"), loginSteerValues(r, body)
-	ow := &outcomeWriter{ResponseWriter: w}
+	ow := &outcomeWriter{ResponseWriter: w, host: r.Host}
 	g.opt.Next.ServeHTTP(ow, r)
 	if route.succeeded(ow, referer, steer, g.now()) {
 		g.login.succeeded(acct, net, g.now())
@@ -617,13 +684,20 @@ func (route *LoginRoute) succeeded(o *outcomeWriter, referer, steer []string, no
 	if o.status == 0 || !slices.Contains(s.Status, o.status) {
 		return false
 	}
-	loc := ""
+	loc, crossHost := "", false
 	if o.location != "" {
 		k, ok := route.redirectKey(o.location)
-		if !ok {
+		u, err := url.Parse(strings.TrimSpace(o.location))
+		if !ok || err != nil {
 			return false
 		}
 		loc = k
+		// A redirect to another host (or "//host/...") is never under
+		// location_prefix, whatever its path.
+		crossHost = u.Host != "" && !strings.EqualFold(u.Hostname(), hostOnly(o.host))
+	}
+	if s.LocationPrefix != "" && crossHost {
+		return false
 	}
 	if s.LocationNotPrefix != "" && loc != "" && strings.HasPrefix(loc, matchKey(s.LocationNotPrefix, false)) {
 		return false
@@ -641,6 +715,9 @@ func (route *LoginRoute) succeeded(o *outcomeWriter, referer, steer []string, no
 	}
 	if loc == "" {
 		return true
+	}
+	if crossHost {
+		return false
 	}
 	if s.LocationPrefix != "" {
 		// Without the Referer the origin may send a failure "back" to a
@@ -669,6 +746,14 @@ func loginHasReferer(referer []string) bool {
 	}
 	u, err := url.Parse(strings.TrimSpace(referer[0]))
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+// hostOnly is a Host header without its port.
+func hostOnly(h string) string {
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		return host
+	}
+	return strings.Trim(h, "[]")
 }
 
 // redirectKey is the canonical path (matchKey, no case) a Location or a
@@ -748,10 +833,22 @@ func loginUsername(r *http.Request, body []byte, field string) (string, error) {
 	if err != nil {
 		return "", errors.New("unreadable login query string")
 	}
-	want := loginFieldKey(field)
+	// The origin must see the method that was checked: no override
+	// header, and no "_method" field (Symfony and Laravel read it from the
+	// body or the query).
+	errOverride := errors.New("method override not allowed on a login route")
+	for _, h := range methodOverrideHeaders {
+		if len(r.Header.Values(h)) > 0 {
+			return "", errOverride
+		}
+	}
+	want, override := loginFieldKey(field), loginFieldKey("_method")
 	for k := range q {
-		if loginFieldKey(k) == want {
+		switch loginFieldKey(k) {
+		case want:
 			return "", errors.New("login username in the query string")
+		case override:
+			return "", errOverride
 		}
 	}
 	var u string
@@ -763,14 +860,20 @@ func loginUsername(r *http.Request, body []byte, field string) (string, error) {
 			return "", errors.New("unreadable login form")
 		}
 		for k, vs := range v {
-			if loginFieldKey(k) == want {
+			switch loginFieldKey(k) {
+			case want:
 				n += len(vs)
+			case override:
+				return "", errOverride
 			}
 		}
 		u = v.Get(field)
 	case "application/json":
 		if u, n, err = loginJSONUsername(body, field); err != nil {
 			return "", errors.New("unreadable login JSON")
+		}
+		if _, m, err := loginJSONUsername(body, "_method"); m > 0 || err != nil {
+			return "", errOverride
 		}
 	default:
 		return "", errors.New("login content type must be application/x-www-form-urlencoded or application/json")
@@ -855,6 +958,7 @@ func loginJSONUsername(body []byte, field string) (string, int, error) {
 // the origin answered (status 0: it wrote nothing).
 type outcomeWriter struct {
 	http.ResponseWriter
+	host     string // the request's Host
 	status   int
 	location string
 	cookies  []string

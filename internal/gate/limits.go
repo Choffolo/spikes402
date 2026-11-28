@@ -12,8 +12,16 @@ import (
 
 // maxTrackedClients bounds the memory of the rate limiter. When more
 // clients than this are active in the same minute, the newcomers share
-// one common allowance (see rateLimiter.allow).
-const maxTrackedClients = 100_000
+// an allowance per coarse prefix (an IPv4 /16, an IPv6 /32), of
+// overflowFactor times the per-client one, for up to maxOverflowKeys
+// prefixes; only beyond that one common allowance (see rateLimiter.allow).
+// So filling the table from many addresses (an IPv6 /48 holds 65,536
+// /64s) throttles new clients near the attacker, not everyone.
+const (
+	maxTrackedClients = 100_000
+	maxOverflowKeys   = 10_000
+	overflowFactor    = 8
+)
 
 // rateLimiter allows each client a fixed number of 402 answers per
 // minute (a fixed one-minute window per client).
@@ -39,9 +47,10 @@ func (l *rateLimiter) setPerMinute(n int) {
 	l.perMinute = n
 }
 
-// allow counts one 402 answer for client. If the client is over its limit
-// it returns false and how long to wait.
-func (l *rateLimiter) allow(client string, now time.Time) (bool, time.Duration) {
+// allow counts one 402 answer for client, whose coarse prefix is coarse
+// ("" if none). If the client is over its limit it returns false and how
+// long to wait.
+func (l *rateLimiter) allow(client, coarse string, now time.Time) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -54,16 +63,22 @@ func (l *rateLimiter) allow(client string, now time.Time) (bool, time.Duration) 
 		l.lastSweep = now
 	}
 
+	limit := l.perMinute
 	w, ok := l.clients[client]
 	if !ok && len(l.clients) >= maxTrackedClients {
-		client = "overflow" // too many clients at once: share one allowance
-		w, ok = l.clients[client]
+		// Too many clients at once: share one allowance per coarse prefix,
+		// or a single one when there are too many prefixes too.
+		client, limit = "overflow "+coarse, l.perMinute*overflowFactor
+		if w, ok = l.clients[client]; !ok && (coarse == "" || len(l.clients) >= maxTrackedClients+maxOverflowKeys) {
+			client, limit = "overflow", l.perMinute
+			w, ok = l.clients[client]
+		}
 	}
 	if !ok || now.Sub(w.start) >= time.Minute {
 		w = &window{start: now}
 		l.clients[client] = w
 	}
-	if w.count >= l.perMinute {
+	if w.count >= limit {
 		return false, w.start.Add(time.Minute).Sub(now)
 	}
 	w.count++

@@ -173,8 +173,12 @@ web server sits behind Spikes402. So:
   headers are capped at 32 KiB.
 - Paths that servers read differently are refused with `400 Bad Request`:
   dot segments and double slashes (`/a/../b`, `//b`), encoded slashes
-  and backslashes (`%2F`, `%5C`, `\`), and control characters (`%00`,
-  tabs, line breaks). A `%25` is refused only when a second decode would
+  and backslashes (`%2F`, `%5C`, `\`), control characters (`%00`,
+  tabs, line breaks), and `#` or `?` in the decoded path (a raw `#`,
+  which browsers never send, `%23` or `%3F`: an origin that decodes and
+  re-parses the target could cut the path there, so `/login%23x` could be
+  served as `/login`). A page whose name really contains `#` or `?` must
+  be renamed. A `%25` is refused only when a second decode would
   change whether the path is protected (so `/x/%252e%252e/premium/article`
   is still a 400; a harmless `%25` on a free page is not).
 - `protect` and `prices` patterns must not end with a trailing slash
@@ -461,14 +465,34 @@ limits below (`429`) apply to everyone behind the same address or prefix.
   the Turkish dotless `ı` and dotted `İ` for `i`; PHP's `user[]`, or `user.name` for
   `user_name`), the field in the query string, a `Content-Encoding`, a
   charset other than UTF-8, or more than one `Content-Type` header. The
-  username *value* is compared after trimming spaces and lower-casing; an
-  origin that also normalises Unicode (for example full-width letters)
-  can see two spellings as one account.
+  username *value* is counted under one spelling for every spelling an
+  origin or its database may treat as the same account: decomposed
+  (NFKC/NFKD, so full-width letters and ligatures like `ﬁ` count as plain
+  ones), without accents and other combining marks (as accent-insensitive
+  collations such as MySQL's `utf8mb4_0900_ai_ci` compare), without
+  invisible characters (zero-width spaces, soft hyphens), trimmed, and
+  case-folded (`ß` as `ss`, `İ` and `ı` as `i`). So `Élise`, `ELISE` and
+  `ｅｌｉｓｅ` share counters. Merging too much only makes two names share
+  counters. Plus-addressing (`alice+x@example.com`) and dots in Gmail
+  names are **not** merged, because only some sites treat them as one
+  mailbox: if yours does, strip them in the origin before the lookup and
+  know that an attacker can spread one account's failures over such
+  spellings (each one starts its own pair and account counters; the
+  network counter still adds them up).
+- **Method override.** The login route itself refuses (`400`) any
+  method-override header and a `_method` field in the query or the body
+  (Symfony and Laravel read it), so the origin sees the method that was
+  checked.
 - **Multipart forms are refused.** A login sent as `multipart/form-data`
   (a form with `enctype="multipart/form-data"`), or with any other content
   type, gets `400` and never reaches the origin. This is deliberate, so
   parsing stays small. Make the login form use the default encoding (no
   `enctype`), or send JSON.
+- **Redirects to another host.** A `Location` on another host (or
+  `//host/...`) is never under `location_prefix`, and without
+  `set_cookie` never a success at all. If the origin redirects to a
+  canonical host other than the one the browser asked for (`www.` versus
+  none), use `set_cookie`.
 - **Forwarding.** The origin gets exactly the body that was checked, with
   its length set and no chunked encoding or trailers.
 - **Precedence.** Login routes are checked before `protect`. Neither
@@ -514,10 +538,17 @@ repeat the request with `Authorization: PoW <challenge>:<nonce>:<pre>`.
 
 Checking a proof costs the server one Argon2id hash, so it only does so
 after cheap checks pass: the signature and binding of the challenge, that
-it is unspent, and the sha256d pre-check. The pre-check is 18 bits: about
+its level is still enough (a proof below the current level is refused
+before anything else), that it is unspent, and the sha256d pre-check. The pre-check is 18 bits: about
 2^18 hashes for the client (~0.15 s in a browser worker, more than the
-server's Argon2id check in native code) and one for the server. Each
-challenge is checked with Argon2id at most once. Then:
+server's Argon2id check in native code) and one for the server. A
+challenge is checked with Argon2id once; after a wrong nonce it can be
+checked again only after 2 minutes (it stays spent that long, not for
+its whole life, so junk cannot fill the spent-token list with long
+challenges). A right proof stays spent until its challenge expires.
+Login tokens may use at most 250,000 of the 1,000,000 places in the
+spent-token list, so a login flood cannot refuse payers ("server busy").
+Then:
 
 - **Rate limits** on login challenges and checks together: per client
   (`challenges_per_minute`, per IPv4 address or IPv6 /64), per IPv4 /24
@@ -550,6 +581,7 @@ the origin. That covers:
 - a body that is too large;
 - an unknown content type, no username, or an ambiguous one (see above);
 - a method other than the route's, or a near path (see above);
+- a method-override header or `_method` field;
 - a wrong, reused, expired or underpriced proof;
 - a missing or wrong pre-check;
 - a full login Argon2id budget, or a network's share of it (`503`).
@@ -601,6 +633,20 @@ browser figure assumes ~86 ms per attempt per worker, measured with the
 JavaScript solver in V8. Phones are slower; more cores are faster. All
 times are averages.
 
+A challenge stays valid for 8 times the browser average of its level,
+at least 2 minutes and at most 6 hours (2 minutes up to level 25, then
+about 3, 6, 24 and 94 minutes at levels 26, 27, 29 and 31, and 6 hours
+at 33),
+so a raised level makes a login slow, never impossible because the
+challenge expired first. A phone about four times slower than the table
+still gets twice its average. A long life opens no stockpile: a proof is
+bound to its account, network and level, and once one attempt is made
+the level is higher and the other proofs are refused. What can still
+cost an honest browser its work is the level rising while it solves (a
+new failure on the same account from its network, the account's +4, or
+a surge starting): the proof is refused and the script must start over
+at the new level, which stops at 33.
+
 **What a challenge reveals**
 
 Anyone can ask for a challenge for any username, and the level is in the
@@ -624,7 +670,9 @@ It never reveals whether an account exists.
 - Their keys are HMACs (with `secret_key`) of the account name and the
   network. No username, password or IP address is kept.
 - When the table is full, the tenth of the counters that weigh least now
-  (fewest failures, decayed most) are forgotten to make room. The counters
+  (fewest failures, decayed most) are forgotten to make room. Finding
+  them scans the whole table under its lock: about 70 ms at 1,000,000
+  entries, once per 100,000 new counters, during which logins wait. The counters
   of an attack in progress weigh most and stay; newcomers start at the
   base level.
 - With a configured `secret_key`, the counters are saved every minute to
@@ -857,7 +905,10 @@ only those names are forwarded.
 
 **Bounded memory.** Rate-limit windows, open offers and used tokens are
 evicted when they expire. Hard caps also apply: 100,000 tracked clients per
-minute (newcomers beyond that share one allowance), `max_pending_invoices`
+minute (newcomers beyond that share an allowance per IPv4 /16 or IPv6
+/32, 8 times a client's, for up to 10,000 such prefixes, then one
+common allowance; so filling the table from many IPv6 /64s throttles
+newcomers near the attacker, not everyone), `max_pending_invoices`
 open invoices (counted until they expire, even if the visitor later pays
 with proof-of-work), and 1,000,000 used tokens. When the used-token list
 is full, new redemptions are refused ("server busy") rather than risking a

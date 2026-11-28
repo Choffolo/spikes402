@@ -29,30 +29,34 @@
   }
   var WORKER = "__WORKER__", POW_WORKER = "__POW_WORKER__";
 
-  // run starts one worker and resolves with the first nonce it finds.
-  function run(url, msg, workers) {
+  // run starts one worker and resolves with the first nonce it finds. It
+  // adds to each list a function that stops the worker (and rejects).
+  function run(url, msg, lists) {
     return new Promise(function (resolve, reject) {
       var w = new Worker(url);
-      workers.push(w);
+      var kill = function () { w.terminate(); reject(new Error("stopped")); };
+      lists.forEach(function (l) { l.push(kill); });
       w.onmessage = function (e) { if (e.data.nonce !== undefined) { w.terminate(); resolve(e.data.nonce); } };
       w.onerror = function () { reject(new Error("worker failed")); };
       w.postMessage(msg);
     });
   }
 
+  function stop(list) { list.forEach(function (kill) { kill(); }); }
+
   // solve finds the Argon2id nonce (several workers) and the sha256d
   // pre-check (one worker) at the same time: "challenge:nonce:pre".
-  function solve(ch) {
+  // job.kills gets every worker, so a replaced job stops its work.
+  function solve(ch, job) {
     var argonW = [], preW = [];
-    function stop(list) { list.forEach(function (w) { w.terminate(); }); }
     var mem = navigator.deviceMemory || 4;
     var n = Math.max(1, Math.min(navigator.hardwareConcurrency || 2, mem < 4 ? 2 : 8));
     var argon = [], pre;
     try {
       for (var i = 0; i < n; i++) {
-        argon.push(run(WORKER, { challenge: ch.challenge, difficulty: ch.difficulty, memoryMiB: ch.memory_mib, start: i, step: n }, argonW));
+        argon.push(run(WORKER, { challenge: ch.challenge, difficulty: ch.difficulty, memoryMiB: ch.memory_mib, start: i, step: n }, [argonW, job.kills]));
       }
-      pre = run(POW_WORKER, { challenge: ch.challenge, difficulty: ch.precheck_difficulty, start: 0 }, preW);
+      pre = run(POW_WORKER, { challenge: ch.challenge, difficulty: ch.precheck_difficulty, start: 0 }, [preW, job.kills]);
     } catch (err) { stop(argonW); stop(preW); return Promise.reject(err); }
     var nonce = Promise.race(argon).then(function (v) { stop(argonW); return v; });
     return Promise.all([nonce, pre]).then(function (r) {
@@ -76,6 +80,7 @@
       var route = routeOf(form, submitter);
       var key = route.method + " " + route.path + " " + user;
       if (job && job.key === key && Date.now() < job.until) return job.proof;
+      if (job) stop(job.kills); // another user or route, or expired: stop its work
       var body = JSON.stringify({ method: route.method, path: route.path, username: user });
       var proof = fetch("/.spikes402/login-challenge", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: body, credentials: "same-origin", cache: "no-store"
@@ -84,9 +89,10 @@
         return r.json();
       }).then(function (ch) {
         j.until = Date.parse(ch.expires_at) - 10000;
-        return solve(ch);
+        if (job !== j) throw new Error("replaced");
+        return solve(ch, j);
       });
-      var j = job = { key: key, until: Date.now() + 110000, proof: proof };
+      var j = job = { key: key, until: Date.now() + 110000, proof: proof, kills: [] };
       proof.catch(function () { if (job === j) job = null; });
       return proof;
     }
@@ -98,7 +104,7 @@
       e.preventDefault();
       var submitter = e.submitter;
       if (busy) return;
-      var proof = start(submitter);
+      var proof = start(submitter), mine = job;
       if (!proof) return;
       busy = true;
       status.textContent = textWorking;
@@ -107,7 +113,7 @@
           method: "POST", headers: { Authorization: "PoW " + p }, credentials: "same-origin", cache: "no-store"
         });
       }).then(function (r) {
-        job = null; // one proof per attempt
+        if (job === mine) job = null; // one proof per attempt
         if (r.status !== 204) throw new Error("proof refused (" + r.status + ")");
         status.textContent = "";
         if (form.requestSubmit) {
@@ -115,7 +121,7 @@
           try { form.requestSubmit(submitter && submitter.form === form ? submitter : undefined); } finally { ready = false; }
         } else HTMLFormElement.prototype.submit.call(form);
       }).catch(function (err) {
-        job = null;
+        if (job === mine) { stop(mine.kills); job = null; }
         status.textContent = textFailed.replace("{error}", err.message);
       }).then(function () { busy = false; });
     });
