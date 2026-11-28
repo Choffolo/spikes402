@@ -14,6 +14,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -98,9 +99,12 @@ type Options struct {
 	// LoginSurge are the site-wide failed logins per minute that add one
 	// and two levels for everyone. Zero means DefaultLoginSurge.
 	LoginSurge [2]int
-	// LoginHosts are this site's host names (public_hosts): a login
-	// redirect to one of them is not a redirect to another host.
-	LoginHosts []string
+	// LoginHosts are this site's host names (public_hosts) and
+	// LoginOriginHost the origin URL's host: a login redirect to one of
+	// them is not a redirect to another host. The request's own Host is
+	// never trusted for this.
+	LoginHosts      []string
+	LoginOriginHost string
 }
 
 // PriceRule maps a path pattern (same syntax as Protect) to a price.
@@ -142,6 +146,7 @@ type Gate struct {
 	loginWideLim   *rateLimiter               // the same, per /16 or /40
 	loginSlots     *prefixSlots               // Argon2id checks in progress per /24 or /48
 	loginArgon     *argonBudget               // Argon2id memory for login checks only
+	loginHosts     []string                   // LoginHosts and LoginOriginHost
 	loginBusyUntil atomic.Int64               // unix seconds: until then, new challenges get a harder pre-check
 
 	nodeLog  rateLog // why no invoice was offered
@@ -192,6 +197,7 @@ func New(opt Options) *Gate {
 		g.loginLim = newRateLimiter(opt.ChallengesPerMinute)
 		g.loginPrefixLim = newRateLimiter(loginPrefixFactor * opt.ChallengesPerMinute)
 		g.loginWideLim = newRateLimiter(loginWideFactor * opt.ChallengesPerMinute)
+		g.loginHosts = slices.DeleteFunc(append(slices.Clone(opt.LoginHosts), opt.LoginOriginHost), func(h string) bool { return h == "" })
 		g.loginSlots = newPrefixSlots(loginPrefixSlots)
 		g.loginArgon = newArgonBudget(loginArgonMaxMiB)
 		g.loginParams = loginPoW

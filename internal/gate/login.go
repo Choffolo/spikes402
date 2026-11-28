@@ -675,7 +675,7 @@ func (g *Gate) serveLogin(w http.ResponseWriter, r *http.Request, route *LoginRo
 	// The origin gets exactly the body that was checked.
 	r.ContentLength, r.TransferEncoding, r.Trailer = int64(len(body)), nil, nil
 	referer, steer := r.Header.Values("Referer"), loginSteerValues(r, body)
-	ow := &outcomeWriter{ResponseWriter: w, host: r.Host, hosts: g.opt.LoginHosts}
+	ow := &outcomeWriter{ResponseWriter: w, hosts: g.loginHosts}
 	g.opt.Next.ServeHTTP(ow, r)
 	if route.succeeded(ow, referer, steer, g.now()) {
 		g.login.succeeded(acct, net, g.now())
@@ -708,9 +708,12 @@ func (route *LoginRoute) succeeded(o *outcomeWriter, referer, steer []string, no
 		}
 		loc = k
 		// A redirect to another host (or "//host/...") is never under
-		// location_prefix, whatever its path.
-		crossHost = u.Host != "" && !strings.EqualFold(u.Hostname(), hostOnly(o.host)) &&
-			!slices.ContainsFunc(o.hosts, func(h string) bool { return strings.EqualFold(u.Hostname(), hostOnly(h)) })
+		// location_prefix, whatever its path. Only o.hosts (public_hosts
+		// and the origin's own host) are this site: never the request's
+		// Host or X-Forwarded-Host, which the client chooses and an
+		// origin may echo into Location.
+		crossHost = u.Host != "" && (u.Hostname() == "" ||
+			!slices.ContainsFunc(o.hosts, func(h string) bool { return strings.EqualFold(u.Hostname(), hostOnly(h)) }))
 	}
 	if s.LocationPrefix != "" && crossHost {
 		return false
@@ -982,8 +985,7 @@ func loginJSONUsername(body []byte, field string) (string, int, error) {
 // the origin answered (status 0: it wrote nothing).
 type outcomeWriter struct {
 	http.ResponseWriter
-	host     string   // the request's Host
-	hosts    []string // and the site's other names (LoginHosts)
+	hosts    []string // the names a Location may carry (see Gate.loginHosts)
 	status   int
 	location string
 	cookies  []string

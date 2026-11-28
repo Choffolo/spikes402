@@ -318,12 +318,12 @@ func TestLoginOverrideAndHost(t *testing.T) {
 		"/home": true, "https://site.example/home": true, "https://SITE.example:8443/home": true,
 		"https://evil.example/home": false, "//evil.example/home": false, "https://site.example.evil/home": false,
 	} {
-		if got := route.succeeded(&outcomeWriter{host: "site.example", status: 302, location: loc}, ref, nil, now); got != want {
+		if got := route.succeeded(&outcomeWriter{hosts: []string{"site.example"}, status: 302, location: loc}, ref, nil, now); got != want {
 			t.Errorf("%q: got %v, want %v", loc, got, want)
 		}
 	}
 	// public_hosts: www and apex are one site.
-	www := &outcomeWriter{host: "example.com", hosts: []string{"example.com", "www.example.com"}, status: 302}
+	www := &outcomeWriter{hosts: []string{"example.com", "www.example.com"}, status: 302}
 	for loc, want := range map[string]bool{"https://www.example.com/home": true, "https://WWW.example.com:443/home": true, "https://evil.example/home": false} {
 		www.location = loc
 		if got := route.succeeded(www, ref, nil, now); got != want {
@@ -436,6 +436,56 @@ func TestLoginAccountNameLetters(t *testing.T) {
 			if loginAccountName(v) != loginAccountName(g[0]) {
 				t.Errorf("%q and %q are different accounts", v, g[0])
 			}
+		}
+	}
+}
+
+// R9: the request's Host is never this site. An origin that echoes the
+// Host (preserve_host, or a framework trusting X-Forwarded-Host) into
+// Location cannot turn an attacker's "Host: evil" into a success, with or
+// without public_hosts; only public_hosts and the origin's own host count.
+func TestLoginAttackerHostEchoedIntoLocation(t *testing.T) {
+	echo := func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if xfh := r.Header.Get("X-Forwarded-Host"); xfh != "" {
+			host = xfh
+		}
+		http.Redirect(w, r, "https://"+host+"/home", http.StatusFound)
+	}
+	run := func(name string, hosts []string, user, host, xfh string, wantLevel int) {
+		t.Helper()
+		f := newLoginFixture(t)
+		f.gate.loginHosts = hosts
+		f.respond = echo
+		for range 3 {
+			ch := decodeChallenge(t, f.do(loginReq(user, "192.0.2.1", "")))
+			r := loginReq(user, "192.0.2.1", solveLogin(t, ch))
+			r.Host = host
+			if xfh != "" {
+				r.Header.Set("X-Forwarded-Host", xfh)
+			}
+			f.do(r)
+		}
+		if ch := decodeChallenge(t, f.do(loginReq(user, "192.0.2.1", ""))); ch.Level != wantLevel {
+			t.Errorf("%s: level %d, want %d", name, ch.Level, wantLevel)
+		}
+	}
+	failed := LoginBaseLevel + 3
+	run("no public_hosts, attacker Host", nil, "alice", "evil.example", "", failed)
+	run("no public_hosts, attacker X-Forwarded-Host", nil, "alice", "example.com", "evil.example", failed)
+	run("origin host only, attacker Host", []string{"127.0.0.1:8080"}, "alice", "evil.example", "", failed)
+	run("public_hosts, attacker Host", []string{"example.com"}, "alice", "evil.example", "", failed)
+	run("public_hosts, attacker X-Forwarded-Host", []string{"example.com"}, "alice", "example.com", "evil.example", failed)
+	run("public_hosts, honest Host", []string{"example.com"}, "alice", "example.com", "", LoginBaseLevel)
+	run("origin host, rewritten Host", []string{"127.0.0.1:8080"}, "alice", "127.0.0.1:8080", "", LoginBaseLevel)
+
+	// Relative Locations need no host list.
+	now := time.Unix(1_800_000_000, 0)
+	route := LoginRoute{Path: "/login", Success: LoginSuccess{Status: []int{302}, LocationPrefix: "/home"}}
+	ref := []string{"https://site.example/login"}
+	for loc, want := range map[string]bool{"/home": true, "home": true, "https://site.example/home": false, "https://:443/home": false} {
+		if got := route.succeeded(&outcomeWriter{status: 302, location: loc}, ref, nil, now); got != want {
+			t.Errorf("no hosts, %q: got %v, want %v", loc, got, want)
 		}
 	}
 }

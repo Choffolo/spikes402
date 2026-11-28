@@ -136,7 +136,7 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `max_pending_invoices` | Open (unpaid, unexpired) invoices at once; beyond that, proof-of-work only | `10000` |
 | `client_ip_header` | Header holding the visitor's IP when Spikes402 runs behind your own proxy, e.g. `"X-Forwarded-For"`, `"X-Real-IP"`, `"CF-Connecting-IP"` | `""` (use the connection's address) |
 | `trusted_proxies` | IPs or CIDR ranges of those proxies, e.g. `["127.0.0.1"]`. The header is ignored from anyone else. Required with `client_ip_header` or `preserve_host` | `[]` |
-| `preserve_host` | Send the public `Host` (or `X-Forwarded-Host`) to the origin, for name-based virtual hosts. Only from `trusted_proxies`; if `public_hosts` is set, only those names are forwarded. Off: the origin sees the host of `origin` | `false` |
+| `preserve_host` | Send the public `Host` (or `X-Forwarded-Host`) to the origin, for name-based virtual hosts. Only from `trusted_proxies`; if `public_hosts` is set, only those names are forwarded (required with `login_routes`). Off: the origin sees the host of `origin` | `false` |
 | `max_connections` | Client connections open at once; more wait in the queue | `10000` |
 | `read_timeout_seconds` / `write_timeout_seconds` | Longest time to receive a whole request / send a whole response (raise the second for very large downloads or streaming) | `60` / `300` |
 | `unsafe_allow_dangerous_config` | Accept settings refused by default: `trusted_proxies` or `admin.allowed_ips` covering the whole internet (`0.0.0.0/0`, `::/0`), or the fake backend on a non-localhost address | `false` |
@@ -500,14 +500,27 @@ limits below (`429`) apply to everyone behind the same address or prefix.
   `enctype`), or send JSON.
 - **Redirects to another host.** A `Location` on another host (or
   `//host/...`) is never under `location_prefix`, and without
-  `set_cookie` never a success at all. The names in `public_hosts` count
-  as this site, so list both `example.com` and `www.example.com` there if
-  the origin redirects from one to the other. **Set `public_hosts`
-  whenever Spikes402 sits behind another proxy that rewrites `Host`**
-  (nginx's `proxy_pass` sends the upstream's name by default): the proxy
-  then sees `Host: 127.0.0.1:8402` while the origin redirects to
-  `https://example.com/...`, and without `public_hosts` every honest login
-  counts as a failure.
+  `set_cookie` never a success at all. Only two kinds of name count as
+  this site: the names in `public_hosts` and the host of `origin`. The
+  request's own `Host` and `X-Forwarded-Host` never do, because the client
+  chooses them and an origin may echo them into `Location`
+  (`Host: evil.example` and a redirect to `https://evil.example/home`
+  would otherwise pass as a success). Relative redirects (`/home`) are
+  always fine. So:
+  - Without `public_hosts`, a redirect counts only if it is relative or
+    names the host of `origin`. This is enough when the origin sees
+    `origin`'s host, which is the default: Spikes402 sends that `Host`
+    and, from untrusted peers, that `X-Forwarded-Host`.
+  - List both `example.com` and `www.example.com` in `public_hosts` if
+    the origin redirects from one to the other.
+  - **Set `public_hosts` whenever the origin builds redirects from the
+    public name.** This happens behind a proxy that rewrites `Host`
+    (nginx's `proxy_pass` sends the upstream's name by default) with an
+    app that trusts `X-Forwarded-Host`, or with a fixed `APP_URL`. Without
+    it, every honest login counts as a failure. That is safe but
+    unusable.
+  - `preserve_host` with `login_routes` is refused at startup unless
+    `public_hosts` is set.
 - **Forwarding.** The origin gets exactly the body that was checked, with
   its length set and no chunked encoding or trailers.
 - **Precedence.** Login routes are checked before `protect`. Neither
@@ -918,7 +931,8 @@ headers are stripped and replaced with the connection address. By default
 the `Host` sent to the origin is the host of `origin`. Set `preserve_host`
 if your website is a name-based virtual host and must see the public host
 name; that only applies to trusted proxies, and if `public_hosts` is set,
-only those names are forwarded.
+only those names are forwarded. With `login_routes`, `preserve_host`
+requires `public_hosts`.
 
 **Bounded memory.** Rate-limit windows, open offers and used tokens are
 evicted when they expire. Hard caps also apply: 100,000 tracked clients per

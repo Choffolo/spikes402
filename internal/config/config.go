@@ -396,6 +396,9 @@ func (c *Config) complete() error {
 	if c.PreserveHost && len(c.TrustedProxies) == 0 {
 		return errors.New(`"preserve_host" needs "trusted_proxies": the public Host is only forwarded from those addresses`)
 	}
+	if c.PreserveHost && len(c.LoginRoutes) > 0 && len(c.PublicHosts) == 0 {
+		return errors.New(`"preserve_host" with "login_routes" needs "public_hosts": a login redirect's host is only trusted if it is listed there`)
+	}
 	if c.SecretKey != "" && len(c.SecretKey) < 32 {
 		return errors.New(`"secret_key" must be at least 32 characters (try: openssl rand -hex 32)`)
 	}

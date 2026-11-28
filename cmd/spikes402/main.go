@@ -186,10 +186,11 @@ func main() {
 		SpentStore:   spentStore,
 		SpentRecords: spentRecords,
 
-		LoginRoutes: cfg.LoginRoutes,
-		LoginState:  loginState,
-		LoginSurge:  *cfg.LoginSurge,
-		LoginHosts:  cfg.PublicHosts,
+		LoginRoutes:     cfg.LoginRoutes,
+		LoginState:      loginState,
+		LoginSurge:      *cfg.LoginSurge,
+		LoginHosts:      cfg.PublicHosts,
+		LoginOriginHost: origin.Host,
 	})
 	mux.Handle("/", g)
 
