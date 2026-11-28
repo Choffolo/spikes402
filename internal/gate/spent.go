@@ -34,6 +34,8 @@ type spentSet struct {
 	max       int
 	logins    int // entries of kind spentKindLogin
 	maxLogin  int // at most this many of them
+	junk      int // login entries with a wrong nonce (retries > 0)
+	maxJunk   int // at most this many of them
 	inserts   int
 	lastSweep time.Time
 	store     SpentStore
@@ -69,20 +71,30 @@ const (
 const maxSpent = 1_000_000
 
 // maxLoginSpent is the share of maxSpent login tokens may use, so a
-// flood of logins cannot make payers' tokens errBusy. Login entries are
-// bounded by the login Argon2id throughput (one entry per check) times
-// loginChallengeTTL for wrong proofs, which is well below this.
+// flood of logins cannot make payers' tokens errBusy. Entries of right
+// proofs are bounded by the attacker's work (a long-lived token is an
+// expensive one), junk ones by maxLoginJunk.
 const maxLoginSpent = 250_000
 
+// maxLoginJunk caps the login entries of tokens checked with a wrong nonce
+// (see wrongLogin). They live until their token expires, up to hours, so
+// past the cap one of them is forgotten: that can only give a junk token
+// another check (still rate-limited), never replay a right proof.
+const maxLoginJunk = 100_000
+
 func newSpentSet() *spentSet {
-	return &spentSet{ids: make(map[spentID]spentEntry), max: maxSpent, maxLogin: maxLoginSpent}
+	return &spentSet{ids: make(map[spentID]spentEntry), max: maxSpent, maxLogin: maxLoginSpent, maxJunk: maxLoginJunk}
 }
 
 func (s *spentSet) load(recs []persist.SpentRecord) {
 	for _, r := range recs {
 		k := compactID(r.ID)
-		if _, seen := s.ids[k]; !seen && k[0] == spentKindLogin {
+		s.del(k)
+		if k[0] == spentKindLogin {
 			s.logins++
+			if r.Retries > 0 {
+				s.junk++
+			}
 		}
 		s.ids[k] = spentEntry{expires: r.Expires, first: r.First, retries: r.Retries, released: r.Released}
 	}
@@ -90,8 +102,11 @@ func (s *spentSet) load(recs []persist.SpentRecord) {
 
 // del forgets one entry. s.mu must be held.
 func (s *spentSet) del(k spentID) {
-	if _, ok := s.ids[k]; ok && k[0] == spentKindLogin {
+	if e, ok := s.ids[k]; ok && k[0] == spentKindLogin {
 		s.logins--
+		if e.retries > 0 {
+			s.junk--
+		}
 	}
 	delete(s.ids, k)
 }
@@ -140,7 +155,7 @@ func (s *spentSet) use(id string, expires, now time.Time) error {
 	s.mu.Lock()
 	key := compactID(id)
 	if e, seen := s.ids[key]; seen {
-		if e.released && now.Unix() < e.first+int64(retryWindow.Seconds()) {
+		if e.released && key[0] != spentKindLogin && now.Unix() < e.first+int64(retryWindow.Seconds()) {
 			prev := e
 			e.released = false
 			s.ids[key] = e // reserve
@@ -189,24 +204,81 @@ func (s *spentSet) use(id string, expires, now time.Time) error {
 	return nil
 }
 
-// extend keeps a spent id until a later expiry (see checkLoginWork). It
-// returns errBusy if id is not spent or the write fails.
-func (s *spentSet) extend(id string, expires time.Time) error {
+// beginLogin reserves a login token for one Argon2id check (see
+// checkLoginWork); the entry lives until the token expires. A token whose
+// first check had a wrong nonce may be checked once more, no sooner than
+// retryAfter later; any other token already seen is a replay.
+func (s *spentSet) beginLogin(id string, expires, now time.Time, retryAfter time.Duration) error {
+	s.mu.Lock()
+	key := compactID(id)
+	e, seen := s.ids[key]
+	if !seen {
+		s.mu.Unlock()
+		return s.use(id, expires, now)
+	}
+	if !e.released || e.retries != 1 || now.Unix() < e.first+int64(retryAfter/time.Second) {
+		s.mu.Unlock()
+		return errReplay
+	}
+	prev := e
+	e.released = false
+	s.ids[key] = e // reserve: a concurrent retry is a replay
+	s.mu.Unlock()
+	if err := s.persist(id, e); err != nil {
+		s.mu.Lock()
+		s.ids[key] = prev
+		s.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+// wrongLogin records a wrong nonce for a token reserved by beginLogin.
+// After the first, the token may be checked once more (released, retries
+// 1); after the second it stays spent until it expires. Past maxJunk such
+// entries, another one is forgotten (see maxLoginJunk).
+func (s *spentSet) wrongLogin(id string, now time.Time) {
 	s.mu.Lock()
 	key := compactID(id)
 	e, ok := s.ids[key]
 	if !ok {
 		s.mu.Unlock()
-		return errBusy
+		return
 	}
-	if expires.Unix() <= e.expires {
-		s.mu.Unlock()
-		return nil
+	if e.retries == 0 {
+		if s.junk >= s.maxJunk {
+			for k, o := range s.ids {
+				if k[0] == spentKindLogin && o.retries > 0 && k != key {
+					s.del(k)
+					break
+				}
+			}
+		}
+		s.junk++
 	}
-	e.expires = expires.Unix()
+	e.retries++
+	e.released = e.retries == 1
+	e.first = now.Unix()
 	s.ids[key] = e
 	s.mu.Unlock()
-	return s.persist(id, e)
+	_ = s.persist(id, e) // if the disk fails, memory still holds it
+}
+
+// rightLogin records a right nonce for a token reserved by beginLogin,
+// after a wrong one: it is no longer junk, so it is never forgotten early.
+func (s *spentSet) rightLogin(id string) {
+	s.mu.Lock()
+	key := compactID(id)
+	e, ok := s.ids[key]
+	if !ok || e.retries == 0 {
+		s.mu.Unlock()
+		return
+	}
+	e.retries = 0
+	s.junk--
+	s.ids[key] = e
+	s.mu.Unlock()
+	_ = s.persist(id, e)
 }
 
 // persist writes a record to disk. It must be called without s.mu held.

@@ -189,6 +189,7 @@ func main() {
 		LoginRoutes: cfg.LoginRoutes,
 		LoginState:  loginState,
 		LoginSurge:  *cfg.LoginSurge,
+		LoginHosts:  cfg.PublicHosts,
 	})
 	mux.Handle("/", g)
 

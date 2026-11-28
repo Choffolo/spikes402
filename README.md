@@ -174,11 +174,12 @@ web server sits behind Spikes402. So:
 - Paths that servers read differently are refused with `400 Bad Request`:
   dot segments and double slashes (`/a/../b`, `//b`), encoded slashes
   and backslashes (`%2F`, `%5C`, `\`), control characters (`%00`,
-  tabs, line breaks), and `#` or `?` in the decoded path (a raw `#`,
-  which browsers never send, `%23` or `%3F`: an origin that decodes and
-  re-parses the target could cut the path there, so `/login%23x` could be
-  served as `/login`). A page whose name really contains `#` or `?` must
-  be renamed. A `%25` is refused only when a second decode would
+  tabs, line breaks), and a `#` or `?` in the decoded path (a raw `#`,
+  which browsers never send, `%23` or `%3F`) where an origin that decodes
+  and re-parses the target could cut the path into something else: when
+  the cut path is on or near a login route (`/login%23x` could be served
+  as `/login`), or is protected differently from the whole path. Other
+  paths keep their `#` and `?` (`/wiki/C%23` is served). A `%25` is refused only when a second decode would
   change whether the path is protected (so `/x/%252e%252e/premium/article`
   is still a 400; a harmless `%25` on a free page is not).
 - `protect` and `prices` patterns must not end with a trailing slash
@@ -460,9 +461,10 @@ limits below (`429`) apply to everyone behind the same address or prefix.
   find `username_field`. It never stores or logs the body. A request the
   origin could read as another username is refused with `400`: the field
   given more than once under any spelling some framework merges with it
-  (letter case under full Unicode case folding plus upper- and
-  lower-casing, so `User`, `uſer` with a long s, a Kelvin sign for `k`, or
-  the Turkish dotless `ı` and dotted `İ` for `i`; PHP's `user[]`, or `user.name` for
+  (NFKC, so full-width `ｕｓｅｒ`; invisible characters dropped; letter
+  case under full Unicode case folding plus upper- and lower-casing, so
+  `User`, `uſer` with a long s, a Kelvin sign for `k`, or the Turkish
+  dotless `ı` and dotted `İ` for `i`; PHP's `user[]`, or `user.name` for
   `user_name`), the field in the query string, a `Content-Encoding`, a
   charset other than UTF-8, or more than one `Content-Type` header. The
   username *value* is counted under one spelling for every spelling an
@@ -480,9 +482,12 @@ limits below (`429`) apply to everyone behind the same address or prefix.
   spellings (each one starts its own pair and account counters; the
   network counter still adds them up).
 - **Method override.** The login route itself refuses (`400`) any
-  method-override header and a `_method` field in the query or the body
-  (Symfony and Laravel read it), so the origin sees the method that was
-  checked.
+  method-override header (`X-HTTP-Method-Override`, `X-HTTP-Method`,
+  `X-Method-Override`, `X-Original-Method`, `X-Forwarded-Method`) and a
+  `_method` field in the query or the body under any spelling the
+  username field is matched with (Symfony and Laravel read it), so the
+  origin sees the method that was checked. A front proxy must not add
+  these headers to every request.
 - **Multipart forms are refused.** A login sent as `multipart/form-data`
   (a form with `enctype="multipart/form-data"`), or with any other content
   type, gets `400` and never reaches the origin. This is deliberate, so
@@ -490,9 +495,9 @@ limits below (`429`) apply to everyone behind the same address or prefix.
   `enctype`), or send JSON.
 - **Redirects to another host.** A `Location` on another host (or
   `//host/...`) is never under `location_prefix`, and without
-  `set_cookie` never a success at all. If the origin redirects to a
-  canonical host other than the one the browser asked for (`www.` versus
-  none), use `set_cookie`.
+  `set_cookie` never a success at all. The names in `public_hosts` count
+  as this site, so list both `example.com` and `www.example.com` there if
+  the origin redirects from one to the other.
 - **Forwarding.** The origin gets exactly the body that was checked, with
   its length set and no chunked encoding or trailers.
 - **Precedence.** Login routes are checked before `protect`. Neither
@@ -542,13 +547,15 @@ its level is still enough (a proof below the current level is refused
 before anything else), that it is unspent, and the sha256d pre-check. The pre-check is 18 bits: about
 2^18 hashes for the client (~0.15 s in a browser worker, more than the
 server's Argon2id check in native code) and one for the server. A
-challenge is checked with Argon2id once; after a wrong nonce it can be
-checked again only after 2 minutes (it stays spent that long, not for
-its whole life, so junk cannot fill the spent-token list with long
-challenges). A right proof stays spent until its challenge expires.
-Login tokens may use at most 250,000 of the 1,000,000 places in the
-spent-token list, so a login flood cannot refuse payers ("server busy").
-Then:
+challenge is checked with Argon2id at most twice: after a wrong nonce,
+once more, no sooner than 2 minutes later; then it stays spent until it
+expires. Only its holder, from its network, can send it, so nobody else
+can use up an honest user's retry. Login tokens may use at most 250,000
+of the 1,000,000 places in the spent-token list, so a login flood cannot
+refuse payers ("server busy"). Of those, at most 100,000 hold tokens
+checked with a wrong nonce; past that one of them is forgotten, which can
+only give that junk token its checks back (still rate-limited), never
+replay a right proof. Then:
 
 - **Rate limits** on login challenges and checks together: per client
   (`challenges_per_minute`, per IPv4 address or IPv6 /64), per IPv4 /24
@@ -1240,6 +1247,8 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
 - Spent tokens are remembered in memory (about **128 MiB** at the cap of
   1,000,000 unexpired tokens, ~134 bytes per entry) and, when `secret_key`
   is set, also on disk in `state_dir` so a restart cannot replay them.
+  Expired ones are dropped from memory every 5 minutes and from the disk
+  snapshot at each compaction.
   Run **one** proxy instance. Without a configured `secret_key` (the fake
   backend's random key), a restart still forgets them.
 - Rate limits are per IP. A botnet with many addresses can use up the global

@@ -78,6 +78,7 @@ const (
 	loginTTLFactor    = 8  // times the expected solve time of a 4-worker browser
 	loginBrowserMs    = 86 // one 16 MiB Argon2id attempt in one browser worker (V8, measured)
 	loginPassTTL      = 60 * time.Second
+	loginRetryAfter   = 2 * time.Minute // a token's one retry after a wrong nonce, no sooner
 	loginMaxBody      = 16 << 10
 	loginMaxUsername  = 256
 	loginPassCookie   = passPrefix + "login"
@@ -125,7 +126,7 @@ func CheckLoginRoutes(routes []LoginRoute) error {
 			return fmt.Errorf("login_routes[%d].method must be POST, PUT or PATCH", i)
 		}
 		if !strings.HasPrefix(r.Path, "/") || r.Path == "/" || strings.HasPrefix(r.Path, ReservedPrefix) ||
-			strings.ContainsAny(r.Path, "*?[]\\") || checkPath(&url.URL{Path: r.Path}, nil) != "" {
+			strings.ContainsAny(r.Path, "*?#[]\\") || checkPath(&url.URL{Path: r.Path}, nil, nil) != "" {
 			return fmt.Errorf("login_routes[%d].path %q must be an exact canonical path outside %s", i, r.Path, ReservedPrefix)
 		}
 		if r.UsernameField == "" || len(r.UsernameField) > 64 {
@@ -192,7 +193,7 @@ func (g *Gate) nearLoginRoutes(p string) []*LoginRoute {
 
 // methodOverrideHeaders let some frameworks treat a request as another
 // method than the one it was sent with.
-var methodOverrideHeaders = []string{"X-HTTP-Method-Override", "X-HTTP-Method", "X-Method-Override"}
+var methodOverrideHeaders = []string{"X-HTTP-Method-Override", "X-HTTP-Method", "X-Method-Override", "X-Original-Method", "X-Forwarded-Method"}
 
 // loginPathPassThrough reports whether a request on or near a login path
 // (see nearLoginRoutes) that is not itself a route may reach the origin
@@ -372,9 +373,9 @@ func (g *Gate) checkLoginClaims(value, kind, resHash, acct, net string) (claims,
 }
 
 // checkLoginWork verifies "<token>:<nonce>:<pre>" for a login challenge
-// and spends the token, right or wrong: one Argon2id check per token
-// (after a wrong nonce, another only once loginChallengeTTL has passed,
-// rate-limited like any other). Before that check come the cheap ones: the signature, binding,
+// and spends the token, right or wrong: one Argon2id check per token,
+// and after a wrong nonce one retry at most (see spentSet.beginLogin).
+// Before that check come the cheap ones: the signature, binding,
 // level (a proof below the current level is refused at once), spent set
 // and the sha256d pre-check, then the rate limits. The Argon2id
 // check needs one of its network's few slots and room in the login
@@ -423,23 +424,20 @@ func (g *Gate) checkLoginWork(r *http.Request, cred, resHash, acct, net string) 
 		return claims{}, &busyError{http.StatusServiceUnavailable, time.Second, "busy checking proofs of work, retry shortly"}
 	}
 	defer g.loginArgon.release(p.MemoryMiB)
-	// Spent before the check, so one token never buys two checks at once.
-	// A wrong nonce keeps the token spent for loginChallengeTTL only, so
-	// junk cannot hold the spent set for a long challenge's whole life;
-	// a right one keeps it spent until the token expires.
-	short := min(c.Expires, now.Add(loginChallengeTTL).Unix())
-	if err := g.spent.use(key, time.Unix(short, 0), now); err != nil {
+	// Spent before the check, so one token never buys two checks at once,
+	// and at most two ever: after a wrong nonce, one retry, no sooner than
+	// loginRetryAfter (see spentSet.beginLogin). Only the holder of the
+	// token, from its network, gets this far, so nobody else can use up
+	// an honest user's retry.
+	if err := g.spent.beginLogin(key, time.Unix(c.Expires, 0), now, loginRetryAfter); err != nil {
 		return claims{}, err
 	}
 	if !p.Check(token, nonce) {
+		g.spent.wrongLogin(key, now)
 		g.login.junkProof(net, now)
 		return claims{}, errBadProof
 	}
-	if c.Expires > short {
-		if err := g.spent.extend(key, time.Unix(c.Expires, 0)); err != nil {
-			return claims{}, err
-		}
-	}
+	g.spent.rightLogin(key)
 	return c, nil
 }
 
@@ -660,7 +658,7 @@ func (g *Gate) serveLogin(w http.ResponseWriter, r *http.Request, route *LoginRo
 	// The origin gets exactly the body that was checked.
 	r.ContentLength, r.TransferEncoding, r.Trailer = int64(len(body)), nil, nil
 	referer, steer := r.Header.Values("Referer"), loginSteerValues(r, body)
-	ow := &outcomeWriter{ResponseWriter: w, host: r.Host}
+	ow := &outcomeWriter{ResponseWriter: w, host: r.Host, hosts: g.opt.LoginHosts}
 	g.opt.Next.ServeHTTP(ow, r)
 	if route.succeeded(ow, referer, steer, g.now()) {
 		g.login.succeeded(acct, net, g.now())
@@ -694,7 +692,8 @@ func (route *LoginRoute) succeeded(o *outcomeWriter, referer, steer []string, no
 		loc = k
 		// A redirect to another host (or "//host/...") is never under
 		// location_prefix, whatever its path.
-		crossHost = u.Host != "" && !strings.EqualFold(u.Hostname(), hostOnly(o.host))
+		crossHost = u.Host != "" && !strings.EqualFold(u.Hostname(), hostOnly(o.host)) &&
+			!slices.ContainsFunc(o.hosts, func(h string) bool { return strings.EqualFold(u.Hostname(), hostOnly(h)) })
 	}
 	if s.LocationPrefix != "" && crossHost {
 		return false
@@ -888,10 +887,18 @@ func loginUsername(r *http.Request, body []byte, field string) (string, error) {
 }
 
 // loginFieldKey is the form of a field name under which origins may merge
-// two spellings: Unicode case folding (JSON decoders matching struct
-// fields fold "ſ" to "s" and the Kelvin sign to "k"), PHP's renaming of
-// " ", "." and "[" to "_", and PHP arrays ("user[]").
+// two spellings: NFKC (full-width "ｕｓｅｒ"), invisible format characters
+// dropped, Unicode case folding (JSON decoders matching struct fields fold
+// "ſ" to "s" and the Kelvin sign to "k"), PHP's renaming of " ", "." and
+// "[" to "_", and PHP arrays ("user[]"). Used for the username field and
+// "_method" alike.
 func loginFieldKey(k string) string {
+	k = strings.Map(func(r rune) rune {
+		if unicode.In(r, unicode.Cf, unicode.Other_Default_Ignorable_Code_Point, unicode.Variation_Selector) {
+			return -1
+		}
+		return r
+	}, norm.NFKC.String(k))
 	k = strings.TrimLeft(k, " ")
 	if i := strings.IndexByte(k, '['); i >= 0 && strings.IndexByte(k[i:], ']') > 0 {
 		k = k[:i]
@@ -958,7 +965,8 @@ func loginJSONUsername(body []byte, field string) (string, int, error) {
 // the origin answered (status 0: it wrote nothing).
 type outcomeWriter struct {
 	http.ResponseWriter
-	host     string // the request's Host
+	host     string   // the request's Host
+	hosts    []string // and the site's other names (LoginHosts)
 	status   int
 	location string
 	cookies  []string

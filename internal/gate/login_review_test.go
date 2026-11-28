@@ -5,7 +5,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -56,9 +55,11 @@ func TestLoginTTLScalesWithLevel(t *testing.T) {
 	}
 }
 
-// R6-1/5: a wrong nonce keeps its token spent for loginChallengeTTL only;
-// a right one until the token expires. Login tokens have their own quota
-// in the spent set, so they cannot fill the payers' room.
+// R6-1/5, R7-2: a token is checked at most twice: after a wrong nonce,
+// one retry, no sooner than loginRetryAfter; then it stays spent until it
+// expires. Nobody but its holder, from its network, can use up the retry.
+// Login tokens have their own quota in the spent set, so they cannot fill
+// the payers' room; junk entries are capped and forgotten first.
 func TestLoginSpentEntries(t *testing.T) {
 	f := newLoginFixture(t)
 	for range 6 {
@@ -69,23 +70,80 @@ func TestLoginSpentEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expiry := func(id string) int64 { return f.gate.spent.ids[compactID(loginSpentKey(id))].expires }
-	parts := strings.Split(strings.TrimPrefix(solveLogin(t, ch), "PoW "), ":")
+	right := solveLogin(t, ch)
+	parts := strings.Split(strings.TrimPrefix(right, "PoW "), ":")
 	n, _ := strconv.ParseUint(parts[1], 10, 64)
 	p := c.powParams()
 	bad := n + 1
 	for p.Check(ch.Challenge, bad) {
 		bad++
 	}
-	f.do(loginReq("alice", "192.0.2.1", "PoW "+ch.Challenge+":"+strconv.FormatUint(bad, 10)+":"+parts[2]))
-	if got, want := expiry(c.ID), f.now.Add(loginChallengeTTL).Unix(); got != want {
-		t.Fatalf("junk entry expires at %d, want %d", got, want)
+	wrong := "PoW " + ch.Challenge + ":" + strconv.FormatUint(bad, 10) + ":" + parts[2]
+	send := func(ip, auth string) string {
+		rec := f.do(loginReq("alice", ip, auth))
+		return strconv.Itoa(rec.Code) + " " + rec.Body.String()
 	}
-	ch2 := decodeChallenge(t, f.do(loginReq("alice", "192.0.2.1", "")))
-	c2, _ := f.gate.sign.verify(ch2.Challenge)
-	f.do(loginReq("alice", "192.0.2.1", solveLogin(t, ch2)))
-	if got := expiry(c2.ID); got != c2.Expires || c2.Expires <= f.now.Add(loginChallengeTTL).Unix() {
-		t.Fatalf("valid entry expires at %d, token at %d", got, c2.Expires)
+	// Someone else (another network) cannot burn the token.
+	if got := send("198.51.100.1", wrong); !strings.Contains(got, errLoginBinding.Error()) {
+		t.Fatalf("token from another network: %s", got)
+	}
+	if f.gate.spent.has(loginSpentKey(c.ID)) {
+		t.Fatal("token spent by another network")
+	}
+	if got := send("192.0.2.1", wrong); !strings.Contains(got, errBadProof.Error()) {
+		t.Fatalf("first wrong nonce: %s", got)
+	}
+	if got := send("192.0.2.1", right); !strings.Contains(got, errReplay.Error()) {
+		t.Fatalf("retry before loginRetryAfter: %s", got)
+	}
+	f.now = f.now.Add(loginRetryAfter)
+	if got := send("192.0.2.1", wrong); !strings.Contains(got, errBadProof.Error()) {
+		t.Fatalf("the one retry: %s", got)
+	}
+	for _, d := range []time.Duration{loginRetryAfter, time.Hour} {
+		f.now = f.now.Add(d)
+		if got := send("192.0.2.1", right); !strings.Contains(got, errReplay.Error()) {
+			t.Fatalf("a third check after %v: %s", d, got)
+		}
+	}
+	if e := f.gate.spent.ids[compactID(loginSpentKey(c.ID))]; e.expires != c.Expires || e.retries != 2 || f.gate.spent.junk != 1 {
+		t.Fatalf("entry %+v, junk %d", e, f.gate.spent.junk)
+	}
+	// A retry with the right nonce gets through and is no longer junk.
+	g := newLoginFixture(t)
+	for range 6 {
+		g.attempt(t, "alice", "192.0.2.1")
+	}
+	ch2 := decodeChallenge(t, g.do(loginReq("alice", "192.0.2.1", "")))
+	c2, _ := g.gate.sign.verify(ch2.Challenge)
+	right2 := solveLogin(t, ch2)
+	p2 := strings.Split(strings.TrimPrefix(right2, "PoW "), ":")
+	n2, _ := strconv.ParseUint(p2[1], 10, 64)
+	bad2 := n2 + 1
+	for c2.powParams().Check(ch2.Challenge, bad2) {
+		bad2++
+	}
+	g.do(loginReq("alice", "192.0.2.1", "PoW "+ch2.Challenge+":"+strconv.FormatUint(bad2, 10)+":"+p2[2]))
+	g.now = g.now.Add(loginRetryAfter)
+	if rec := g.do(loginReq("alice", "192.0.2.1", right2)); rec.Code != http.StatusFound {
+		t.Fatalf("right nonce on the retry: %d %s", rec.Code, rec.Body)
+	}
+	if e := g.gate.spent.ids[compactID(loginSpentKey(c2.ID))]; e.retries != 0 || e.released || g.gate.spent.junk != 0 {
+		t.Fatalf("right retry entry %+v, junk %d", e, g.gate.spent.junk)
+	}
+
+	// Junk entries are capped; forgetting one never forgets a right proof.
+	j := newSpentSet()
+	j.maxJunk = 2
+	now0 := time.Unix(1_800_000_000, 0)
+	id := func(i int) string { return loginSpentKey(strings.Repeat(strconv.Itoa(i), 32)) }
+	j.beginLogin(id(9), now0.Add(time.Hour), now0, loginRetryAfter) // a right proof
+	for i := range 5 {
+		j.beginLogin(id(i), now0.Add(time.Hour), now0, loginRetryAfter)
+		j.wrongLogin(id(i), now0)
+	}
+	if j.junk != 2 || !j.has(id(9)) || j.logins != 3 {
+		t.Fatalf("junk %d, logins %d, right kept %v", j.junk, j.logins, j.has(id(9)))
 	}
 
 	s := newSpentSet()
@@ -136,30 +194,52 @@ func TestLoginStaleBeforeArgon(t *testing.T) {
 	}
 }
 
-// R6-3: "#" and "?" in the decoded path never reach the origin, raw or
-// encoded, over a real connection.
+// R6-3, R7-1: "#" and "?" in the decoded path are refused, raw or
+// encoded, when the path cut there is near a login route (any case, the
+// near variants) or protected differently; elsewhere they are served, so
+// a site without login routes keeps "/wiki/C%23".
 func TestLoginHashAndQuestionInPath(t *testing.T) {
 	f := newLoginFixture(t)
 	srv := httptest.NewServer(f.gate)
 	defer srv.Close()
-	body := "user=alice&pass=x"
-	for _, target := range []string{"/login#a", "/login%23a", "/login%3Fa", "/login%2523a", "/premium/x%23y", "/free%3F"} {
+	raw := func(method, target string) int {
+		body := "user=alice&pass=x"
 		conn, err := net.Dial("tcp", srv.Listener.Addr().String())
 		if err != nil {
 			t.Fatal(err)
 		}
-		conn.Write([]byte("POST " + target + " HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\nConnection: close\r\n\r\n" + body))
+		defer conn.Close()
+		conn.Write([]byte(method + " " + target + " HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\nConnection: close\r\n\r\n" + body))
 		resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-		conn.Close()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if resp.StatusCode != http.StatusBadRequest || f.calls != 0 {
-			t.Fatalf("%s: %d, origin calls %d", target, resp.StatusCode, f.calls)
+		return resp.StatusCode
+	}
+	for _, target := range []string{"/login#a", "/login%23a", "/login%3Fa", "/login%2523a", "/LOGIN%23a", "/Login.json%3Fx", "/login/x%23y", "/login;v%23", "/login.%3F", "/log%23in/../login"} {
+		for _, m := range []string{"POST", "GET"} {
+			if code := raw(m, target); code != http.StatusBadRequest || f.calls != 0 {
+				t.Fatalf("%s %s: %d, origin calls %d", m, target, code, f.calls)
+			}
 		}
 	}
-	if why := checkPath(&url.URL{Path: "/c#/x"}, nil); why == "" {
-		t.Fatal("checkPath allows #")
+	f.respond = func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }
+	for _, target := range []string{"/wiki/C%23", "/free%3F", "/logins%23"} {
+		if code := raw("GET", target); code != http.StatusOK {
+			t.Fatalf("GET %s: %d", target, code)
+		}
+	}
+	// A deployment without login routes serves C%23 and only refuses a
+	// cut that changes what is protected.
+	g := newFixture(t)
+	if rec := g.get("/wiki/C%23", "", ""); rec.Code != http.StatusOK || rec.Body.String() != "content of /wiki/C#" {
+		t.Fatalf("no login routes, /wiki/C%%23: %d %s", rec.Code, rec.Body)
+	}
+	if rec := g.get("/premium/x%23y", "", ""); rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("/premium/x%%23y: %d", rec.Code)
+	}
+	if rec := g.get("/doc.pdf%3Fx", "", ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("/doc.pdf%%3Fx (the cut is protected, the whole is not): %d", rec.Code)
 	}
 }
 
@@ -217,6 +297,12 @@ func TestLoginOverrideAndHost(t *testing.T) {
 		reqs = append(reqs, j)
 	}
 	reqs = append(reqs, form)
+	wide := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("user=alice&pass=x&_\uFF2DETHOD=PUT"))
+	wide.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqs = append(reqs, wide)
+	zw := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"user":"alice","_me\u200bthod":"PUT"}`))
+	zw.Header.Set("Content-Type", "application/json")
+	reqs = append(reqs, zw)
 	for i, r := range reqs {
 		r.RemoteAddr = "192.0.2.1:1234"
 		r.Header.Set("Authorization", proof)
@@ -234,6 +320,14 @@ func TestLoginOverrideAndHost(t *testing.T) {
 	} {
 		if got := route.succeeded(&outcomeWriter{host: "site.example", status: 302, location: loc}, ref, nil, now); got != want {
 			t.Errorf("%q: got %v, want %v", loc, got, want)
+		}
+	}
+	// public_hosts: www and apex are one site.
+	www := &outcomeWriter{host: "example.com", hosts: []string{"example.com", "www.example.com"}, status: 302}
+	for loc, want := range map[string]bool{"https://www.example.com/home": true, "https://WWW.example.com:443/home": true, "https://evil.example/home": false} {
+		www.location = loc
+		if got := route.succeeded(www, ref, nil, now); got != want {
+			t.Errorf("public_hosts %q: got %v, want %v", loc, got, want)
 		}
 	}
 	// End to end: failures sent to another host under the prefix.

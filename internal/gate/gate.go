@@ -98,6 +98,9 @@ type Options struct {
 	// LoginSurge are the site-wide failed logins per minute that add one
 	// and two levels for everyone. Zero means DefaultLoginSurge.
 	LoginSurge [2]int
+	// LoginHosts are this site's host names (public_hosts): a login
+	// redirect to one of them is not a redirect to another host.
+	LoginHosts []string
 }
 
 // PriceRule maps a path pattern (same syntax as Protect) to a price.
@@ -218,7 +221,7 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	set := g.live.Load()         // one consistent snapshot for this request
 	// Refuse paths like "/free/../paid" or "/free%2f..%2fpaid": the origin
 	// could normalise them into a protected path we did not recognise.
-	if why := checkPath(r.URL, func(p string) bool { return g.protected(p, set) || len(g.nearLoginRoutes(p)) > 0 }); why != "" {
+	if why := checkPath(r.URL, func(p string) bool { return g.protected(p, set) }, func(p string) bool { return len(g.nearLoginRoutes(p)) > 0 }); why != "" {
 		http.Error(w, "bad path: "+why, http.StatusBadRequest)
 		return
 	}
