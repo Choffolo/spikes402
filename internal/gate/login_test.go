@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -83,6 +84,7 @@ func loginReq(user, ip, auth string, cookies ...*http.Cookie) *http.Request {
 	r := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(url.Values{"user": {user}, "pass": {"x"}}.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.RemoteAddr = ip + ":1234"
+	r.Header.Set("Referer", "https://site.example/login") // a browser's, from the login page
 	if auth != "" {
 		r.Header.Set("Authorization", auth)
 	}
@@ -837,7 +839,7 @@ func TestLoginSuccessCriteria(t *testing.T) {
 	}
 	pre := route
 	pre.Success.LocationPrefix = "/account"
-	if ok(pre, &outcomeWriter{status: 302, location: "/home"}) || ok(pre, &outcomeWriter{status: 200}) || !ok(pre, &outcomeWriter{status: 302, location: "/account/me"}) {
+	if ok(pre, &outcomeWriter{status: 302, location: "/home"}) || ok(pre, &outcomeWriter{status: 200}) || pre.succeeded(&outcomeWriter{status: 302, location: "/account/me"}, []string{"https://site.example/login"}, nil, now) == false {
 		t.Fatal("location_prefix")
 	}
 	ck := route
@@ -907,7 +909,7 @@ func TestLoginRedirectSuccessNeedsPositiveCriterion(t *testing.T) {
 	}
 	now := time.Unix(1_800_000_000, 0)
 	route := LoginRoute{Path: "/login", Success: LoginSuccess{Status: []int{302}, LocationPrefix: "/app"}}
-	if !route.succeeded(&outcomeWriter{status: 302, location: "/app/inbox"}, nil, []string{"/app/inbox", "https://site.example/app/inbox"}, now) {
+	if !route.succeeded(&outcomeWriter{status: 302, location: "/app/inbox"}, []string{"https://site.example/login"}, []string{"/app/inbox", "https://site.example/app/inbox"}, now) {
 		t.Fatal("location_prefix: a login that follows \"next\" counted as failure")
 	}
 	// The Referer check stays, location_prefix or not.
@@ -989,6 +991,64 @@ func TestLoginLocationPrefixRefererPoC(t *testing.T) {
 	}
 	if ch := decodeChallenge(t, f.do(loginReq("alice", "192.0.2.1", ""))); ch.Level <= LoginBaseLevel+5 {
 		t.Fatalf("level after 6 Referer-steered failures: %d", ch.Level)
+	}
+}
+
+// R5: with location_prefix, a redirect needs one absolute http(s)
+// Referer. The reviewer's two cases (no Referer, the origin sending the
+// failure to the session's previous URL under the prefix; an empty
+// Referer) escalate; an honest login with a proper Referer succeeds.
+func TestLoginLocationPrefixNeedsReferer(t *testing.T) {
+	f := newLoginFixture(t) // location_prefix "/home"
+	// Laravel's url()->previous(): the Referer, else the session's last page.
+	f.respond = func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		if f.succeed(r.PostForm.Get("user")) {
+			http.Redirect(w, r, "/home", http.StatusFound)
+			return
+		}
+		back := r.Referer()
+		if back == "" {
+			back = "/home/settings"
+		}
+		http.Redirect(w, r, back, http.StatusFound)
+	}
+	for i, ref := range [][]string{nil, {""}} {
+		ip, user := fmt.Sprintf("203.0.%d.1", 113+i), fmt.Sprintf("victim%d", i)
+		prev := 0
+		for n := range 6 {
+			ch := decodeChallenge(t, f.do(loginReq(user, ip, "")))
+			if n > 0 && ch.Level <= prev {
+				t.Fatalf("Referer %q, attempt %d: level %d did not rise", ref, n+1, ch.Level)
+			}
+			prev = ch.Level
+			r := loginReq(user, ip, solveLogin(t, ch))
+			r.Header["Referer"] = ref
+			f.do(r)
+		}
+	}
+	f.succeed = func(u string) bool { return u == "bob" }
+	for range 3 {
+		if lvl := f.attempt(t, "bob", "198.51.100.1"); lvl != LoginBaseLevel {
+			t.Fatalf("honest login with a Referer: level %d", lvl)
+		}
+	}
+	now := time.Unix(1_800_000_000, 0)
+	route := LoginRoute{Path: "/login", Success: LoginSuccess{Status: []int{302}, LocationPrefix: "/home"}}
+	for _, ref := range [][]string{nil, {""}, {" "}, {"/login"}, {"site.example/login"}, {"ftp://site.example/login"}, {"https:///login"}, {"https://a/login", "https://b/login"}} {
+		if route.succeeded(&outcomeWriter{status: 302, location: "/home"}, ref, nil, now) {
+			t.Errorf("Referer %q accepted", ref)
+		}
+	}
+	for _, ref := range []string{"https://site.example/login", "http://site.example/", "HTTPS://Site.Example/login?x=1"} {
+		if !route.succeeded(&outcomeWriter{status: 302, location: "/home"}, []string{ref}, nil, now) {
+			t.Errorf("Referer %q refused", ref)
+		}
+	}
+	// set_cookie needs no Referer; a non-redirect answer neither.
+	ck := LoginRoute{Path: "/login", Success: LoginSuccess{Status: []int{302}, LocationPrefix: "/home", SetCookie: "auth"}}
+	if !ck.succeeded(&outcomeWriter{status: 302, location: "/home", cookies: []string{"auth=1"}}, nil, nil, now) {
+		t.Error("set_cookie")
 	}
 }
 

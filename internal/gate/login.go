@@ -606,10 +606,12 @@ func (g *Gate) serveLogin(w http.ResponseWriter, r *http.Request, route *LoginRo
 // LoginSuccess). An answer the origin never wrote is a failure. Unless
 // set_cookie is set, a redirect to the Referer is a failure: origins send
 // failed logins "back" there (Laravel's back()), and the client chooses
-// it. Without location_prefix either (allowed only when no 3xx status
-// counts, see CheckLoginRoutes), so is a redirect to any query or body
-// value the request named (a "next" parameter); with location_prefix
-// those are skipped, so honest logins that follow "next" succeed.
+// it. With location_prefix, a redirect is a failure too unless the
+// request carried an absolute Referer (loginHasReferer); query and body
+// values are then skipped, so honest logins that follow "next" succeed.
+// Without location_prefix (allowed only when no 3xx status counts, see
+// CheckLoginRoutes), a redirect to any query or body value the request
+// named (a "next" parameter) is a failure as well.
 func (route *LoginRoute) succeeded(o *outcomeWriter, referer, steer []string, now time.Time) bool {
 	s := route.Success
 	if o.status == 0 || !slices.Contains(s.Status, o.status) {
@@ -641,6 +643,12 @@ func (route *LoginRoute) succeeded(o *outcomeWriter, referer, steer []string, no
 		return true
 	}
 	if s.LocationPrefix != "" {
+		// Without the Referer the origin may send a failure "back" to a
+		// page it remembers (a session's previous URL), which the client
+		// can put under the prefix: such a redirect proves nothing.
+		if !loginHasReferer(referer) {
+			return false
+		}
 		steer = nil
 	}
 	for _, v := range slices.Concat(referer, steer) {
@@ -649,6 +657,18 @@ func (route *LoginRoute) succeeded(o *outcomeWriter, referer, steer []string, no
 		}
 	}
 	return true
+}
+
+// loginHasReferer reports whether the request carried exactly one
+// Referer, an absolute http(s) URL with a host. An empty header counts as
+// missing; several headers count as missing too, since the origin may
+// read another one than the proxy.
+func loginHasReferer(referer []string) bool {
+	if len(referer) != 1 {
+		return false
+	}
+	u, err := url.Parse(strings.TrimSpace(referer[0]))
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
 // redirectKey is the canonical path (matchKey, no case) a Location or a

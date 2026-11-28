@@ -400,6 +400,12 @@ limits below (`429`) apply to everyone behind the same address or prefix.
   - if `set_cookie` is not set, it does not redirect to the `Referer`
     (which the client chooses, and where origins send failed logins
     "back");
+  - if `location_prefix` is set (and `set_cookie` is not), a redirect is
+    a success only if the request carried exactly one `Referer`: an
+    absolute `http`/`https` URL with a host. No `Referer`, an empty one,
+    a relative one, or several count as a failure, because without it
+    the origin may send a failure "back" to a page it remembers, which
+    the client can put under the prefix;
   - if neither `set_cookie` nor `location_prefix` is set, it does not
     redirect to any query or body value either (a `next` parameter, say).
 
@@ -407,23 +413,33 @@ limits below (`429`) apply to everyone behind the same address or prefix.
   `set_cookie` or `location_prefix` is set: a redirect alone cannot tell
   a success from a failure, and the guess above would count honest logins
   that follow `next` as failures. With `location_prefix` the `next` guess
-  is skipped but the `Referer` check stays; with `set_cookie` both are
+  is skipped but the `Referer` checks stay; with `set_cookie` all are
   skipped.
 
   `location_prefix` is unsafe if the origin can send a failed login to
-  the previous page by any other means than the `Referer` header: an
-  attacker makes that page one under the prefix, and every failure counts
-  as a success. Use `set_cookie` for such an origin, with a cookie the
-  origin sets **only** on a successful login. A session cookie set on
-  every response (`laravel_session`, `PHPSESSID`, `connect.sid`, ...) is
-  the wrong choice: failures set it too.
+  the previous page by any other means than the `Referer` header while a
+  `Referer` is present: an attacker makes that page one under the prefix,
+  and every failure counts as a success. Use `set_cookie` for such an
+  origin, with a cookie the origin sets **only** on a successful login. A
+  session cookie set on every response (`laravel_session`, `PHPSESSID`,
+  `connect.sid`, ...) is the wrong choice: failures set it too.
+
+  A login page served with `Referrer-Policy: no-referrer` (or a
+  `<meta name="referrer" content="no-referrer">`, or a form with
+  `rel="noreferrer"`) makes browsers send no `Referer`: with
+  `location_prefix` every login would count as a failure and honest users
+  would pay more and more, so such a site must use `set_cookie`. The
+  browser default (`strict-origin-when-cross-origin`) sends a `Referer`
+  on a same-origin form post. API clients of a `location_prefix` route
+  must send a `Referer` too.
 
   Laravel: a failed login goes to `url()->previous()`, which is the
   `Referer` or, without one, the last page the session visited (an
-  attacker sets it with one `GET` under the prefix). The safe setup is
-  `location_prefix` (your post-login area) plus the `Referer` check above,
-  **and** failed logins sent to the login page instead of "back", for
-  example `throw ValidationException::withMessages([...])->redirectTo(route('login'))`
+  attacker sets it with one `GET` under the prefix). The proxy covers
+  both: a redirect to the `Referer` is a failure, and so is a redirect
+  without a `Referer`. As defence in depth, also send failed logins to the
+  login page instead of "back", for example
+  `throw ValidationException::withMessages([...])->redirectTo(route('login'))`
   in your `LoginRequest::authenticate()`:
 
   ```json
