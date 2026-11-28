@@ -131,7 +131,9 @@
         text.textContent = inv.invoice;
         text.style.wordBreak = "break-all";
         var note = document.createElement("p");
-        note.textContent = "Pay " + inv.price_sats + " sats to try this login once. The password must still be right.";
+        note.textContent = "Pay " + inv.price_sats + " sats to try this login once. The password must still be right. " +
+          "Warning: this price holds only if no other login attempt on this account, or from your network, fails before you pay. " +
+          "If one does, this payment buys nothing and is not refunded.";
         payBox.append(note, link, text);
         var redeem = function (auth) {
           return fetch("/.spikes402/login-redeem", { method: "POST", headers: { Authorization: auth }, credentials: "same-origin", cache: "no-store" });
@@ -140,7 +142,17 @@
           if (payJob !== mine || mine.stopped) return true;
           if (r.status === 202 || r.status === 429 || r.status === 503) return false; // not paid yet, or busy: keep polling
           mine.stopped = true;
-          if (r.status !== 204) throw new Error("payment not accepted (" + r.status + ")");
+          if (r.status !== 204) {
+            r.json().catch(function () { return {}; }).then(function (b) {
+              if (payJob !== mine) return;
+              if (r.status === 409 && b.error) { // the level rose: this payment buys nothing
+                payBox.hidden = true;
+                offerPay({ pay_instead: b.price_sats > 0, price_sats: b.price_sats });
+                status.textContent = b.error.charAt(0).toUpperCase() + b.error.slice(1) + ".";
+              } else fail(new Error(b.error || "payment not accepted (" + r.status + ")"));
+            });
+            return true;
+          }
           if (job) { stop(job.kills); job = null; }
           payBox.hidden = true;
           payBox.textContent = "";

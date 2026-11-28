@@ -50,15 +50,19 @@ type LoginPrice struct {
 // for. Beyond any of them, no invoice: the client solves the
 // proof-of-work instead.
 type LoginInvoiceLimits struct {
-	AccountOpen      int `json:"account_open"`       // unpaid, unexpired invoices per account
-	AccountPerMinute int `json:"account_per_minute"` // new invoices per account per minute
-	NetworkPerMinute int `json:"network_per_minute"` // per /24 or /48 per minute
-	PerMinute        int `json:"per_minute"`         // all login invoices per minute
-	Open             int `json:"open"`               // all unpaid, unexpired login invoices
+	// Per account from one network (/24 or /48), never per account alone:
+	// a limit anyone could fill for an account would let a third party
+	// push its real user back to the proof-of-work, and show them that
+	// someone is paying for it.
+	AccountNetworkOpen      int `json:"account_network_open"`       // unpaid, unexpired invoices
+	AccountNetworkPerMinute int `json:"account_network_per_minute"` // new invoices per minute
+	NetworkPerMinute        int `json:"network_per_minute"`         // per /24 or /48 per minute
+	PerMinute               int `json:"per_minute"`                 // all login invoices per minute
+	Open                    int `json:"open"`                       // all unpaid, unexpired login invoices
 }
 
 // DefaultLoginInvoiceLimits are used for every limit left at 0.
-var DefaultLoginInvoiceLimits = LoginInvoiceLimits{AccountOpen: 2, AccountPerMinute: 6, NetworkPerMinute: 20, PerMinute: 60, Open: 500}
+var DefaultLoginInvoiceLimits = LoginInvoiceLimits{AccountNetworkOpen: 2, AccountNetworkPerMinute: 6, NetworkPerMinute: 20, PerMinute: 60, Open: 500}
 
 // CheckLoginPrice validates a price; nil or BaseSats 0 means no paying.
 func CheckLoginPrice(p *LoginPrice) error {
@@ -78,7 +82,7 @@ func CheckLoginPrice(p *LoginPrice) error {
 func (l LoginInvoiceLimits) WithDefaults() (LoginInvoiceLimits, error) {
 	d := DefaultLoginInvoiceLimits
 	for _, f := range []struct{ v, def *int }{
-		{&l.AccountOpen, &d.AccountOpen}, {&l.AccountPerMinute, &d.AccountPerMinute},
+		{&l.AccountNetworkOpen, &d.AccountNetworkOpen}, {&l.AccountNetworkPerMinute, &d.AccountNetworkPerMinute},
 		{&l.NetworkPerMinute, &d.NetworkPerMinute}, {&l.PerMinute, &d.PerMinute}, {&l.Open, &d.Open},
 	} {
 		if *f.v == 0 {
@@ -114,34 +118,38 @@ type loginInvoices struct {
 	mu    sync.Mutex
 	lim   LoginInvoiceLimits
 	open  map[string]openLoginInvoice // token ID
-	acct  map[string]int              // open invoices per account
-	byMin map[string]*window          // "a "+account, "n "+network, "all"
+	pair  map[string]int              // open invoices per account and network
+	byMin map[string]*window          // "p "+pair, "n "+network, "all"
 	swept time.Time
 }
 
 type openLoginInvoice struct {
-	acct    string
+	pair    string
 	expires time.Time
 }
 
 func newLoginInvoices(lim LoginInvoiceLimits) *loginInvoices {
-	return &loginInvoices{lim: lim, open: map[string]openLoginInvoice{}, acct: map[string]int{}, byMin: map[string]*window{}}
+	return &loginInvoices{lim: lim, open: map[string]openLoginInvoice{}, pair: map[string]int{}, byMin: map[string]*window{}}
 }
 
 // reserve counts a new invoice for acct from net if every limit allows
 // it. Only allowed invoices are counted, so the maps stay bounded by the
-// global limits (Open, and PerMinute keys a minute).
+// global limits (Open, and PerMinute keys a minute). There is no limit
+// per account alone (see LoginInvoiceLimits): many networks asking for
+// one account are bounded by the per-network and global limits, which
+// cap the node's load whatever the accounts.
 func (l *loginInvoices) reserve(id, acct, net string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.sweepLocked(now)
-	if len(l.open) >= l.lim.Open || l.acct[acct] >= l.lim.AccountOpen {
+	pair := acct + " " + net
+	if len(l.open) >= l.lim.Open || l.pair[pair] >= l.lim.AccountNetworkOpen {
 		return false
 	}
 	keys := []struct {
 		k   string
 		max int
-	}{{"all", l.lim.PerMinute}, {"a " + acct, l.lim.AccountPerMinute}, {"n " + net, l.lim.NetworkPerMinute}}
+	}{{"all", l.lim.PerMinute}, {"p " + pair, l.lim.AccountNetworkPerMinute}, {"n " + net, l.lim.NetworkPerMinute}}
 	for _, k := range keys {
 		if w := l.byMin[k.k]; w != nil && now.Sub(w.start) < time.Minute && w.count >= k.max {
 			return false
@@ -155,8 +163,8 @@ func (l *loginInvoices) reserve(id, acct, net string, now time.Time) bool {
 		}
 		w.count++
 	}
-	l.open[id] = openLoginInvoice{acct: acct, expires: now.Add(loginInvoiceTTL)}
-	l.acct[acct]++
+	l.open[id] = openLoginInvoice{pair: pair, expires: now.Add(loginInvoiceTTL)}
+	l.pair[pair]++
 	return true
 }
 
@@ -173,8 +181,8 @@ func (l *loginInvoices) dropLocked(id string) {
 		return
 	}
 	delete(l.open, id)
-	if l.acct[o.acct]--; l.acct[o.acct] <= 0 {
-		delete(l.acct, o.acct)
+	if l.pair[o.pair]--; l.pair[o.pair] <= 0 {
+		delete(l.pair, o.pair)
 	}
 }
 
@@ -300,7 +308,7 @@ func (g *Gate) checkLoginPay(cred, resHash, net string, now time.Time) (claims, 
 		return claims{}, err
 	}
 	if c.Level < g.login.Level(c.Acct, net, now) {
-		return claims{}, errLoginLevel
+		return c, errLoginLevel // c: for the new price (see serveLoginRedeem)
 	}
 	key := loginSpentKey(c.ID)
 	if g.spent.has(key) {
@@ -327,4 +335,25 @@ func (g *Gate) checkLoginPay(cred, resHash, net string, now time.Time) (claims, 
 	}
 	g.loginPay.drop(c.ID)
 	return c, nil
+}
+
+// writeStalePayment answers a payment made at a level that has risen
+// since: 409, what happened, and the price of a new invoice now. No
+// refund and no top-up: the strict level rule is what stops payments
+// being stockpiled. The new price is what a challenge from this network
+// for this account would show anyway.
+func (g *Gate) writeStalePayment(w http.ResponseWriter, route *LoginRoute, acct, net string) {
+	level := g.login.Level(acct, net, g.now())
+	price := g.loginPrice(route, level)
+	msg := "the price went up after a failed login attempt on this account or from this network, so this payment no longer buys an attempt"
+	if price > 0 {
+		msg += fmt.Sprintf("; a new invoice costs %d sats", price)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	json.NewEncoder(w).Encode(struct {
+		Error     string `json:"error"`
+		PriceSats int64  `json:"price_sats"`
+		Level     int    `json:"level"`
+	}{msg, price, level})
 }

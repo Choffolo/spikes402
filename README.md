@@ -123,7 +123,7 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `login_routes` | Login endpoints where every attempt costs an Argon2id proof-of-work that grows with each failure; see [Login protection](#login-protection). Config file only | `[]` |
 | `login_surge_failures_per_minute` | Failed logins per minute, site-wide, that add one and two levels for everyone. Two increasing counts. Config file only | `[100, 1000]` |
 | `login_price` | Let a login attempt be paid for over Lightning instead of worked for: `{"base_sats": 10, "max_sats": 2000}`. The price doubles with each level; a route's own `price` overrides it. See [Paying instead](#login-protection). Config file only | off |
-| `login_invoice_limits` | Caps on login invoices: `account_open`, `account_per_minute`, `network_per_minute`, `per_minute`, `open`. Beyond any of them, no invoice: proof-of-work only. Config file only | `2, 6, 20, 60, 500` |
+| `login_invoice_limits` | Caps on login invoices: `account_network_open` and `account_network_per_minute` (one account from one /24 or /48), `network_per_minute`, `per_minute`, `open`. Beyond any of them, no invoice: proof-of-work only. Config file only | `2, 6, 20, 60, 500` |
 | `protect` | Path patterns that require payment. `"/premium/**"` = everything under `/premium`; other patterns use [glob syntax](https://pkg.go.dev/path#Match), e.g. `"/*.pdf"`. See [Path matching](#path-matching) | required |
 | `protect_case_sensitive` | Match `protect` patterns with exact letter case. Off by default, because many websites serve `/Premium` like `/premium` | `false` |
 | `pow_seconds_per_sat` | How much work replaces one sat: seconds of one CPU core (see [Proof-of-work pricing](#proof-of-work-pricing)). Values below 1 are refused unless `unsafe_allow_dangerous_config` is set. Example configs use `5` with `price_sats: 2`, which is the same puzzle as 1 sat at this default | `10` |
@@ -739,22 +739,37 @@ once, never access.
 - **Same rules as a proof.** The invoice token and the pass are bound to
   the account, the network (/24 or /48), the route and the level, are
   spent in the same spent set (within the login quota), and are refused
-  once the level is higher than the one they were priced at. A payment for
-  an old level does not buy an attempt, even after it was paid: the payer
-  needs a new invoice at the new price. Invoices therefore expire after
-  3 minutes (the token is redeemable for one more minute), so the level
-  rarely changes in between.
+  once the level is higher than the one they were priced at.
+- **A payment for an old level buys nothing.** If another attempt on the
+  account, or from the payer's network, fails between the invoice and the
+  redeem, the level rises and the paid invoice no longer buys an attempt.
+  There is no refund and no top-up: honouring old payments would let
+  attempts be bought in advance at the lower price. The redeem answers
+  `409` with the reason, the new `level` and the new `price_sats`, and
+  `login.js` shows that message and the new price. Before paying,
+  `login.js` warns that the price holds only if no other attempt fails
+  meanwhile. Invoices expire after 3 minutes (the token is redeemable for
+  one more minute) to keep that window short.
 - **Protecting the node.** Every login invoice also passes the node's own
   limits (`max_invoices_per_minute`, circuit breaker, timeout). On top of
-  them, at most 2 open invoices and 6 a minute per account, 20 a minute
-  per network, and 60 a minute and 500 open overall (`login_invoice_limits`).
-  When any limit is reached, or the node fails, the answer is `503` with
-  a proof-of-work challenge instead (fail-closed: the wall stays, the node
-  is left alone).
+  them, at most 2 open invoices and 6 a minute per account from one /24
+  or /48, 20 a minute per network, and 60 a minute and 500 open overall
+  (`login_invoice_limits`). There is deliberately no limit per account
+  alone: anyone could fill it for someone else's account, pushing the real
+  user back to the proof-of-work and learning that someone pays for it.
+  Many networks asking for one account are still bounded by the
+  per-network and overall limits. When any limit is reached, paying is
+  off, or the node fails, the answer is the same `503` with a
+  proof-of-work challenge instead (fail-closed: the wall stays, the node
+  is left alone). It does not say which limit was hit.
 - **What the price reveals.** The price depends on the level alone, so it
-  reveals exactly what the level does (see above). The per-account limits
-  do show one more thing: someone who gets `503` for an account knows that
-  2 invoices are open for it, or that 6 were asked for in the last minute.
+  reveals exactly what the level does (see above). The limits a client
+  can reach are its own (its account and network), its network's, or the
+  site-wide ones. Filling the site-wide ones turns paying off for everyone
+  until they reset; logins still work with the proof-of-work.
+- **Not yet.** Paying is only redeemed at `/.spikes402/login-redeem` for a
+  cookie. Sending `Authorization: L402` directly with the login request,
+  as API clients can with `PoW`, is a possible follow-up.
 
 **What is stored**
 

@@ -154,8 +154,19 @@ func TestLoginPayStaleAfterPriceRise(t *testing.T) {
 		t.Fatalf("redeem: %d", rec.Code)
 	}
 	f.attempt(t, "carol", "192.0.2.1") // fails: level 24, 20 sats
-	if rec := f.redeemPaid("L402 "+inv.Challenge+":"+pre, "192.0.2.1"); rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "below the current level") {
-		t.Fatalf("stale payment: %d %s", rec.Code, rec.Body)
+	stale := f.redeemPaid("L402 "+inv.Challenge+":"+pre, "192.0.2.1")
+	var body struct {
+		Error     string `json:"error"`
+		PriceSats int64  `json:"price_sats"`
+		Level     int    `json:"level"`
+	}
+	if stale.Code != http.StatusConflict || json.NewDecoder(stale.Body).Decode(&body) != nil ||
+		!strings.Contains(body.Error, "a new invoice costs 20 sats") || body.PriceSats != 20 || body.Level != LoginBaseLevel+1 {
+		t.Fatalf("stale payment: %d %+v", stale.Code, body)
+	}
+	// Still unspent and still refused: no stockpile, whenever it is tried.
+	if rec := f.redeemPaid("L402 "+inv.Challenge+":"+pre, "192.0.2.1"); rec.Code != http.StatusConflict {
+		t.Fatalf("stale payment again: %d", rec.Code)
 	}
 	if rec := f.do(loginReq("carol", "192.0.2.1", "", rec.Result().Cookies()...)); rec.Code != http.StatusPaymentRequired || f.calls != 1 {
 		t.Fatalf("stale paid pass: %d, %d origin calls", rec.Code, f.calls)
@@ -180,17 +191,23 @@ func TestLoginPayLimits(t *testing.T) {
 		}
 	}
 
-	t.Run("account open and per minute", func(t *testing.T) {
+	t.Run("account and network open and per minute", func(t *testing.T) {
 		f := newPayFixture(t)
 		a := decodeInvoice(t, f.invoiceFor("alice", "192.0.2.1"))
-		decodeInvoice(t, f.invoiceFor("Alice", "198.51.100.1")) // same account, any network
-		refused(t, f.invoiceFor("alice", "203.0.113.1"))
+		decodeInvoice(t, f.invoiceFor("Alice", "192.0.2.50")) // same account, same /24
+		refused(t, f.invoiceFor("alice", "192.0.2.1"))
+		// A third party elsewhere fills its own limits for alice, never hers.
+		for range 2 {
+			decodeInvoice(t, f.invoiceFor("alice", "198.51.100.1"))
+		}
+		refused(t, f.invoiceFor("alice", "198.51.100.1"))
 		redeem(t, f, a, "192.0.2.1") // paid: no longer open
 		for range 4 {
 			redeem(t, f, decodeInvoice(t, f.invoiceFor("alice", "192.0.2.1")), "192.0.2.1")
 		}
-		refused(t, f.invoiceFor("alice", "192.0.2.1")) // 6 this minute
+		refused(t, f.invoiceFor("alice", "192.0.2.1")) // 6 this minute from here
 		decodeInvoice(t, f.invoiceFor("bob", "192.0.2.1"))
+		decodeInvoice(t, f.invoiceFor("alice", "203.0.113.1"))
 		f.now = f.now.Add(loginInvoiceTTL) // open ones expired, new minute
 		decodeInvoice(t, f.invoiceFor("alice", "192.0.2.1"))
 		decodeInvoice(t, f.invoiceFor("alice", "192.0.2.1"))
@@ -279,7 +296,7 @@ func TestLoginPriceMapping(t *testing.T) {
 			t.Errorf("accepted %+v", bad)
 		}
 	}
-	if l, err := (LoginInvoiceLimits{PerMinute: 7}).WithDefaults(); err != nil || l.PerMinute != 7 || l.Open != 500 || l.AccountOpen != 2 {
+	if l, err := (LoginInvoiceLimits{PerMinute: 7}).WithDefaults(); err != nil || l.PerMinute != 7 || l.Open != 500 || l.AccountNetworkOpen != 2 {
 		t.Errorf("defaults: %+v %v", l, err)
 	}
 	if _, err := (LoginInvoiceLimits{Open: -1}).WithDefaults(); err == nil {
@@ -287,5 +304,52 @@ func TestLoginPriceMapping(t *testing.T) {
 	}
 	if CheckLoginRoutes([]LoginRoute{{Path: "/login", UsernameField: "u", Success: LoginSuccess{Status: []int{200}}, Price: &LoginPrice{BaseSats: -1}}}) == nil {
 		t.Error("accepted a bad route price")
+	}
+}
+
+// Every reason for not handing out an invoice gives the same answer, so
+// a 503 does not tell which limit was reached (or that paying is off).
+func TestLoginPay503RevealsNoReason(t *testing.T) {
+	norm := func(t *testing.T, rec *httptest.ResponseRecorder) string {
+		t.Helper()
+		var m map[string]any
+		if rec.Code != http.StatusServiceUnavailable || json.NewDecoder(rec.Body).Decode(&m) != nil {
+			t.Fatalf("got %d", rec.Code)
+		}
+		delete(m, "challenge")
+		delete(m, "expires_at")
+		h := rec.Header().Clone()
+		b, _ := json.Marshal(map[string]any{"body": m, "headers": h})
+		return string(b)
+	}
+	var got []string
+	f := newPayFixture(t)
+	f.gate.loginPay.lim = LoginInvoiceLimits{1, 100, 100, 100, 100}
+	decodeInvoice(t, f.invoiceFor("a", "192.0.2.1"))
+	got = append(got, norm(t, f.invoiceFor("a", "192.0.2.1"))) // account and network open
+	f.gate.loginPay.lim = LoginInvoiceLimits{100, 1, 100, 100, 100}
+	decodeInvoice(t, f.invoiceFor("b", "192.0.2.1"))
+	got = append(got, norm(t, f.invoiceFor("b", "192.0.2.1"))) // account and network per minute
+	f.gate.loginPay.lim = LoginInvoiceLimits{100, 100, 1, 100, 100}
+	decodeInvoice(t, f.invoiceFor("c", "198.51.100.1"))
+	got = append(got, norm(t, f.invoiceFor("d", "198.51.100.1"))) // network per minute
+	f.gate.loginPay.lim = LoginInvoiceLimits{100, 100, 100, 100, 1}
+	f.now = f.now.Add(loginInvoiceTTL)
+	decodeInvoice(t, f.invoiceFor("e", "203.0.113.1"))
+	got = append(got, norm(t, f.invoiceFor("f", "10.0.0.1"))) // open overall
+	f.gate.loginPay.lim = LoginInvoiceLimits{100, 100, 100, 1, 100}
+	f.now = f.now.Add(loginInvoiceTTL)
+	decodeInvoice(t, f.invoiceFor("g", "10.1.0.1"))
+	got = append(got, norm(t, f.invoiceFor("h", "10.2.0.1"))) // per minute overall
+	f.gate.loginPay.lim = DefaultLoginInvoiceLimits
+	f.gate.node.openUntil = f.now.Add(time.Hour)
+	got = append(got, norm(t, f.invoiceFor("i", "10.3.0.1"))) // node breaker
+	f.gate.node.openUntil = time.Time{}
+	f.gate.opt.LoginPrice = nil
+	got = append(got, norm(t, f.invoiceFor("j", "10.4.0.1"))) // paying off
+	for i, g := range got {
+		if g != got[0] {
+			t.Errorf("answer %d differs:\n%s\n%s", i, g, got[0])
+		}
 	}
 }

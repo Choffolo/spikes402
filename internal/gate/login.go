@@ -619,6 +619,10 @@ func (g *Gate) serveLoginRedeem(w http.ResponseWriter, r *http.Request) {
 			g.writeClaim(w, r, http.StatusAccepted, claimBody{Status: "unpaid"})
 			return
 		}
+		if errors.Is(err, errLoginLevel) {
+			g.writeStalePayment(w, route, c.Acct, net)
+			return
+		}
 		if err == nil {
 			g.observe(r, g.classify(r), OutcomePaid, c.PriceSats)
 		}

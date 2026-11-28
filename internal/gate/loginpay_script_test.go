@@ -18,7 +18,9 @@ import (
 // a real gate: the username loses focus (challenge, "Pay instead" shows
 // the price), the button is clicked (invoice), the invoice is paid with a
 // WebLN wallet ("webln") or from outside while the page polls ("poll"),
-// and the page must then submit the form holding a login pass.
+// and the page must then submit the form holding a login pass. In
+// "stale", a failure raises the level before the wallet pays: the page
+// must not submit, and must say why and show the new price.
 const loginPayHarness = `
 const [src, base, mode] = [require("fs").readFileSync(process.argv[2], "utf8"), process.argv[3], process.argv[4]];
 const out = {};
@@ -46,7 +48,7 @@ globalThis.location = { href: base + "/login" };
 globalThis.document = { currentScript: { getAttribute: (k) => (k === "data-field" ? "user" : null) }, querySelectorAll: () => [form], createElement: el };
 globalThis.Worker = class { postMessage() {} terminate() {} };
 globalThis.HTMLFormElement = function () {};
-if (mode === "webln") window.webln = { enable: async () => {}, sendPayment: async (inv) => ({ preimage: await payFake(inv) }) };
+if (mode !== "poll") window.webln = { enable: async () => {}, sendPayment: async (inv) => ({ preimage: await payFake(inv) }) };
 const until = (f) => new Promise((ok, no) => { const t0 = Date.now(); (function w() { const v = f(); if (v) ok(v); else if (Date.now() - t0 > 15000) no(new Error("timeout")); else setTimeout(w, 20); })(); });
 setTimeout(() => { console.log(JSON.stringify({ error: "timeout", ...out, status: form.children[0].textContent })); process.exit(1); }, 20000);
 (async () => {
@@ -58,8 +60,16 @@ setTimeout(() => { console.log(JSON.stringify({ error: "timeout", ...out, status
   const box = form.children[2];
   const code = await until(() => find(box, "code"));
   out.qr = find(box, "img").src.slice(0, 22);
-  if (mode === "webln") (await until(() => find(box, "button"))).click();
+  out.warned = /holds only if no other login attempt/.test(find(box, "p").textContent);
+  if (mode === "stale") await realFetch(base + "/raise", { method: "POST" });
+  if (mode !== "poll") (await until(() => find(box, "button"))).click();
   else await payFake(code.textContent);
+  if (mode === "stale") {
+    out.status = await until(() => /new invoice/.test(form.children[0].textContent) && form.children[0].textContent);
+    out.payText = form.children[1].textContent;
+    console.log(JSON.stringify(out));
+    process.exit(0);
+  }
 })().catch((e) => { console.log(JSON.stringify({ error: e.message, ...out })); process.exit(1); });
 `
 
@@ -80,24 +90,34 @@ func TestLoginPayScript(t *testing.T) {
 		return p
 	}
 	h, js := write("h.js", loginPayHarness), write("login.js", loginJS)
-	for _, mode := range []string{"webln", "poll"} {
+	for _, mode := range []string{"webln", "poll", "stale"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newPayFixture(t)
 			f.gate.now = time.Now // the page polls in real time
 			mux := http.NewServeMux()
 			mux.Handle("/pay", f.gate.opt.Lightning.(*lightning.Fake).PayHandler())
+			mux.HandleFunc("/raise", func(http.ResponseWriter, *http.Request) {
+				f.gate.login.admit(f.gate.loginAccount("alice"), f.gate.loginNetwork(loginReq("alice", "127.0.0.1", "")), LoginMaxLevel, time.Now())
+			})
 			mux.Handle("/", f.gate)
 			srv := httptest.NewServer(mux)
 			defer srv.Close()
 			raw, err := exec.Command(node, h, js, srv.URL, mode).Output()
 			var got struct {
 				Error, PayText, QR, Cookie, Status string
-				Submitted                          bool
+				Submitted, Warned                  bool
 			}
 			if err2 := json.Unmarshal(raw, &got); err != nil || err2 != nil || got.Error != "" {
 				t.Fatalf("node: %v %s", err, raw)
 			}
-			if got.PayText != "Pay 10 sats instead" || got.QR != "data:image/png;base64," || !got.Submitted {
+			if mode == "stale" {
+				if got.Submitted || got.Cookie != "" || !got.Warned || got.PayText != "Pay 20 sats instead" ||
+					!strings.Contains(got.Status, "no longer buys an attempt; a new invoice costs 20 sats") {
+					t.Fatalf("stale page: %+v", got)
+				}
+				return
+			}
+			if got.PayText != "Pay 10 sats instead" || got.QR != "data:image/png;base64," || !got.Submitted || !got.Warned {
 				t.Fatalf("page: %+v", got)
 			}
 			pass, err := http.ParseSetCookie(got.Cookie)
