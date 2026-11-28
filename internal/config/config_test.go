@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Choffolo/spikes402/internal/gate"
 )
 
 func load(t *testing.T, json string) (*Config, error) {
@@ -394,6 +396,26 @@ func TestLoginPreserveHostNeedsPublicHosts(t *testing.T) {
 	}
 	if _, err := load(t, base+`,"public_hosts":["example.com"]}`); err != nil {
 		t.Fatalf("with public_hosts: %v", err)
+	}
+}
+
+func TestLoginPriceConfig(t *testing.T) {
+	base := `{"origin":"http://o","price_sats":2,"protect":["/x"],"lightning":{"backend":"fake"},` +
+		`"login_routes":[{"path":"/login","username_field":"u","success":{"status":[200]},"price":{"base_sats":3}}],`
+	c, err := load(t, base+`"login_price":{"base_sats":10,"max_sats":500},"login_invoice_limits":{"per_minute":30}}`)
+	if err != nil || c.LoginPrice.BaseSats != 10 || c.LoginRoutes[0].Price.BaseSats != 3 ||
+		c.LoginInvoiceLimits != (gate.LoginInvoiceLimits{AccountNetworkOpen: 2, AccountNetworkPerMinute: 6, NetworkPerMinute: 20, PerMinute: 30, Open: 500}) {
+		t.Fatalf("%+v %+v %v", c.LoginPrice, c.LoginInvoiceLimits, err)
+	}
+	for _, bad := range []string{
+		`"login_price":{"base_sats":-1}}`,
+		`"login_price":{"base_sats":10,"max_sats":5}}`,
+		`"login_invoice_limits":{"open":-3}}`,
+		`"login_invoice_limits":{"opn":3}}`,
+	} {
+		if _, err := load(t, base+bad); err == nil {
+			t.Errorf("accepted: %s", bad)
+		}
 	}
 }
 

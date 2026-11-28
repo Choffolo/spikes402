@@ -122,6 +122,8 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `wall_mode` | 402 page layout. Omitted is the default two-door page (pay and puzzle side by side). `"pow_first"` starts the puzzle automatically (unless the visitor prefers reduced motion) and offers Lightning under “Tired of waiting? Pay this →”. The invoice is still created when the page is served. Config file only | omitted |
 | `login_routes` | Login endpoints where every attempt costs an Argon2id proof-of-work that grows with each failure; see [Login protection](#login-protection). Config file only | `[]` |
 | `login_surge_failures_per_minute` | Failed logins per minute, site-wide, that add one and two levels for everyone. Two increasing counts. Config file only | `[100, 1000]` |
+| `login_price` | Let a login attempt be paid for over Lightning instead of worked for: `{"base_sats": 10, "max_sats": 640}`. The price doubles with each level, up to `max_sats` (default 64 × `base_sats`); a route's own `price` overrides it. See [Paying instead](#login-protection). Config file only | off |
+| `login_invoice_limits` | Caps on login invoices: `account_network_open` and `account_network_per_minute` (one account from one /24 or /48), `network_per_minute`, `per_minute`, `open`. Beyond any of them, no invoice: proof-of-work only. Config file only | `2, 6, 20, 60, 500` |
 | `protect` | Path patterns that require payment. `"/premium/**"` = everything under `/premium`; other patterns use [glob syntax](https://pkg.go.dev/path#Match), e.g. `"/*.pdf"`. See [Path matching](#path-matching) | required |
 | `protect_case_sensitive` | Match `protect` patterns with exact letter case. Off by default, because many websites serve `/Premium` like `/premium` | `false` |
 | `pow_seconds_per_sat` | How much work replaces one sat: seconds of one CPU core (see [Proof-of-work pricing](#proof-of-work-pricing)). Values below 1 are refused unless `unsafe_allow_dangerous_config` is set. Example configs use `5` with `price_sats: 2`, which is the same puzzle as 1 sat at this default | `10` |
@@ -694,6 +696,102 @@ answer, so it reveals a little:
 
 It never reveals whether an account exists.
 
+**Paying instead**
+
+A site can let people pay a few sats instead of doing the work. Paying
+replaces only the computation of one attempt. The username and password
+still go to your site and must be right: a payment buys the right to try
+once, never access.
+
+```json
+"login_price": { "base_sats": 10, "max_sats": 640 },
+"login_routes": [{ "path": "/login", "username_field": "email",
+  "success": { "status": [302], "set_cookie": "session_auth" },
+  "price": { "base_sats": 20 } }]
+```
+
+- **Price.** `base_sats` at the base level, doubling with each level above
+  it (the same level the proof-of-work would have), at most `max_sats`
+  (default 64 × `base_sats`, six doublings; never more than 1,000,000).
+  A route's `price` overrides `login_price`; `"price": {"base_sats": 0}`
+  turns paying off for that route. Paying is off when neither is set, and
+  while the proxy is paused (including a pause toggled on the dashboard at
+  run time); the login proof-of-work stays on.
+  Each failed attempt raises the level, and the price with it, whether the
+  attempt was paid or worked for.
+- **Where the sats go.** To the Lightning node configured in `lightning`,
+  like every other payment. Spikes402 never holds keys or funds.
+- **The flow.** The `402` challenge and `/.spikes402/login-challenge`
+  carry `price_sats` and `"pay_instead": "/.spikes402/login-invoice"` when
+  paying is on. `POST /.spikes402/login-invoice` with the same JSON as a
+  challenge (`method`, `path`, `username`) returns an invoice (`invoice`,
+  `qr` as a PNG data URI, `price_sats`, `level`, `expires_at`) and a
+  `challenge` token. The request must be `Content-Type: application/json`.
+  This endpoint, `login-challenge` and `login-redeem` refuse cross-site
+  browser requests: `Sec-Fetch-Site` other than `same-origin` or `none`,
+  or an `Origin` that is not the request's own host, a `public_hosts`
+  name or the host of `origin`. So a hostile page cannot create invoices
+  in a visitor's name or use up their limits. API clients that send
+  neither header are not affected. After paying, `POST /.spikes402/login-redeem` with
+  `Authorization: L402 <challenge>:<preimage>` returns the same one-use
+  login cookie a proof gets. Without the preimage, `L402 <challenge>`
+  asks the node and returns `202` until the invoice is paid (at most 60
+  polls a minute per client; see below for the node lookups).
+- **Browser forms.** `login.js` shows a "Pay {sats} sats instead" button
+  (`data-text-pay` replaces the text) once the challenge says paying is
+  on. It shows the invoice as a QR code and text, polls until it is paid,
+  then submits the form with the pass. With a WebLN wallet in the page
+  (such as the [Spikes402 extension](#browser-wallet-extension-prototype))
+  it also offers "Pay with one click". It never pays by itself. With a
+  Content-Security-Policy, the page must also allow `img-src data:`.
+- **Same rules as a proof.** The invoice token and the pass are bound to
+  the account, the network (/24 or /48), the route and the level, are
+  spent in the same spent set (within the login quota), and are refused
+  once the level is higher than the one they were priced at. The
+  invoice's payment hash is spent too, so even a node that handed out one
+  payment hash twice cannot let one preimage buy two attempts (the
+  paywall does the same). When the node is asked, it must report at least
+  the price received (fees it took on receipt count as paid), or the
+  answer is refused. A preimage alone relies on the node, like every
+  Lightning receiver, refusing to settle an underpaid invoice.
+- **A payment for an old level buys nothing.** If another attempt on the
+  account, or from the payer's network, fails between the invoice and the
+  redeem, the level rises and the paid invoice no longer buys an attempt.
+  There is no refund and no top-up: honouring old payments would let
+  attempts be bought in advance at the lower price. The redeem answers
+  `409` with the reason, the new `level` and the new `price_sats`, and
+  `login.js` shows that message and the new price. Before paying,
+  `login.js` warns that the price holds only if no other attempt fails
+  meanwhile. Invoices expire after 3 minutes (the token is redeemable for
+  one more minute) to keep that window short.
+- **Protecting the node.** Login invoices share the node's limits with
+  the paywall: each one counts against `max_invoices_per_minute` (default
+  300) and passes the same circuit breaker and timeout. With the default
+  `per_minute` of 60, logins can use at most a fifth of that; keep
+  `per_minute` well below `max_invoices_per_minute` so paying logins can
+  never take every invoice from the paywall. Checking whether an invoice
+  was paid uses the paywall's lookup budget too (120 node lookups a
+  minute, 4 at a time, answers cached and shared), of which login
+  payments may use at most 60. On top of
+  them, at most 2 open invoices and 6 a minute per account from one /24
+  or /48, 20 a minute per network, and 60 a minute and 500 open overall
+  (`login_invoice_limits`). There is deliberately no limit per account
+  alone: anyone could fill it for someone else's account, pushing the real
+  user back to the proof-of-work and learning that someone pays for it.
+  Many networks asking for one account are still bounded by the
+  per-network and overall limits. When any limit is reached, paying is
+  off, or the node fails, the answer is the same `503` with a
+  proof-of-work challenge instead (fail-closed: the wall stays, the node
+  is left alone). It does not say which limit was hit.
+- **What the price reveals.** The price depends on the level alone, so it
+  reveals exactly what the level does (see above). The limits a client
+  can reach are its own (its account and network), its network's, or the
+  site-wide ones. Filling the site-wide ones turns paying off for everyone
+  until they reset; logins still work with the proof-of-work.
+- **Not yet.** Paying is only redeemed at `/.spikes402/login-redeem` for a
+  cookie. Sending `Authorization: L402` directly with the login request,
+  as API clients can with `PoW`, is a possible follow-up.
+
 **What is stored**
 
 - The counters live in memory, at most 1,000,000 entries.
@@ -994,8 +1092,9 @@ Everything else sits behind the discreet **Settings** link:
   ports, trusted proxies / IP header, and admin allowed IPs. The live short rate, baseline, ratio and multiplier of each surge group are shown in status (read-only).
   A stolen admin key can change
   prices, protection and pause, but cannot drain or flood the node.
-  **Pause** serves protected paths free and creates no invoices at all
-  (no load on the node). Only the human admin can toggle pause (on or
+  **Pause** serves protected paths free and creates no invoices at all,
+  login invoices included (no load on the node); login routes still
+  require their proof-of-work. Only the human admin can toggle pause (on or
   off); the AI key may propose it but cannot apply it, even when
   `admin.ai_can_apply` is on. With `ai_can_apply`, the AI may only apply
   changes that make protection stricter or equal (for example a higher

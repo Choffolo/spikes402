@@ -105,6 +105,11 @@ type Options struct {
 	// never trusted for this.
 	LoginHosts      []string
 	LoginOriginHost string
+	// LoginPrice lets a login attempt be paid for instead of worked for
+	// (nil: no paying, unless a route sets its own price), within
+	// LoginInvoiceLimits (0: the default for that limit).
+	LoginPrice         *LoginPrice
+	LoginInvoiceLimits LoginInvoiceLimits
 }
 
 // PriceRule maps a path pattern (same syntax as Protect) to a price.
@@ -147,6 +152,7 @@ type Gate struct {
 	loginSlots     *prefixSlots               // Argon2id checks in progress per /24 or /48
 	loginArgon     *argonBudget               // Argon2id memory for login checks only
 	loginHosts     []string                   // LoginHosts and LoginOriginHost
+	loginPay       *loginInvoices             // open and recent login invoices
 	loginBusyUntil atomic.Int64               // unix seconds: until then, new challenges get a harder pre-check
 
 	nodeLog  rateLog // why no invoice was offered
@@ -199,6 +205,11 @@ func New(opt Options) *Gate {
 		g.loginWideLim = newRateLimiter(loginWideFactor * opt.ChallengesPerMinute)
 		g.loginHosts = slices.DeleteFunc(append(slices.Clone(opt.LoginHosts), opt.LoginOriginHost), func(h string) bool { return h == "" })
 		g.loginSlots = newPrefixSlots(loginPrefixSlots)
+		lim, err := opt.LoginInvoiceLimits.WithDefaults()
+		if err != nil || CheckLoginPrice(opt.LoginPrice) != nil {
+			panic("gate: invalid LoginPrice or LoginInvoiceLimits")
+		}
+		g.loginPay = newLoginInvoices(lim)
 		g.loginArgon = newArgonBudget(loginArgonMaxMiB)
 		g.loginParams = loginPoW
 		g.loginPre = LoginPreBits
@@ -300,7 +311,7 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				g.issuePass(w, r, c.ID) // the page navigates next; the origin is not called yet
 				return
 			}
-			g.deliver(w, r, c.ID, scheme)
+			g.deliver(w, r, c.ID, c.PaymentHash, scheme)
 			return
 		}
 		var busy *busyError
@@ -324,7 +335,7 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // gives the token back for a few more tries (see spentSet.release): a payer
 // should not lose a payment to a hiccup of the site. Other methods may have
 // changed something at the origin, so they never get a second try.
-func (g *Gate) deliver(w http.ResponseWriter, r *http.Request, id, scheme string) {
+func (g *Gate) deliver(w http.ResponseWriter, r *http.Request, id, hash, scheme string) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		g.opt.Next.ServeHTTP(w, r)
 		return
@@ -333,6 +344,9 @@ func (g *Gate) deliver(w http.ResponseWriter, r *http.Request, id, scheme string
 	g.opt.Next.ServeHTTP(rec, r)
 	if rec.status >= 500 {
 		g.spent.release(spentKey(scheme, id), g.now())
+		if hash != "" && !strings.EqualFold(scheme, "PoW") {
+			g.spent.release(payHashKey(hash), g.now())
+		}
 	}
 }
 
@@ -510,15 +524,35 @@ func (g *Gate) redeem(r *http.Request, auth string, price int64) (claims, error)
 		return claims{}, err
 	}
 	scheme, _, _ := strings.Cut(auth, " ")
-	if strings.EqualFold(scheme, "PoW") && g.spent.has(spentKey("L402", c.ID)) {
-		return claims{}, errReplay
+	if strings.EqualFold(scheme, "PoW") {
+		if g.spent.has(spentKey("L402", c.ID)) {
+			return claims{}, errReplay
+		}
+		// Checked last, so a bad attempt does not burn a good token.
+		return c, g.spent.use(spentKey(scheme, c.ID), time.Unix(c.Expires, 0), g.now())
 	}
-	// Checked last, so a bad attempt does not burn a good token.
-	if err := g.spent.use(spentKey(scheme, c.ID), time.Unix(c.Expires, 0), g.now()); err != nil {
-		return claims{}, err
-	}
-	return c, nil
+	return c, g.spendPaid(c)
 }
+
+// spendPaid spends a paid token and its payment hash, for the token's
+// lifetime: a node that handed out one payment hash twice must not let
+// one preimage redeem two tokens. Both are given back together after an
+// origin failure (see deliver).
+func (g *Gate) spendPaid(c claims) error {
+	now, exp := g.now(), time.Unix(c.Expires, 0)
+	if g.spent.has(payHashKey(c.PaymentHash)) && !g.spent.has(spentKey("L402", c.ID)) {
+		return errReplay // another token was paid with this hash
+	}
+	if err := g.spent.use(spentKey("L402", c.ID), exp, now); err != nil {
+		return err
+	}
+	if err := g.spent.use(payHashKey(c.PaymentHash), exp, now); err != nil {
+		return err
+	}
+	return nil
+}
+
+func payHashKey(hash string) string { return "pay-hash:" + hash }
 
 // spentKey is the entry in the spent set for one way of redeeming a token.
 func spentKey(scheme, id string) string {
@@ -716,7 +750,7 @@ func (g *Gate) newOffer(r *http.Request, now time.Time, key string, p pow.Params
 		if err != nil {
 			g.pending.cancelReserve()
 			gotSlot = false
-			g.nodeLog.printf(now, "spikes402: no invoice, offering proof-of-work only: %v", err)
+			g.nodeLog.printf(now, "spikes402: no invoice, offering proof-of-work only: %s", sanitize(err.Error()))
 		} else {
 			c.PaymentHash = hex.EncodeToString(inv.PaymentHash[:])
 			invoice = inv.PaymentRequest

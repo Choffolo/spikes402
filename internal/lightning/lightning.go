@@ -28,7 +28,7 @@ type IncomingPayment struct {
 	Preimage    [32]byte // set when Paid is true
 	Paid        bool
 	Expired     bool
-	ReceivedSat int64
+	ReceivedSat int64 // what the payer paid, fees the node took on receipt included
 }
 
 // IncomingLookup looks up a received payment by hash. The limited-access

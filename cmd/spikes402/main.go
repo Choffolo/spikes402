@@ -191,6 +191,9 @@ func main() {
 		LoginSurge:      *cfg.LoginSurge,
 		LoginHosts:      cfg.PublicHosts,
 		LoginOriginHost: origin.Host,
+
+		LoginPrice:         cfg.LoginPrice,
+		LoginInvoiceLimits: cfg.LoginInvoiceLimits,
 	})
 	mux.Handle("/", g)
 

@@ -140,6 +140,9 @@ func compactID(id string) spentID {
 		}
 	}
 	k[0] = spentKindOther
+	if kind == "loginpay-hash" {
+		k[0] = spentKindLogin // a login payment's hash counts in the login quota too
+	}
 	sum := sha256.Sum256([]byte(id))
 	copy(k[1:], sum[:16])
 	return k

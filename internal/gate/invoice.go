@@ -22,13 +22,14 @@ const ClaimPath = "/.spikes402/claim"
 // Polling and node-lookup limits. Many tabs watching the same invoice
 // share one lookup (see invoiceCache); these caps bound what is left.
 const (
-	claimPerMinute  = 60 // claim requests per client per minute
-	lookupUnpaidTTL = 1500 * time.Millisecond
-	lookupFailTTL   = 1500 * time.Millisecond
-	lookupBurst     = 4           // node lookups in flight
-	lookupPerMin    = 120         // node lookups per minute, all invoices
-	lookupTimeout   = nodeTimeout // same 3s bound as invoice creation
-	lookupCacheMax  = 10_000      // cached results (a few MiB at most)
+	claimPerMinute    = 60 // claim requests per client per minute
+	lookupUnpaidTTL   = 1500 * time.Millisecond
+	lookupFailTTL     = 1500 * time.Millisecond
+	lookupBurst       = 4           // node lookups in flight
+	lookupPerMin      = 120         // node lookups per minute, all invoices
+	lookupLoginPerMin = 60          // of which for login invoices
+	lookupTimeout     = nodeTimeout // same 3s bound as invoice creation
+	lookupCacheMax    = 10_000      // cached results (a few MiB at most)
 )
 
 // invoiceCache looks up invoice status, coalescing concurrent calls for
@@ -44,7 +45,9 @@ type invoiceCache struct {
 	inflight map[string]*invoiceCall
 	window   time.Time
 	fetched  int
-	swept    time.Time
+	// login lookups this window (see getFor)
+	loginFetched int
+	swept        time.Time
 }
 
 type invoiceEntry struct {
@@ -75,6 +78,13 @@ func newInvoiceCache(b lightning.Backend) *invoiceCache {
 // is returned as a non-error unpaid/busy result to the caller; only
 // unexpected node errors are returned as err.
 func (c *invoiceCache) get(paymentHash string, paidUntil, now time.Time) (lightning.IncomingPayment, error) {
+	return c.getFor(paymentHash, paidUntil, now, false)
+}
+
+// getFor is get; login lookups may use at most lookupLoginPerMin of the
+// lookupPerMin node lookups, so login payments polling never take all of
+// the paywall's (cached and coalesced answers are free for both).
+func (c *invoiceCache) getFor(paymentHash string, paidUntil, now time.Time, login bool) (lightning.IncomingPayment, error) {
 	if c == nil || c.lookup == nil || paymentHash == "" {
 		return lightning.IncomingPayment{}, errNoLookup
 	}
@@ -95,14 +105,17 @@ func (c *invoiceCache) get(paymentHash string, paidUntil, now time.Time) (lightn
 		return lightning.IncomingPayment{}, errLookupBusy
 	}
 	if now.Sub(c.window) >= time.Minute {
-		c.window, c.fetched = now, 0
+		c.window, c.fetched, c.loginFetched = now, 0, 0
 	}
-	if c.fetched >= lookupPerMin {
+	if c.fetched >= lookupPerMin || (login && c.loginFetched >= lookupLoginPerMin) {
 		<-c.sem
 		c.mu.Unlock()
 		return lightning.IncomingPayment{}, errLookupBusy
 	}
 	c.fetched++
+	if login {
+		c.loginFetched++
+	}
 	call := &invoiceCall{done: make(chan struct{})}
 	c.inflight[paymentHash] = call
 	c.mu.Unlock()
@@ -227,6 +240,12 @@ func (g *Gate) serveClaim(w http.ResponseWriter, r *http.Request) {
 		g.writeClaim(w, r, http.StatusAccepted, claimBody{Status: "unpaid"})
 		return
 	}
+	if err == nil && pay.Paid && pay.ReceivedSat < c.PriceSats {
+		// The node says less than the price arrived: not paid, whatever the
+		// preimage. (This check predates login payments.)
+		g.writeClaim(w, r, http.StatusPaymentRequired, claimBody{Status: "underpaid"})
+		return
+	}
 	if err == lightning.ErrNotFound || !pay.Paid {
 		status := "unpaid"
 		code := http.StatusAccepted
@@ -240,7 +259,7 @@ func (g *Gate) serveClaim(w http.ResponseWriter, r *http.Request) {
 
 	preimage := hex.EncodeToString(pay.Preimage[:])
 	if r.Header.Get(RedeemHeader) == redeemCookie {
-		if err := g.spent.use(spentKey("L402", c.ID), time.Unix(c.Expires, 0), now); err != nil {
+		if err := g.spendPaid(c); err != nil {
 			g.writeClaim(w, r, http.StatusConflict, claimBody{Status: "spent"})
 			return
 		}
