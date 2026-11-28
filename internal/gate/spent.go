@@ -248,7 +248,9 @@ func (s *spentSet) wrongLogin(id string, now time.Time) {
 	if e.retries == 0 {
 		if s.junk >= s.maxJunk {
 			for k, o := range s.ids {
-				if k[0] == spentKindLogin && o.retries > 0 && k != key {
+				// Never a retry in progress (retries 1, not released):
+				// forgetting it would let its right proof be replayed.
+				if k[0] == spentKindLogin && (o.retries > 1 || o.retries == 1 && o.released) && k != key {
 					s.del(k)
 					break
 				}
@@ -264,18 +266,24 @@ func (s *spentSet) wrongLogin(id string, now time.Time) {
 	_ = s.persist(id, e) // if the disk fails, memory still holds it
 }
 
-// rightLogin records a right nonce for a token reserved by beginLogin,
-// after a wrong one: it is no longer junk, so it is never forgotten early.
-func (s *spentSet) rightLogin(id string) {
+// rightLogin records a right nonce for a token reserved by beginLogin.
+// After a wrong one it is no longer junk, so it is never forgotten early;
+// and if its entry is missing anyway, it is spent again until expires.
+func (s *spentSet) rightLogin(id string, expires, now time.Time) {
 	s.mu.Lock()
 	key := compactID(id)
 	e, ok := s.ids[key]
-	if !ok || e.retries == 0 {
+	switch {
+	case !ok:
+		e = spentEntry{expires: expires.Unix(), first: now.Unix()}
+		s.logins++
+	case e.retries == 0:
 		s.mu.Unlock()
 		return
+	default:
+		e.retries = 0
+		s.junk--
 	}
-	e.retries = 0
-	s.junk--
 	s.ids[key] = e
 	s.mu.Unlock()
 	_ = s.persist(id, e)

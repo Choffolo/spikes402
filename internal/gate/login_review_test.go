@@ -235,7 +235,7 @@ func TestLoginHashAndQuestionInPath(t *testing.T) {
 	if rec := g.get("/wiki/C%23", "", ""); rec.Code != http.StatusOK || rec.Body.String() != "content of /wiki/C#" {
 		t.Fatalf("no login routes, /wiki/C%%23: %d %s", rec.Code, rec.Body)
 	}
-	if rec := g.get("/premium/x%23y", "", ""); rec.Code != http.StatusPaymentRequired {
+	if rec := g.get("/premium/x%23y", "", ""); rec.Code != http.StatusBadRequest {
 		t.Fatalf("/premium/x%%23y: %d", rec.Code)
 	}
 	if rec := g.get("/doc.pdf%3Fx", "", ""); rec.Code != http.StatusBadRequest {
@@ -340,5 +340,102 @@ func TestLoginOverrideAndHost(t *testing.T) {
 	}
 	if ch := decodeChallenge(t, g.do(loginReq("bob", "198.51.100.1", ""))); ch.Level != LoginBaseLevel+3 {
 		t.Fatalf("cross-host redirects counted as successes: level %d", ch.Level)
+	}
+}
+
+// R8-2: a cut must not change the price: "#" and "?" are refused on any
+// path that is protected or priced before or after the cut.
+func TestHashCutCannotChangePrice(t *testing.T) {
+	f := newFixture(t)
+	opt := f.gate.opt
+	opt.Protect = []string{"/premium/**"}
+	opt.Prices = []PriceRule{{Pattern: "/premium/*.jpg", PriceSats: 1}, {Pattern: "/premium/**", PriceSats: 100}}
+	opt.LoginRoutes = nil
+	f.gate = New(opt)
+	f.gate.now = func() time.Time { return f.now }
+	for _, target := range []string{"/premium/report.pdf%23.jpg", "/premium/report.pdf%3F.jpg", "/premium/report.pdf%2523.jpg", "/PREMIUM/report.pdf%23.jpg"} {
+		if rec := f.get(target, "", ""); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: %d", target, rec.Code)
+		}
+	}
+	if rec := f.get("/premium/report.pdf", "", ""); rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("/premium/report.pdf: %d", rec.Code)
+	}
+	if rec := f.get("/wiki/C%23", "", ""); rec.Code != http.StatusOK {
+		t.Fatalf("/wiki/C%%23: %d", rec.Code)
+	}
+}
+
+// R8-1: the reviewer's sequence. K's retry is in progress when J's wrong
+// try needs room: K must not be forgotten, and K's right proof must not
+// be replayable. And rightLogin re-spends a missing entry.
+func TestLoginJunkCapKeepsRetryInProgress(t *testing.T) {
+	s := newSpentSet()
+	s.maxJunk = 1
+	now := time.Unix(1_800_000_000, 0)
+	exp := now.Add(time.Hour)
+	K, J := loginSpentKey(strings.Repeat("a", 32)), loginSpentKey(strings.Repeat("b", 32))
+	if err := s.beginLogin(K, exp, now, loginRetryAfter); err != nil {
+		t.Fatal(err)
+	}
+	s.wrongLogin(K, now)
+	now = now.Add(loginRetryAfter)
+	if err := s.beginLogin(K, exp, now, loginRetryAfter); err != nil { // K's retry starts
+		t.Fatal(err)
+	}
+	if err := s.beginLogin(J, exp, now, loginRetryAfter); err != nil {
+		t.Fatal(err)
+	}
+	s.wrongLogin(J, now) // the cap is full: must not evict K
+	if !s.has(K) {
+		t.Fatal("a retry in progress was forgotten")
+	}
+	s.rightLogin(K, exp, now) // K's retry was right
+	if err := s.beginLogin(K, exp, now.Add(loginRetryAfter), loginRetryAfter); err != errReplay {
+		t.Fatalf("replay of K's right proof: %v", err)
+	}
+	// Belt and braces: a missing entry is spent again by rightLogin.
+	L := loginSpentKey(strings.Repeat("c", 32))
+	s.rightLogin(L, exp, now)
+	if err := s.beginLogin(L, exp, now, loginRetryAfter); err != errReplay {
+		t.Fatalf("replay after a missing entry: %v", err)
+	}
+}
+
+// R8-3: X-Original-Method and X-Forwarded-Method are refused on the route
+// and on its near paths.
+func TestLoginOriginalAndForwardedMethod(t *testing.T) {
+	f := newLoginFixture(t)
+	ch := decodeChallenge(t, f.do(loginReq("alice", "192.0.2.1", "")))
+	proof := solveLogin(t, ch)
+	for _, h := range []string{"X-Original-Method", "X-Forwarded-Method", "x-forwarded-method"} {
+		r := loginReq("alice", "192.0.2.1", proof)
+		r.Header.Set(h, "PUT")
+		if rec := f.do(r); rec.Code != http.StatusBadRequest || f.calls != 0 {
+			t.Fatalf("POST with %s: %d, origin calls %d", h, rec.Code, f.calls)
+		}
+		g := httptest.NewRequest(http.MethodGet, "/login", nil)
+		g.Header.Set(h, "POST")
+		if rec := f.do(g); rec.Code != http.StatusMethodNotAllowed || f.calls != 0 {
+			t.Fatalf("GET with %s: %d", h, rec.Code)
+		}
+	}
+	if rec := f.do(loginReq("alice", "192.0.2.1", proof)); rec.Code != http.StatusFound {
+		t.Fatalf("the same proof without the header: %d", rec.Code)
+	}
+}
+
+// R8-4: letters that do not decompose are spelled out.
+func TestLoginAccountNameLetters(t *testing.T) {
+	for _, g := range [][]string{
+		{"aesir", "æsir", "ÆSIR"}, {"oeuvre", "œuvre", "Œuvre"}, {"soren", "søren", "SØREN"},
+		{"lodz", "łódź", "ŁÓDŹ"}, {"dorde", "đorđe", "Đorđe"}, {"eddi", "eðði", "EÐÐI"},
+		{"thor", "þor", "Þor"}, {"strasse", "straße"}, {"hamid", "ħamid"},
+	} {
+		for _, v := range g[1:] {
+			if loginAccountName(v) != loginAccountName(g[0]) {
+				t.Errorf("%q and %q are different accounts", v, g[0])
+			}
+		}
 	}
 }

@@ -175,11 +175,12 @@ web server sits behind Spikes402. So:
   dot segments and double slashes (`/a/../b`, `//b`), encoded slashes
   and backslashes (`%2F`, `%5C`, `\`), control characters (`%00`,
   tabs, line breaks), and a `#` or `?` in the decoded path (a raw `#`,
-  which browsers never send, `%23` or `%3F`) where an origin that decodes
-  and re-parses the target could cut the path into something else: when
-  the cut path is on or near a login route (`/login%23x` could be served
-  as `/login`), or is protected differently from the whole path. Other
-  paths keep their `#` and `?` (`/wiki/C%23` is served). A `%25` is refused only when a second decode would
+  which browsers never send, `%23` or `%3F`), where an origin that
+  decodes and re-parses the target could cut the path there, on any path
+  that is protected or has a price rule, or is on or near a login route,
+  before or after the cut: `/login%23x` could be served as `/login`, and
+  `/premium/report.pdf%23.jpg` priced as a `.jpg` but served as the PDF.
+  Free paths keep their `#` and `?` (`/wiki/C%23` is served). A `%25` is refused only when a second decode would
   change whether the path is protected (so `/x/%252e%252e/premium/article`
   is still a 400; a harmless `%25` on a free page is not).
 - `protect` and `prices` patterns must not end with a trailing slash
@@ -473,8 +474,12 @@ limits below (`429`) apply to everyone behind the same address or prefix.
   ones), without accents and other combining marks (as accent-insensitive
   collations such as MySQL's `utf8mb4_0900_ai_ci` compare), without
   invisible characters (zero-width spaces, soft hyphens), trimmed, and
-  case-folded (`ß` as `ss`, `İ` and `ı` as `i`). So `Élise`, `ELISE` and
-  `ｅｌｉｓｅ` share counters. Merging too much only makes two names share
+  case-folded (`İ` and `ı` as `i`), with letters that do not decompose
+  spelled out (`ß` as `ss`, `æ` as `ae`, `œ` as `oe`, `ø` as `o`, `ł` as
+  `l`, `đ` and `ð` as `d`, `þ` as `th`, `ħ` as `h`, `ŧ` as `t`). So
+  `Élise`, `ELISE` and `ｅｌｉｓｅ` share counters, as do `Søren` and
+  `soren`. Other scripts are only case-folded and decomposed; a database
+  collation can still merge names this does not. Merging too much only makes two names share
   counters. Plus-addressing (`alice+x@example.com`) and dots in Gmail
   names are **not** merged, because only some sites treat them as one
   mailbox: if yours does, strip them in the origin before the lookup and
@@ -497,7 +502,12 @@ limits below (`429`) apply to everyone behind the same address or prefix.
   `//host/...`) is never under `location_prefix`, and without
   `set_cookie` never a success at all. The names in `public_hosts` count
   as this site, so list both `example.com` and `www.example.com` there if
-  the origin redirects from one to the other.
+  the origin redirects from one to the other. **Set `public_hosts`
+  whenever Spikes402 sits behind another proxy that rewrites `Host`**
+  (nginx's `proxy_pass` sends the upstream's name by default): the proxy
+  then sees `Host: 127.0.0.1:8402` while the origin redirects to
+  `https://example.com/...`, and without `public_hosts` every honest login
+  counts as a failure.
 - **Forwarding.** The origin gets exactly the body that was checked, with
   its length set and no chunked encoding or trailers.
 - **Precedence.** Login routes are checked before `protect`. Neither

@@ -221,7 +221,7 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	set := g.live.Load()         // one consistent snapshot for this request
 	// Refuse paths like "/free/../paid" or "/free%2f..%2fpaid": the origin
 	// could normalise them into a protected path we did not recognise.
-	if why := checkPath(r.URL, func(p string) bool { return g.protected(p, set) }, func(p string) bool { return len(g.nearLoginRoutes(p)) > 0 }); why != "" {
+	if why := checkPath(r.URL, func(p string) bool { return g.protected(p, set) || g.priced(p, set) }, func(p string) bool { return len(g.nearLoginRoutes(p)) > 0 }); why != "" {
 		http.Error(w, "bad path: "+why, http.StatusBadRequest)
 		return
 	}
@@ -424,6 +424,21 @@ func (g *Gate) protected(p string, set *Settings) bool {
 			pat = strings.ToLower(pat)
 		}
 		if matchPattern(pat, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// priced reports whether a price rule matches p.
+func (g *Gate) priced(p string, set *Settings) bool {
+	key := matchKey(p, g.opt.CaseSensitive)
+	for _, r := range set.Prices {
+		pat := r.Pattern
+		if !g.opt.CaseSensitive {
+			pat = strings.ToLower(pat)
+		}
+		if matchPattern(pat, key) {
 			return true
 		}
 	}

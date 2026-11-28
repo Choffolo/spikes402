@@ -243,6 +243,20 @@ func (g *Gate) loginAccount(username string) string {
 	return g.loginID("account", loginAccountName(username))
 }
 
+// loginLetterFold spells out letters that do not decompose but that
+// accent-insensitive collations and transliterations read as Latin ones.
+// Keys are foldRune forms, so either case matches.
+var loginLetterFold = func() map[rune]string {
+	m := map[rune]string{}
+	for k, v := range map[rune]string{
+		'ß': "ss", 'æ': "ae", 'œ': "oe", 'ø': "o", 'ł': "l", 'đ': "d", 'ð': "d",
+		'þ': "th", 'ħ': "h", 'ŧ': "t", 'ŀ': "l", 'ĸ': "k", 'ŋ': "n",
+	} {
+		m[foldRune(k)] = v
+	}
+	return m
+}()
+
 // loginAccountName is the spelling of a username the counters use: every
 // spelling an origin or its database may treat as the same account gives
 // the same name, so an attacker cannot split one account's failures over
@@ -250,7 +264,8 @@ func (g *Gate) loginAccount(username string) string {
 // "ﬁ"), drops combining marks (accents, so "Élise" is "elise", as in
 // accent-insensitive collations like MySQL's utf8mb4_0900_ai_ci) and
 // invisible format characters (zero-width spaces, soft hyphens), trims
-// spaces and folds letter case (foldRune, plus "ß" as "ss"). Merging
+// spaces and folds letter case (foldRune), spelling out letters such as
+// "ß", "æ", "ø" and "ł" (loginLetterFold). Merging
 // too much only makes two spellings share counters. It does not strip
 // "+tag" from email addresses or dots in Gmail names: that is up to each
 // site.
@@ -259,8 +274,10 @@ func loginAccountName(username string) string {
 	for _, r := range strings.TrimSpace(norm.NFKD.String(username)) {
 		switch {
 		case unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf, unicode.Other_Default_Ignorable_Code_Point, unicode.Variation_Selector):
-		case r == 'ß' || r == 'ẞ':
-			b.WriteString("SS")
+		case loginLetterFold[foldRune(r)] != "":
+			for _, x := range loginLetterFold[foldRune(r)] {
+				b.WriteRune(foldRune(x))
+			}
 		default:
 			b.WriteRune(foldRune(r))
 		}
@@ -437,7 +454,7 @@ func (g *Gate) checkLoginWork(r *http.Request, cred, resHash, acct, net string) 
 		g.login.junkProof(net, now)
 		return claims{}, errBadProof
 	}
-	g.spent.rightLogin(key)
+	g.spent.rightLogin(key, time.Unix(c.Expires, 0), now)
 	return c, nil
 }
 
