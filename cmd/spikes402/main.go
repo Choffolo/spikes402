@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -83,6 +84,22 @@ func main() {
 		}
 	} else {
 		log.Print("no secret_key set: spent tokens and withdrawal intents are not saved to disk")
+	}
+
+	// Login failure counters survive a restart only with a configured
+	// secret (the snapshot is sealed with it), like spent tokens.
+	var loginState *gate.LoginState
+	if len(cfg.LoginRoutes) > 0 {
+		loginState = gate.NewLoginState()
+		if secretConfigured {
+			s, err := gate.LoadLoginState(cfg.StateDir, secret)
+			if err != nil {
+				log.Fatalf("login counters: %v (delete %s to start over)", err, filepath.Join(cfg.StateDir, "login-counters"))
+			}
+			loginState = s
+			loginState.StartPersisting(context.Background(), cfg.StateDir, secret)
+		}
+		log.Printf("login proof-of-work on %d route(s), base level %d", len(cfg.LoginRoutes), gate.LoginBaseLevel)
 	}
 
 	mux := http.NewServeMux()
@@ -168,6 +185,12 @@ func main() {
 
 		SpentStore:   spentStore,
 		SpentRecords: spentRecords,
+
+		LoginRoutes:     cfg.LoginRoutes,
+		LoginState:      loginState,
+		LoginSurge:      *cfg.LoginSurge,
+		LoginHosts:      cfg.PublicHosts,
+		LoginOriginHost: origin.Host,
 	})
 	mux.Handle("/", g)
 

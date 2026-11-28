@@ -17,9 +17,14 @@ const MaxURIBytes = 8 << 10
 // checkPath refuses request paths that the origin could read differently
 // from us, so that a protected page cannot be reached under another
 // spelling. It returns a short reason, or "" if the path is fine.
-// protected reports whether a path is behind the paywall; it is used
-// only for %25 (an encoded percent).
-func checkPath(u *url.URL, protected func(string) bool) string {
+// protected reports whether a path is behind the paywall or has a price
+// rule, and nearLogin
+// whether it is on or near a login route (either may be nil); they are
+// used only for %25 (an encoded percent) and for "#" and "?".
+func checkPath(u *url.URL, protected, nearLogin func(string) bool) string {
+	guarded := func(p string) bool {
+		return (protected != nil && protected(p)) || (nearLogin != nil && nearLogin(p))
+	}
 	p := u.Path // decoded once by net/http
 	if p == "" || p[0] != '/' {
 		return "path must start with /"
@@ -33,10 +38,10 @@ func checkPath(u *url.URL, protected func(string) bool) string {
 	// %25 is only refused when a second decode would change whether the
 	// path is protected, so a harmless %25 on a free path is not a 400
 	// for the whole site. Encoded slashes stay forbidden everywhere.
-	if strings.Contains(raw, "%25") && protected != nil {
+	if strings.Contains(raw, "%25") && (protected != nil || nearLogin != nil) {
 		if twice, err := url.PathUnescape(p); err == nil {
-			oncePay := protected(p)
-			if protected(twice) != oncePay || protected(path.Clean(twice)) != oncePay {
+			oncePay := guarded(p)
+			if guarded(twice) != oncePay || guarded(path.Clean(twice)) != oncePay || cutRisky(twice, protected, nearLogin) {
 				return "encoded percent sign in path"
 			}
 			for i := 0; i < len(twice); i++ {
@@ -54,10 +59,36 @@ func checkPath(u *url.URL, protected func(string) bool) string {
 			return "control character or backslash in path"
 		}
 	}
+	if cutRisky(p, protected, nearLogin) {
+		return "# or ? in path"
+	}
 	if c := path.Clean(p); c != p && c+"/" != p {
 		return "path is not in canonical form (// or dot segments)"
 	}
 	return ""
+}
+
+// cutRisky reports whether p holds a "#" (raw, which no browser sends, or
+// %23) or "?" (%3F) where an origin that decodes and re-parses the
+// target could cut it, on a path that is paid (protected or priced; see
+// checkPath) or near a login route, before or after the cut:
+// "/login%23x" could be served as "/login", and
+// "/premium/report.pdf%23.jpg" priced as a ".jpg" but served as the PDF.
+// Elsewhere "#" and "?" are left alone ("/wiki/C%23").
+func cutRisky(p string, paid, nearLogin func(string) bool) bool {
+	for i := 0; i < len(p); i++ {
+		if p[i] != '#' && p[i] != '?' {
+			continue
+		}
+		cut := p[:i]
+		if nearLogin != nil && (nearLogin(cut) || nearLogin(p)) {
+			return true
+		}
+		if paid != nil && (paid(cut) || paid(p)) {
+			return true
+		}
+	}
+	return false
 }
 
 // UsablePattern reports whether pat can match a request path after the

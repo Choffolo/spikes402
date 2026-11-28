@@ -191,7 +191,7 @@ func (g *Gate) serveClaim(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Content-Type-Options", "nosniff")
 
 	now := g.now()
-	if ok, wait := g.claimLim.allow(g.client(r), now); !ok {
+	if ok, wait := g.claimLim.allow(g.client(r), g.clientCoarse(r), now); !ok {
 		h.Set("Retry-After", itoaWait(wait))
 		http.Error(w, "too many requests", http.StatusTooManyRequests)
 		return

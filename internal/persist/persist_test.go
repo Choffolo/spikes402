@@ -299,3 +299,51 @@ func TestWriteFile(t *testing.T) {
 		t.Fatalf("mode %o %v", mode, err)
 	}
 }
+
+// Expired records leave memory periodically and the snapshot at each
+// compaction, not only at Load.
+func TestSpentPrunesExpired(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	key := testKey(t)
+	now := time.Unix(1_800_000_000, 0)
+	s, err := OpenSpent(dir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.now = func() time.Time { return now }
+	if _, err := s.Load(now); err != nil {
+		t.Fatal(err)
+	}
+	id := func(c string) string { return "pay:" + strings.Repeat(c, 32) }
+	s.Persist(SpentRecord{ID: id("a"), Expires: now.Add(time.Minute).Unix(), First: now.Unix()})
+	s.Persist(SpentRecord{ID: id("b"), Expires: now.Add(time.Hour).Unix(), First: now.Unix()})
+	now = now.Add(2 * time.Minute) // "a" expired, but not yet pruneEvery
+	s.Persist(SpentRecord{ID: id("c"), Expires: now.Add(time.Hour).Unix(), First: now.Unix()})
+	if len(s.entries) != 3 {
+		t.Fatalf("pruned too early: %d", len(s.entries))
+	}
+	now = now.Add(pruneEvery)
+	s.Persist(SpentRecord{ID: id("d"), Expires: now.Add(time.Hour).Unix(), First: now.Unix()})
+	if _, ok := s.entries[id("a")]; ok || len(s.entries) != 3 {
+		t.Fatalf("expired record kept in memory: %d entries", len(s.entries))
+	}
+	// A compaction writes no expired record: re-add "a" in memory only
+	// (as if not yet pruned) and compact.
+	s.mu.Lock()
+	s.entries[id("a")] = SpentRecord{ID: id("a"), Expires: now.Add(-time.Second).Unix()}
+	err = s.compactLocked(now)
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, _ := OpenSpent(dir, key)
+	got, err := s2.Load(time.Unix(0, 0)) // an early clock keeps everything on disk
+	if err != nil || len(got) != 3 {
+		t.Fatalf("snapshot: %d records, %v", len(got), err)
+	}
+	for _, r := range got {
+		if r.ID == id("a") {
+			t.Fatal("expired record written to the snapshot")
+		}
+	}
+}

@@ -363,3 +363,43 @@ func TestPublicStatsFlag(t *testing.T) {
 		t.Fatalf("example should leave it off: %v err=%v", c != nil && c.PublicStats, err)
 	}
 }
+
+func TestLoginRoutesConfig(t *testing.T) {
+	base := `{"origin":"http://o","price_sats":2,"protect":["/x"],"lightning":{"backend":"fake"},`
+	c, err := load(t, base+`"login_routes":[{"path":"/login","username_field":"email","success":{"status":[302],"set_cookie":"sid"}}]}`)
+	if err != nil || len(c.LoginRoutes) != 1 || c.LoginRoutes[0].Method != "POST" || *c.LoginSurge != [2]int{100, 1000} {
+		t.Fatalf("valid route: %+v %v", c.LoginRoutes, err)
+	}
+	for _, bad := range []string{
+		`"login_routes":[{"path":"/login","success":{"status":[302]}}]}`,
+		`"login_routes":[{"path":"/login/*","username_field":"u","success":{"status":[302]}}]}`,
+		`"login_surge_failures_per_minute":[1000,100]}`,
+		`"login_surge_failures_per_minute":[0,100]}`,
+		`"login_surge_failures_per_minute":[100]}`,
+	} {
+		if _, err := load(t, base+bad); err == nil {
+			t.Errorf("accepted: %s", bad)
+		}
+	}
+}
+
+// preserve_host forwards the client's Host, which an origin may echo into
+// a login redirect: without public_hosts no absolute Location could be
+// trusted, so the combination is refused.
+func TestLoginPreserveHostNeedsPublicHosts(t *testing.T) {
+	base := `{"origin":"http://o","price_sats":2,"protect":["/x"],"lightning":{"backend":"fake"},"trusted_proxies":["10.0.0.0/8"],"preserve_host":true,` +
+		`"login_routes":[{"path":"/login","username_field":"email","success":{"status":[302],"location_prefix":"/home"}}]`
+	if _, err := load(t, base+`}`); err == nil || !strings.Contains(err.Error(), "public_hosts") {
+		t.Fatalf("accepted preserve_host + login_routes without public_hosts: %v", err)
+	}
+	if _, err := load(t, base+`,"public_hosts":["example.com"]}`); err != nil {
+		t.Fatalf("with public_hosts: %v", err)
+	}
+}
+
+func TestLoginSurgeConfig(t *testing.T) {
+	c, err := load(t, `{"origin":"http://o","price_sats":2,"protect":["/x"],"lightning":{"backend":"fake"},"login_surge_failures_per_minute":[20,200]}`)
+	if err != nil || *c.LoginSurge != [2]int{20, 200} {
+		t.Fatalf("%v %v", c.LoginSurge, err)
+	}
+}

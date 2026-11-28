@@ -120,13 +120,15 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `surge` | Optional demand-based price multiplier, **off by default**. See [Dynamic pricing](#dynamic-pricing-optional-off-by-default). Config file only (not a dashboard control) | off |
 | `previews` | Optional list of `{ "pattern", "mode", "max_chars" }` rules that show a teaser of the page on its 402 page, see [The 402 page](#the-402-page-for-people). `mode`: `"none"`, `"title"` (title and meta description) or `"excerpt"` (also the first `max_chars` characters, default 300, at most 1000). Same patterns as `protect`; **the first matching rule wins**. Config file only | `[]` = no teaser |
 | `wall_mode` | 402 page layout. Omitted is the default two-door page (pay and puzzle side by side). `"pow_first"` starts the puzzle automatically (unless the visitor prefers reduced motion) and offers Lightning under “Tired of waiting? Pay this →”. The invoice is still created when the page is served. Config file only | omitted |
+| `login_routes` | Login endpoints where every attempt costs an Argon2id proof-of-work that grows with each failure; see [Login protection](#login-protection). Config file only | `[]` |
+| `login_surge_failures_per_minute` | Failed logins per minute, site-wide, that add one and two levels for everyone. Two increasing counts. Config file only | `[100, 1000]` |
 | `protect` | Path patterns that require payment. `"/premium/**"` = everything under `/premium`; other patterns use [glob syntax](https://pkg.go.dev/path#Match), e.g. `"/*.pdf"`. See [Path matching](#path-matching) | required |
 | `protect_case_sensitive` | Match `protect` patterns with exact letter case. Off by default, because many websites serve `/Premium` like `/premium` | `false` |
 | `pow_seconds_per_sat` | How much work replaces one sat: seconds of one CPU core (see [Proof-of-work pricing](#proof-of-work-pricing)). Values below 1 are refused unless `unsafe_allow_dangerous_config` is set. Example configs use `5` with `price_sats: 2`, which is the same puzzle as 1 sat at this default | `10` |
 | `pow_difficulty` | Leading zero bits for the puzzle. `0` = derive from the price and `pow_seconds_per_sat` | `0` |
 | `pow_algorithm` | `"sha256d"` or `"argon2id"` (memory-hard, see [Argon2id](#argon2id-memory-hard-proof-of-work)) | `"sha256d"` |
 | `argon2_memory_mib` | Memory per Argon2id attempt, 8–256 MiB | `16` |
-| `argon2_max_memory_mib` | Memory all concurrent Argon2id checks may use together. A check that needs more than this is refused at startup. Extra checks wait briefly, then `503` | `256` |
+| `argon2_max_memory_mib` | Memory all concurrent Argon2id checks of the API puzzle may use together (login checks have their own 128 MiB, see [Login protection](#login-protection)). A check that needs more than this is refused at startup. Extra checks wait briefly, then `503` | `256` |
 | `challenge_ttl_seconds` | How long a 402 offer (token and invoice) stays valid | `600` |
 | `pass_ttl_seconds` | How long the post-unlock access pass lasts (0-60). `0` means every request needs a fresh payment or proof-of-work | `10` |
 | `challenges_per_minute` | 402 answers per client per minute; beyond that, `429 Too Many Requests` | `30` |
@@ -134,7 +136,7 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `max_pending_invoices` | Open (unpaid, unexpired) invoices at once; beyond that, proof-of-work only | `10000` |
 | `client_ip_header` | Header holding the visitor's IP when Spikes402 runs behind your own proxy, e.g. `"X-Forwarded-For"`, `"X-Real-IP"`, `"CF-Connecting-IP"` | `""` (use the connection's address) |
 | `trusted_proxies` | IPs or CIDR ranges of those proxies, e.g. `["127.0.0.1"]`. The header is ignored from anyone else. Required with `client_ip_header` or `preserve_host` | `[]` |
-| `preserve_host` | Send the public `Host` (or `X-Forwarded-Host`) to the origin, for name-based virtual hosts. Only from `trusted_proxies`; if `public_hosts` is set, only those names are forwarded. Off: the origin sees the host of `origin` | `false` |
+| `preserve_host` | Send the public `Host` (or `X-Forwarded-Host`) to the origin, for name-based virtual hosts. Only from `trusted_proxies`; if `public_hosts` is set, only those names are forwarded (required with `login_routes`). Off: the origin sees the host of `origin` | `false` |
 | `max_connections` | Client connections open at once; more wait in the queue | `10000` |
 | `read_timeout_seconds` / `write_timeout_seconds` | Longest time to receive a whole request / send a whole response (raise the second for very large downloads or streaming) | `60` / `300` |
 | `unsafe_allow_dangerous_config` | Accept settings refused by default: `trusted_proxies` or `admin.allowed_ips` covering the whole internet (`0.0.0.0/0`, `::/0`), or the fake backend on a non-localhost address | `false` |
@@ -171,8 +173,14 @@ web server sits behind Spikes402. So:
   headers are capped at 32 KiB.
 - Paths that servers read differently are refused with `400 Bad Request`:
   dot segments and double slashes (`/a/../b`, `//b`), encoded slashes
-  and backslashes (`%2F`, `%5C`, `\`), and control characters (`%00`,
-  tabs, line breaks). A `%25` is refused only when a second decode would
+  and backslashes (`%2F`, `%5C`, `\`), control characters (`%00`,
+  tabs, line breaks), and a `#` or `?` in the decoded path (a raw `#`,
+  which browsers never send, `%23` or `%3F`), where an origin that
+  decodes and re-parses the target could cut the path there, on any path
+  that is protected or has a price rule, or is on or near a login route,
+  before or after the cut: `/login%23x` could be served as `/login`, and
+  `/premium/report.pdf%23.jpg` priced as a `.jpg` but served as the PDF.
+  Free paths keep their `#` and `?` (`/wiki/C%23` is served). A `%25` is refused only when a second decode would
   change whether the path is protected (so `/x/%252e%252e/premium/article`
   is still a 400; a harmless `%25` on a free page is not).
 - `protect` and `prices` patterns must not end with a trailing slash
@@ -341,6 +349,366 @@ cheaper ones.
 **Future option:** [RandomX](https://github.com/tevador/RandomX) (Monero's
 CPU-oriented PoW) narrows the gap to specialised hardware even further, but
 it needs ~256 MiB per verifier and a C library. Not implemented.
+
+## Login protection
+
+List your login endpoints in `login_routes` and every login attempt costs
+work, always, for everyone. Each failed attempt makes the next one cost
+more. Failures alone never block an account; they only make attempts more
+expensive. But a real user's price can be raised by others:
+
+- by an attacker anywhere, by up to +4 levels (the account term);
+- by anyone sharing the user's /24 or IPv6 /48 (an office, a carrier NAT),
+  by up to +10 when they fail on the same account (the pair term) and +6
+  when they fail on any account (the network term), or +1 by sending
+  proofs that skip the Argon2id work;
+- by everyone, by +1 or +2 while the whole site sees a surge of failures.
+
+Load can slow or stop a real user too: while the login Argon2id budget, or
+the user's network's share of it, is full, logins get `503`; and the rate
+limits below (`429`) apply to everyone behind the same address or prefix.
+
+```json
+"login_routes": [{
+  "method": "POST",
+  "path": "/login",
+  "username_field": "email",
+  "success": { "status": [302, 303], "location_not_prefix": "/login", "set_cookie": "session_auth" }
+}]
+```
+
+**How the proxy checks a login**
+
+- **Matching.** `path` is matched in the same canonical form as `protect`
+  (see [Path matching](#path-matching)), but always without letter case,
+  whatever `protect_case_sensitive` says: a trailing slash, `;params`,
+  trailing dots and spaces and case are ignored, so `/Login;jsessionid=1`
+  is the `/login` route. `method` defaults to `POST` and is compared
+  without letter case. `"/"` cannot be a login path.
+- **Near paths and other methods.** Some frameworks serve a login under
+  more paths: a format suffix (`/login.json`, `/login.do`) or a path below
+  it (`/login/x`). On the login path and on those, only a `GET`, `HEAD` or
+  `OPTIONS` that cannot carry a login passes to the origin unchecked: no
+  body, no method-override header (`X-HTTP-Method-Override` and the like),
+  and no `username_field` in the query string (PHP's `$_REQUEST` and
+  Flask's `request.values` read it there). Everything else that is not the
+  configured route gets `405`. So a `POST` to an endpoint below a login
+  path (for example `/login/2fa`) is refused: move it elsewhere. A link
+  that pre-fills the username in the query (`/login?email=...`) gets
+  `405` too.
+- **Success and failure.** An answer is a success only if all of these
+  hold; anything else, including an answer the origin never wrote, is a
+  failure:
+  - its status is in `success.status`;
+  - it does not redirect under `location_not_prefix`;
+  - if `location_prefix` is set, it redirects under it;
+  - if `set_cookie` is set, it sets that cookie (non-empty, not expired);
+  - if `set_cookie` is not set, it does not redirect to the `Referer`
+    (which the client chooses, and where origins send failed logins
+    "back");
+  - if `location_prefix` is set (and `set_cookie` is not), a redirect is
+    a success only if the request carried exactly one `Referer`: an
+    absolute `http`/`https` URL with a host. No `Referer`, an empty one,
+    a relative one, or several count as a failure, because without it
+    the origin may send a failure "back" to a page it remembers, which
+    the client can put under the prefix;
+  - if neither `set_cookie` nor `location_prefix` is set, it does not
+    redirect to any query or body value either (a `next` parameter, say).
+
+  If `success.status` lists any `3xx`, the proxy refuses to start unless
+  `set_cookie` or `location_prefix` is set: a redirect alone cannot tell
+  a success from a failure, and the guess above would count honest logins
+  that follow `next` as failures. With `location_prefix` the `next` guess
+  is skipped but the `Referer` checks stay; with `set_cookie` all are
+  skipped.
+
+  `location_prefix` is unsafe if the origin can send a failed login to
+  the previous page by any other means than the `Referer` header while a
+  `Referer` is present: an attacker makes that page one under the prefix,
+  and every failure counts as a success. Use `set_cookie` for such an
+  origin, with a cookie the origin sets **only** on a successful login. A
+  session cookie set on every response (`laravel_session`, `PHPSESSID`,
+  `connect.sid`, ...) is the wrong choice: failures set it too.
+
+  A login page served with `Referrer-Policy: no-referrer` (or a
+  `<meta name="referrer" content="no-referrer">`, or a form with
+  `rel="noreferrer"`) makes browsers send no `Referer`: with
+  `location_prefix` every login would count as a failure and honest users
+  would pay more and more, so such a site must use `set_cookie`. The
+  browser default (`strict-origin-when-cross-origin`) sends a `Referer`
+  on a same-origin form post. API clients of a `location_prefix` route
+  must send a `Referer` too.
+
+  Laravel: a failed login goes to `url()->previous()`, which is the
+  `Referer` or, without one, the last page the session visited (an
+  attacker sets it with one `GET` under the prefix). The proxy covers
+  both: a redirect to the `Referer` is a failure, and so is a redirect
+  without a `Referer`. As defence in depth, also send failed logins to the
+  login page instead of "back", for example
+  `throw ValidationException::withMessages([...])->redirectTo(route('login'))`
+  in your `LoginRequest::authenticate()`:
+
+  ```json
+  "success": { "status": [302], "location_prefix": "/dashboard", "location_not_prefix": "/login" }
+  ```
+
+  A relative `Location` is resolved against the route. Get this right: if
+  a failed login can look like a success (for example a site that answers
+  `200` both ways and sets the cookie on every answer), every failure
+  undoes itself and the price never grows. Pick a cookie the origin sets
+  only after a successful login.
+- **Username.** The proxy reads at most 16 KiB of an
+  `application/x-www-form-urlencoded` or `application/json` body, only to
+  find `username_field`. It never stores or logs the body. A request the
+  origin could read as another username is refused with `400`: the field
+  given more than once under any spelling some framework merges with it
+  (NFKC, so full-width `ｕｓｅｒ`; invisible characters dropped; letter
+  case under full Unicode case folding plus upper- and lower-casing, so
+  `User`, `uſer` with a long s, a Kelvin sign for `k`, or the Turkish
+  dotless `ı` and dotted `İ` for `i`; PHP's `user[]`, or `user.name` for
+  `user_name`), the field in the query string, a `Content-Encoding`, a
+  charset other than UTF-8, or more than one `Content-Type` header. The
+  username *value* is counted under one spelling for every spelling an
+  origin or its database may treat as the same account: decomposed
+  (NFKC/NFKD, so full-width letters and ligatures like `ﬁ` count as plain
+  ones), without accents and other combining marks (as accent-insensitive
+  collations such as MySQL's `utf8mb4_0900_ai_ci` compare), without
+  invisible characters (zero-width spaces, soft hyphens), trimmed, and
+  case-folded (`İ` and `ı` as `i`), with letters that do not decompose
+  spelled out (`ß` as `ss`, `æ` as `ae`, `œ` as `oe`, `ø` as `o`, `ł` as
+  `l`, `đ` and `ð` as `d`, `þ` as `th`, `ħ` as `h`, `ŧ` as `t`). So
+  `Élise`, `ELISE` and `ｅｌｉｓｅ` share counters, as do `Søren` and
+  `soren`. Other scripts are only case-folded and decomposed; a database
+  collation can still merge names this does not. Merging too much only makes two names share
+  counters. Plus-addressing (`alice+x@example.com`) and dots in Gmail
+  names are **not** merged, because only some sites treat them as one
+  mailbox: if yours does, strip them in the origin before the lookup and
+  know that an attacker can spread one account's failures over such
+  spellings (each one starts its own pair and account counters; the
+  network counter still adds them up).
+- **Method override.** The login route itself refuses (`400`) any
+  method-override header (`X-HTTP-Method-Override`, `X-HTTP-Method`,
+  `X-Method-Override`, `X-Original-Method`, `X-Forwarded-Method`) and a
+  `_method` field in the query or the body under any spelling the
+  username field is matched with (Symfony and Laravel read it), so the
+  origin sees the method that was checked. A front proxy must not add
+  these headers to every request.
+- **Multipart forms are refused.** A login sent as `multipart/form-data`
+  (a form with `enctype="multipart/form-data"`), or with any other content
+  type, gets `400` and never reaches the origin. This is deliberate, so
+  parsing stays small. Make the login form use the default encoding (no
+  `enctype`), or send JSON.
+- **Redirects to another host.** A `Location` on another host (or
+  `//host/...`) is never under `location_prefix`, and without
+  `set_cookie` never a success at all. Only two kinds of name count as
+  this site: the names in `public_hosts` and the host of `origin`. The
+  request's own `Host` and `X-Forwarded-Host` never do, because the client
+  chooses them and an origin may echo them into `Location`
+  (`Host: evil.example` and a redirect to `https://evil.example/home`
+  would otherwise pass as a success). Relative redirects (`/home`) are
+  always fine. So:
+  - Without `public_hosts`, a redirect counts only if it is relative or
+    names the host of `origin`. This is enough when the origin sees
+    `origin`'s host, which is the default: Spikes402 sends that `Host`
+    and, from untrusted peers, that `X-Forwarded-Host`.
+  - List both `example.com` and `www.example.com` in `public_hosts` if
+    the origin redirects from one to the other.
+  - **Set `public_hosts` whenever the origin builds redirects from the
+    public name.** This happens behind a proxy that rewrites `Host`
+    (nginx's `proxy_pass` sends the upstream's name by default) with an
+    app that trusts `X-Forwarded-Host`, or with a fixed `APP_URL`. Without
+    it, every honest login counts as a failure. That is safe but
+    unusable.
+  - `preserve_host` with `login_routes` is refused at startup unless
+    `public_hosts` is set.
+- **Forwarding.** The origin gets exactly the body that was checked, with
+  its length set and no chunked encoding or trailers.
+- **Precedence.** Login routes are checked before `protect`. Neither
+  `paused` nor bot policies apply to them.
+
+**Browser login forms**
+
+Add one tag to the login page. `data-field` is the `name` of the username
+input:
+
+```html
+<script src="/.spikes402/login.js" data-field="email" defer></script>
+```
+
+1. When the username field loses focus, the script asks
+   `POST /.spikes402/login-challenge` for a challenge bound to that account
+   and to where the form submits (the form's `action` and `method`, or the
+   clicked button's `formaction` and `formmethod`; no method means `GET`,
+   as in HTML, and a `GET` form is not a login route).
+2. It solves the challenge in Web Workers (`/.spikes402/argon2id-worker.js`
+   and `/.spikes402/pow-worker.js` for the pre-check) while the password is
+   typed.
+3. On submit it trades the solution at `POST /.spikes402/login-redeem` for a
+   one-use cookie, valid for 60 s, and submits the form as usual. Password
+   managers keep working.
+4. If the page has a Content-Security-Policy, it must allow `script-src`,
+   `worker-src` and `connect-src` from `'self'`.
+5. `data-text-working` and `data-text-failed` (which may contain
+   `{error}`) replace the status messages, for example in another language.
+6. `login.js` only handles plain HTML forms. A single-page app that logs
+   in with `fetch` or XHR must use the API flow below instead.
+
+**API clients and bots**
+
+A login request without a proof gets `402` with a JSON challenge and a
+`WWW-Authenticate: PoW ...` header. Solve two puzzles on the same
+challenge (for example with `pow.Params.Solve`): the Argon2id one
+(`algorithm`, `difficulty`, `memory_mib`) for `nonce`, and a sha256d
+pre-check (`precheck_algorithm`, `precheck_difficulty`) for `pre`. Then
+repeat the request with `Authorization: PoW <challenge>:<nonce>:<pre>`.
+
+**Cost to the server**
+
+Checking a proof costs the server one Argon2id hash, so it only does so
+after cheap checks pass: the signature and binding of the challenge, that
+its level is still enough (a proof below the current level is refused
+before anything else), that it is unspent, and the sha256d pre-check. The pre-check is 18 bits: about
+2^18 hashes for the client (~0.15 s in a browser worker, more than the
+server's Argon2id check in native code) and one for the server. A
+challenge is checked with Argon2id at most twice: after a wrong nonce,
+once more, no sooner than 2 minutes later; then it stays spent until it
+expires. Only its holder, from its network, can send it, so nobody else
+can use up an honest user's retry. Login tokens may use at most 250,000
+of the 1,000,000 places in the spent-token list, so a login flood cannot
+refuse payers ("server busy"). Of those, at most 100,000 hold tokens
+checked with a wrong nonce; past that one of them is forgotten, which can
+only give that junk token its checks back (still rate-limited), never
+replay a right proof. Then:
+
+- **Rate limits** on login challenges and checks together: per client
+  (`challenges_per_minute`, per IPv4 address or IPv6 /64), per IPv4 /24
+  or IPv6 /48 (four times that) and per IPv4 /16 or IPv6 /40 (32 times
+  that). A browser login takes a challenge and a check, so with the
+  default 30 that is about 15 logins a minute per address, 60 per /24 and
+  480 per /16; past that, `429`. A busy office or carrier NAT behind one
+  /24 can hit 60.
+- **Memory**: login checks have their own Argon2id budget of 128 MiB (8 at
+  a time), separate from `argon2_max_memory_mib`, so a flood of logins and
+  the API puzzle cannot starve each other. One /24 or /48 gets at most 2
+  of the 8 at a time.
+- **Pushback**: for a minute after the budget was full, new challenges ask
+  for a 22-bit pre-check (16 times the work). A proof with a right
+  pre-check and a wrong Argon2id nonce counts against its network on a
+  separate counter that adds at most +1 level (junk is cheaper to send
+  than a real failed login), and such proofs and wrong pre-checks count
+  against the rate limits.
+
+The pre-check is plain sha256d: an attacker with GPUs or ASICs pays it
+almost nothing, and is then held back only by the rate limits, the
+per-network slots and the budget.
+
+**Fail-closed**
+
+The proxy enforces everything, so a missing or broken script tag breaks the
+login, never the wall. A login request that cannot be checked never reaches
+the origin. That covers:
+
+- a body that is too large;
+- an unknown content type, no username, or an ambiguous one (see above);
+- a method other than the route's, or a near path (see above);
+- a method-override header or `_method` field;
+- a wrong, reused, expired or underpriced proof;
+- a missing or wrong pre-check;
+- a full login Argon2id budget, or a network's share of it (`503`).
+
+**Escalation**
+
+The level is counted in sha256d-equivalent bits. The puzzle is Argon2id at
+16 MiB with *level − 16* bits, and each level doubles the work.
+
+```
+level = 23 + max(pair, account, min(network, 6)) + surge, at most 33
+```
+
+- `pair` counts failures for this account from this network (a /24 for
+  IPv4, a /48 for IPv6).
+- `account` counts failures for this account from anywhere. It adds
+  nothing below 4 failures, then 4 at once (see below). The cap stops an
+  attacker from making a real user's login expensive.
+- `network` counts failures from this network on any account.
+- Failure counts map to extra levels as 0, 1, 2, 3, 4, 6, 8, 10 for
+  0, 1, 2 … 7+ failures.
+- `surge` adds 1 for everyone while the whole site sees 100 or more failed
+  logins a minute, and 2 at 1,000. Set your own thresholds with
+  `"login_surge_failures_per_minute": [100, 1000]`. The two counts must
+  increase, and the first must be at least 1. Pick values well above your
+  normal failure rate.
+- Every attempt counts as a failure until the origin answers success, so
+  parallel attempts cannot share one level.
+- After a success, the pair counter starts again from zero. The account
+  and network counters lose only that attempt and otherwise decay, so a
+  real user's login does not show to others (through the account term)
+  and does not wipe a network's failures.
+- Counters halve every 30 minutes (pair and account) and every 15 minutes
+  (network).
+
+| Failures | Level | Argon2id bits | One native core | Browser, 4 workers |
+|---:|---:|---:|---:|---:|
+| 0 | 23 | 7 | 1.4 s | 2.8 s |
+| 1 | 24 | 8 | 2.8 s | 5.5 s |
+| 2 | 25 | 9 | 5.6 s | 11 s |
+| 3 | 26 | 10 | 11 s | 22 s |
+| 4 | 27 | 11 | 23 s | 44 s |
+| 5 | 29 | 13 | 90 s | 3 min |
+| 6 | 31 | 15 | 6 min | 12 min |
+| 7+ | 33 | 17 | 24 min | 47 min |
+
+The native core figure is the measured ~11 ms per 16 MiB attempt. The
+browser figure assumes ~86 ms per attempt per worker, measured with the
+JavaScript solver in V8. Phones are slower; more cores are faster. All
+times are averages.
+
+A challenge stays valid for 8 times the browser average of its level,
+at least 2 minutes and at most 6 hours (2 minutes up to level 25, then
+about 3, 6, 24 and 94 minutes at levels 26, 27, 29 and 31, and 6 hours
+at 33),
+so a raised level makes a login slow, never impossible because the
+challenge expired first. A phone about four times slower than the table
+still gets twice its average. A long life opens no stockpile: a proof is
+bound to its account, network and level, and once one attempt is made
+the level is higher and the other proofs are refused. What can still
+cost an honest browser its work is the level rising while it solves (a
+new failure on the same account from its network, the account's +4, or
+a surge starting): the proof is refused and the script must start over
+at the new level, which stops at 33.
+
+**What a challenge reveals**
+
+Anyone can ask for a challenge for any username, and the level is in the
+answer, so it reveals a little:
+
+- about the account, one bit: whether it had about 4 or more recent
+  failures from anywhere (the account term is 0 or +4, nothing between).
+  A successful login does not clear that bit, so it does not show when
+  the real user logs in;
+- about the asker's own network: its recent failures, on that account and
+  overall, which people sharing the network (an office, a carrier NAT)
+  can see;
+- the site-wide surge, and whether the login budget was recently full
+  (the pre-check difficulty).
+
+It never reveals whether an account exists.
+
+**What is stored**
+
+- The counters live in memory, at most 1,000,000 entries.
+- Their keys are HMACs (with `secret_key`) of the account name and the
+  network. No username, password or IP address is kept.
+- When the table is full, the tenth of the counters that weigh least now
+  (fewest failures, decayed most) are forgotten to make room. Finding
+  them scans the whole table under its lock: about 70 ms at 1,000,000
+  entries, once per 100,000 new counters, during which logins wait. The counters
+  of an attack in progress weigh most and stay; newcomers start at the
+  base level.
+- With a configured `secret_key`, the counters are saved every minute to
+  `state_dir/login-counters`, sealed with an HMAC, so a restart does not
+  forget an attack. A file that fails its seal stops the proxy at startup
+  rather than being ignored.
 
 ## The 402 page (for people)
 
@@ -563,11 +931,15 @@ headers are stripped and replaced with the connection address. By default
 the `Host` sent to the origin is the host of `origin`. Set `preserve_host`
 if your website is a name-based virtual host and must see the public host
 name; that only applies to trusted proxies, and if `public_hosts` is set,
-only those names are forwarded.
+only those names are forwarded. With `login_routes`, `preserve_host`
+requires `public_hosts`.
 
 **Bounded memory.** Rate-limit windows, open offers and used tokens are
 evicted when they expire. Hard caps also apply: 100,000 tracked clients per
-minute (newcomers beyond that share one allowance), `max_pending_invoices`
+minute (newcomers beyond that share an allowance per IPv4 /16 or IPv6
+/32, 8 times a client's, for up to 10,000 such prefixes, then one
+common allowance; so filling the table from many IPv6 /64s throttles
+newcomers near the attacker, not everyone), `max_pending_invoices`
 open invoices (counted until they expire, even if the visitor later pays
 with proof-of-work), and 1,000,000 used tokens. When the used-token list
 is full, new redemptions are refused ("server busy") rather than risking a
@@ -899,6 +1271,8 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
 - Spent tokens are remembered in memory (about **128 MiB** at the cap of
   1,000,000 unexpired tokens, ~134 bytes per entry) and, when `secret_key`
   is set, also on disk in `state_dir` so a restart cannot replay them.
+  Expired ones are dropped from memory every 5 minutes and from the disk
+  snapshot at each compaction.
   Run **one** proxy instance. Without a configured `secret_key` (the fake
   backend's random key), a restart still forgets them.
 - Rate limits are per IP. A botnet with many addresses can use up the global
@@ -925,6 +1299,12 @@ bin/spikes-bot -sign -serve-directory 127.0.0.1:8403 http://localhost:8402/premi
   not yet against a real phoenixd node. Fee estimation is up to you
   (`feerate_sat_vbyte`); Lightning-address payments may fail if no route is
   found.
+- Login protection: proof-of-work only for now. A Lightning alternative
+  with the same escalating price, and solver fingerprinting for the siege
+  monitor, are planned. The browser solver is plain JavaScript, about 8x
+  slower per thread than native Argon2id, so attackers with native code get
+  a head start. Multipart login forms are refused (fail-closed, see
+  [Login protection](#login-protection)).
 - Not yet reviewed by Lightning security experts.
 
 ## Development

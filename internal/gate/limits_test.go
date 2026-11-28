@@ -84,16 +84,34 @@ func TestRateLimiterMemoryBounded(t *testing.T) {
 	l := newRateLimiter(5)
 	now := time.Unix(0, 0)
 	for i := 0; i < maxTrackedClients+50; i++ {
-		l.allow("client"+strconv.Itoa(i), now)
+		l.allow("client"+strconv.Itoa(i), "", now)
 	}
 	if n := len(l.clients); n > maxTrackedClients+1 {
 		t.Fatalf("tracked %d clients", n)
 	}
-	// Newcomers beyond the cap share one allowance.
-	if ok, _ := l.allow("one-more", now); ok {
+	// Newcomers beyond the cap without a prefix share one allowance.
+	if ok, _ := l.allow("one-more", "", now); ok {
 		t.Fatal("overflow allowance should be used up")
 	}
-	l.allow("late", now.Add(time.Minute))
+	// With a prefix, they share one per prefix (overflowFactor times the
+	// per-client allowance): the attacker's prefix is throttled, others not.
+	for i := range 5 * overflowFactor {
+		l.allow("attacker"+strconv.Itoa(i), "203.0.0.0/16", now)
+	}
+	if ok, _ := l.allow("attacker-new", "203.0.0.0/16", now); ok {
+		t.Fatal("attacker's prefix allowance should be used up")
+	}
+	if ok, _ := l.allow("someone", "198.51.0.0/16", now); !ok {
+		t.Fatal("a newcomer from another prefix was throttled")
+	}
+	// Overflow prefixes are bounded too.
+	for i := range maxOverflowKeys + 10 {
+		l.allow("x"+strconv.Itoa(i), "p"+strconv.Itoa(i), now)
+	}
+	if n := len(l.clients); n > maxTrackedClients+maxOverflowKeys+1 {
+		t.Fatalf("tracked %d clients and prefixes", n)
+	}
+	l.allow("late", "", now.Add(time.Minute))
 	if n := len(l.clients); n != 1 {
 		t.Fatalf("expired windows not evicted: %d left", n)
 	}

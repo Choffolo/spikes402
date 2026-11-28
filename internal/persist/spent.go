@@ -17,6 +17,9 @@ const (
 	spentLogName  = "spent.log"
 	maxLogBytes   = 4 << 20
 	maxLogLines   = 8192
+	// Expired records are dropped from memory at most this often (a scan
+	// of the map, no disk work), and from disk at each compaction.
+	pruneEvery = 5 * time.Minute
 )
 
 // SpentRecord is one spent-token entry as stored on disk. IDs are the
@@ -39,6 +42,8 @@ type Spent struct {
 	logBytes int64
 	written  uint64 // records appended so far
 	synced   uint64 // records known to be on disk
+	pruned   time.Time
+	now      func() time.Time
 
 	syncMu sync.Mutex // one fsync at a time; see syncTo
 }
@@ -48,7 +53,7 @@ func OpenSpent(dir string, key []byte) (*Spent, error) {
 	if err := Prepare(dir); err != nil {
 		return nil, err
 	}
-	return &Spent{dir: dir, key: append([]byte(nil), key...)}, nil
+	return &Spent{dir: dir, key: append([]byte(nil), key...), now: time.Now}, nil
 }
 
 // Load reads the snapshot and log, drops expired and tampered records,
@@ -130,7 +135,7 @@ func (s *Spent) Load(now time.Time) ([]SpentRecord, error) {
 		}
 		out = append(out, r)
 	}
-	if err := s.compactLocked(); err != nil {
+	if err := s.compactLocked(now); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -145,8 +150,12 @@ func (s *Spent) Persist(r SpentRecord) error {
 	if s.entries == nil {
 		s.entries = make(map[string]SpentRecord)
 	}
+	now := s.now()
+	if now.Sub(s.pruned) >= pruneEvery {
+		s.pruneLocked(now)
+	}
 	if s.logBytes >= maxLogBytes || s.logLines >= maxLogLines {
-		if err := s.compactLocked(); err != nil {
+		if err := s.compactLocked(now); err != nil {
 			s.mu.Unlock()
 			return err
 		}
@@ -192,9 +201,24 @@ func (s *Spent) syncTo(seq uint64) error {
 	return nil
 }
 
-// compactLocked rewrites the snapshot from memory and empties the log.
-// The snapshot is fsynced, so everything appended so far is durable.
-func (s *Spent) compactLocked() error {
+// pruneLocked forgets expired records in memory: one pass over the map,
+// no disk work, so s.mu is held only briefly. The log still holds them
+// until the next compaction; Load drops them too.
+func (s *Spent) pruneLocked(now time.Time) {
+	unix := now.Unix()
+	for id, r := range s.entries {
+		if unix > r.Expires {
+			delete(s.entries, id)
+		}
+	}
+	s.pruned = now
+}
+
+// compactLocked rewrites the snapshot from memory, without expired
+// records, and empties the log. The snapshot is fsynced, so everything
+// appended so far is durable.
+func (s *Spent) compactLocked(now time.Time) error {
+	s.pruneLocked(now)
 	recs := make([]SpentRecord, 0, len(s.entries))
 	for _, r := range s.entries {
 		recs = append(recs, r)

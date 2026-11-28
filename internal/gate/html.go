@@ -174,7 +174,7 @@ else pay();
 var weblnHash = base64.StdEncoding.EncodeToString(sha256Sum([]byte(weblnJS)))
 
 // wall.js runs the puzzle in the browser; pow-worker.js is the worker it
-// starts, served by the proxy itself (see serveWorker). Both are embedded
+// starts, served by the proxy itself (see serveScript). Both are embedded
 // so the page needs nothing from outside.
 var (
 	//go:embed assets/wall.js
@@ -219,7 +219,9 @@ const (
 func (g *Gate) serveReserved(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case WorkerPath:
-		serveWorker(w, r)
+		serveScript(w, r, powWorkerJS)
+	case LoginScriptPath, Argon2idWorkerPath, LoginChallengePath, LoginRedeemPath:
+		g.serveLoginReserved(w, r)
 	case ClaimPath:
 		g.serveClaim(w, r)
 	case StatsPath:
@@ -245,7 +247,7 @@ func (g *Gate) serveReserved(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func serveWorker(w http.ResponseWriter, r *http.Request) {
+func serveScript(w http.ResponseWriter, r *http.Request, script string) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -257,7 +259,7 @@ func serveWorker(w http.ResponseWriter, r *http.Request) {
 	h.Set("Content-Security-Policy", "default-src 'none'")
 	h.Set("Cache-Control", "public, max-age=86400")
 	if r.Method == http.MethodGet {
-		io.WriteString(w, powWorkerJS)
+		io.WriteString(w, script)
 	}
 }
 

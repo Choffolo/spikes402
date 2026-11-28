@@ -14,6 +14,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -87,6 +88,23 @@ type Options struct {
 	// the already-loaded contents (so New does not fail on a bad store).
 	SpentStore   SpentStore
 	SpentRecords []persist.SpentRecord
+
+	// LoginRoutes are login endpoints where every attempt costs an
+	// Argon2id proof-of-work that grows with each failure (see login.go).
+	// They are checked before Protect, ignore Paused and bot policies,
+	// and fail closed. Validate them with CheckLoginRoutes.
+	LoginRoutes []LoginRoute
+	// LoginState holds the failure counters; nil starts empty.
+	LoginState *LoginState
+	// LoginSurge are the site-wide failed logins per minute that add one
+	// and two levels for everyone. Zero means DefaultLoginSurge.
+	LoginSurge [2]int
+	// LoginHosts are this site's host names (public_hosts) and
+	// LoginOriginHost the origin URL's host: a login redirect to one of
+	// them is not a redirect to another host. The request's own Host is
+	// never trusted for this.
+	LoginHosts      []string
+	LoginOriginHost string
 }
 
 // PriceRule maps a path pattern (same syntax as Protect) to a price.
@@ -120,6 +138,17 @@ type Gate struct {
 	claimLim *rateLimiter  // polls of /.spikes402/claim, per client
 	surge    *surger       // optional per-group demand / price multiplier
 
+	login          *LoginState                // failure counters of login routes
+	loginParams    func(level int) pow.Params // the puzzle for a level (smaller in tests)
+	loginPre       int                        // sha256d pre-check bits (smaller in tests)
+	loginLim       *rateLimiter               // login challenges and checks, per client
+	loginPrefixLim *rateLimiter               // the same, per /24 or /48
+	loginWideLim   *rateLimiter               // the same, per /16 or /40
+	loginSlots     *prefixSlots               // Argon2id checks in progress per /24 or /48
+	loginArgon     *argonBudget               // Argon2id memory for login checks only
+	loginHosts     []string                   // LoginHosts and LoginOriginHost
+	loginBusyUntil atomic.Int64               // unix seconds: until then, new challenges get a harder pre-check
+
 	nodeLog  rateLog // why no invoice was offered
 	classLog rateLog // bot classifications
 }
@@ -152,6 +181,28 @@ func New(opt Options) *Gate {
 		surge:    newSurger(opt.Surge),
 	}
 	g.invoices.now = func() time.Time { return g.now() }
+	if len(opt.LoginRoutes) > 0 {
+		g.login = opt.LoginState
+		if g.login == nil {
+			g.login = NewLoginState()
+		}
+		if opt.LoginSurge != [2]int{} {
+			if CheckLoginSurge(opt.LoginSurge) != nil {
+				panic("gate: invalid LoginSurge")
+			}
+			g.login.mu.Lock()
+			g.login.surge = opt.LoginSurge
+			g.login.mu.Unlock()
+		}
+		g.loginLim = newRateLimiter(opt.ChallengesPerMinute)
+		g.loginPrefixLim = newRateLimiter(loginPrefixFactor * opt.ChallengesPerMinute)
+		g.loginWideLim = newRateLimiter(loginWideFactor * opt.ChallengesPerMinute)
+		g.loginHosts = slices.DeleteFunc(append(slices.Clone(opt.LoginHosts), opt.LoginOriginHost), func(h string) bool { return h == "" })
+		g.loginSlots = newPrefixSlots(loginPrefixSlots)
+		g.loginArgon = newArgonBudget(loginArgonMaxMiB)
+		g.loginParams = loginPoW
+		g.loginPre = LoginPreBits
+	}
 	g.live.Store(&Settings{
 		PriceSats: opt.PriceSats, Prices: append([]PriceRule(nil), opt.Prices...),
 		Protect: append([]string(nil), opt.Protect...), Paused: opt.Paused,
@@ -176,9 +227,19 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	set := g.live.Load()         // one consistent snapshot for this request
 	// Refuse paths like "/free/../paid" or "/free%2f..%2fpaid": the origin
 	// could normalise them into a protected path we did not recognise.
-	if why := checkPath(r.URL, func(p string) bool { return g.protected(p, set) }); why != "" {
+	if why := checkPath(r.URL, func(p string) bool { return g.protected(p, set) || g.priced(p, set) }, func(p string) bool { return len(g.nearLoginRoutes(p)) > 0 }); why != "" {
 		http.Error(w, "bad path: "+why, http.StatusBadRequest)
 		return
+	}
+	if near := g.nearLoginRoutes(r.URL.Path); len(near) > 0 {
+		if route := g.loginRoute(r.Method, r.URL.Path); route != nil {
+			g.serveLogin(w, r, route, passes)
+			return
+		}
+		if !loginPathPassThrough(r, near) {
+			http.Error(noStore(w), "not allowed on a login route", http.StatusMethodNotAllowed)
+			return
+		}
 	}
 	if !g.protected(r.URL.Path, set) {
 		g.opt.Next.ServeHTTP(w, r)
@@ -375,6 +436,21 @@ func (g *Gate) protected(p string, set *Settings) bool {
 	return false
 }
 
+// priced reports whether a price rule matches p.
+func (g *Gate) priced(p string, set *Settings) bool {
+	key := matchKey(p, g.opt.CaseSensitive)
+	for _, r := range set.Prices {
+		pat := r.Pattern
+		if !g.opt.CaseSensitive {
+			pat = strings.ToLower(pat)
+		}
+		if matchPattern(pat, key) {
+			return true
+		}
+	}
+	return false
+}
+
 // pathPrice is the sats price for a request path: the first matching
 // rule in set.Prices, or set.PriceSats if none match. Matching uses the
 // same canonical path as protected().
@@ -517,7 +593,7 @@ func (g *Gate) checkArgon(r *http.Request, p pow.Params, token string, nonce uin
 	if g.spent.has(spentKey("PoW", c.ID)) {
 		return errReplay
 	}
-	if ok, wait := g.limiter.allow(g.client(r), now); !ok {
+	if ok, wait := g.limiter.allow(g.client(r), g.clientCoarse(r), now); !ok {
 		return &busyError{http.StatusTooManyRequests, wait, "too many requests"}
 	}
 	if !g.argon.acquire(p.MemoryMiB, argonAcquireWait) {
@@ -573,6 +649,10 @@ func (g *Gate) client(r *http.Request) string {
 	return clientKey(r, g.opt.ClientIPHeader, g.opt.TrustedProxies)
 }
 
+// clientCoarse is the client's IPv4 /16 or IPv6 /32: the rate limiters'
+// overflow bucket once they track too many clients.
+func (g *Gate) clientCoarse(r *http.Request) string { return g.loginPrefix(r, 16, 32) }
+
 func (g *Gate) clientIP(r *http.Request) net.IP {
 	return clientIP(r, g.opt.ClientIPHeader, g.opt.TrustedProxies)
 }
@@ -581,7 +661,7 @@ func (g *Gate) clientIP(r *http.Request) net.IP {
 // Many Requests if this client asked for too many challenges.
 func (g *Gate) challenge(w http.ResponseWriter, r *http.Request, set *Settings, class botid.Class, problem, key string, price int64, powOnly bool) {
 	now := g.now()
-	if ok, wait := g.limiter.allow(g.client(r), now); !ok {
+	if ok, wait := g.limiter.allow(g.client(r), g.clientCoarse(r), now); !ok {
 		g.observe(r, class, OutcomeRateLimited, 0)
 		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
 		http.Error(w, "too many requests", http.StatusTooManyRequests)

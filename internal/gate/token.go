@@ -15,15 +15,19 @@ import (
 // answer and can be redeemed exactly once, either with the preimage of
 // its invoice (L402) or with a proof-of-work solution.
 type claims struct {
-	ID          string `json:"id"`            // random, used to stop replays
-	PaymentHash string `json:"ph"`            // hex sha256 of the invoice preimage ("" if no invoice)
-	Resource    string `json:"res"`           // hash of "METHOD /path?query", the resource the token unlocks
-	PriceSats   int64  `json:"sats"`          // price at issue; PoW must still cover today's price (see check)
-	Expires     int64  `json:"exp"`           // unix seconds
-	PowBits     int    `json:"pow"`           // proof-of-work difficulty
-	PowAlg      string `json:"alg,omitempty"` // "" (sha256d) or "argon2id"
-	PowMem      int    `json:"mem,omitempty"` // Argon2id memory in MiB
-	Kind        string `json:"k,omitempty"`   // "" for a challenge token, "pass" for the access cookie (see pass.go)
+	ID          string `json:"id"`             // random, used to stop replays
+	PaymentHash string `json:"ph"`             // hex sha256 of the invoice preimage ("" if no invoice)
+	Resource    string `json:"res"`            // hash of "METHOD /path?query", the resource the token unlocks
+	PriceSats   int64  `json:"sats"`           // price at issue; PoW must still cover today's price (see check)
+	Expires     int64  `json:"exp"`            // unix seconds
+	PowBits     int    `json:"pow"`            // proof-of-work difficulty
+	PowAlg      string `json:"alg,omitempty"`  // "" (sha256d) or "argon2id"
+	PowMem      int    `json:"mem,omitempty"`  // Argon2id memory in MiB
+	Kind        string `json:"k,omitempty"`    // "" for a challenge token, "pass" for the access cookie (see pass.go), "login" / "loginpass" (see login.go)
+	Acct        string `json:"acct,omitempty"` // login: keyed hash of the account
+	Net         string `json:"net,omitempty"`  // login: keyed hash of the client network
+	Level       int    `json:"lvl,omitempty"`  // login: level the work was priced at
+	Pre         int    `json:"pre,omitempty"`  // login: sha256d pre-check bits
 }
 
 func (c claims) powParams() pow.Params {
