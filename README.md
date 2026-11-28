@@ -362,15 +362,31 @@ nobody can lock a real user out.
 
 **How the proxy checks a login**
 
-- **Matching.** `path` is matched exactly, ignoring a trailing slash and,
-  unless `protect_case_sensitive` is set, letter case. `method` defaults to
-  `POST`.
+- **Matching.** `path` is matched in the same canonical form as `protect`
+  (see [Path matching](#path-matching)): a trailing slash, `;params`,
+  trailing dots and spaces and, unless `protect_case_sensitive` is set,
+  letter case are ignored, so `/Login;jsessionid=1` is the `/login` route.
+  `method` defaults to `POST` and is compared without letter case.
+- **Other methods.** On a login path, only `GET`, `HEAD` and `OPTIONS`
+  without a method-override header (`X-HTTP-Method-Override` and the like)
+  pass to the origin unchecked, to show the login page. Any other method
+  that is not a configured route gets `405`.
 - **Success and failure.** An answer whose status is in `success.status`,
   and does not redirect under `location_not_prefix`, is a success. Anything
-  else is a failure.
+  else is a failure. A relative `Location` is resolved against the route.
+  Get this right: if a failed login can look like a success (for example a
+  site that answers `200` both ways), every failure resets the counters
+  and the price never grows.
 - **Username.** The proxy reads at most 16 KiB of an
   `application/x-www-form-urlencoded` or `application/json` body, only to
-  find `username_field`. It never stores or logs the body.
+  find `username_field`. It never stores or logs the body. A request the
+  origin could read as another username is refused with `400`: the field
+  given more than once (also as `User`, `user[]`, or `user.name` for
+  `user_name`, spellings some frameworks merge), the field in the query
+  string, a `Content-Encoding`, a charset other than UTF-8, or more than
+  one `Content-Type` header. The username is compared after trimming
+  spaces and lower-casing; an origin that also normalises Unicode (for
+  example full-width letters) can see two spellings as one account.
 - **Multipart forms are refused.** A login sent as `multipart/form-data`
   (a form with `enctype="multipart/form-data"`), or with any other content
   type, gets `400` and never reaches the origin. This is deliberate, so
@@ -411,7 +427,8 @@ login, never the wall. A login request that cannot be checked never reaches
 the origin. That covers:
 
 - a body that is too large;
-- an unknown content type or no username;
+- an unknown content type, no username, or an ambiguous one (see above);
+- a method other than the route's (except `GET`, `HEAD`, `OPTIONS`);
 - a wrong, reused, expired or underpriced proof;
 - a full Argon2id budget (the answer is `503`).
 

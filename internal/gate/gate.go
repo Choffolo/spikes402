@@ -218,6 +218,10 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.serveLogin(w, r, route, passes)
 		return
 	}
+	if g.isLoginPath(r.URL.Path) && !loginPathPassThrough(r) {
+		http.Error(noStore(w), "method not allowed on a login route", http.StatusMethodNotAllowed)
+		return
+	}
 	if !g.protected(r.URL.Path, set) {
 		g.opt.Next.ServeHTTP(w, r)
 		return

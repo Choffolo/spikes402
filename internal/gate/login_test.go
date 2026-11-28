@@ -428,3 +428,89 @@ self.onmessage({ data: { challenge: "tok", difficulty: 4, memoryMiB: 8, start: 0
 		t.Fatalf("worker nonce %d does not solve the puzzle", nonce)
 	}
 }
+
+// Spellings of the login route that some origins accept must be checked
+// too, and other methods on a login path never reach the origin unchecked.
+func TestLoginRouteSpellingsAndMethods(t *testing.T) {
+	f := newLoginFixture(t)
+	for _, c := range []struct{ method, path, raw string }{
+		{"post", "/login", ""}, {"Post", "/login", ""}, {"POST", "/login;jsessionid=1", ""},
+		{"POST", "/login.", ""}, {"POST", "/login ", "/login%20"}, {"POST", "/LOGIN", ""}, {"POST", "/login/", ""},
+		{"PUT", "/login", ""}, {"DELETE", "/login", ""}, {"PROPFIND", "/login", ""},
+	} {
+		r := loginReq("alice", "198.51.100.7", "")
+		r.Method, r.URL.Path, r.URL.RawPath = c.method, c.path, c.raw
+		rec := f.do(r)
+		if f.calls != 0 || (rec.Code != http.StatusPaymentRequired && rec.Code != http.StatusMethodNotAllowed) {
+			t.Fatalf("%s %q: got %d, origin called %d times", c.method, c.path, rec.Code, f.calls)
+		}
+	}
+	for _, h := range methodOverrideHeaders {
+		r := httptest.NewRequest(http.MethodGet, "/login?user=alice", nil)
+		r.Header.Set(h, "POST")
+		if rec := f.do(r); rec.Code != http.StatusMethodNotAllowed || f.calls != 0 {
+			t.Fatalf("GET with %s: got %d", h, rec.Code)
+		}
+	}
+	if rec := f.do(httptest.NewRequest(http.MethodGet, "/login", nil)); f.calls != 1 {
+		t.Fatalf("GET of the login page should pass: %d", rec.Code)
+	}
+}
+
+// The origin must not be able to read another username than the one
+// the counters see.
+func TestLoginUsernameAmbiguityRefused(t *testing.T) {
+	f := newLoginFixture(t)
+	form := "application/x-www-form-urlencoded"
+	for _, c := range []struct{ ct, query, body, enc string }{
+		{form, "", "user=decoy&user=alice&pass=x", ""},
+		{form, "", "user=decoy&User=alice&pass=x", ""},
+		{form, "", "user=decoy&user[]=alice&pass=x", ""},
+		{form, "user=alice", "user=decoy&pass=x", ""},
+		{form, "", "user=decoy&pass=x", "gzip"},
+		{form + "; charset=utf-16", "", "user=decoy&pass=x", ""},
+		{"application/json", "", `{"user":"decoy","user":"alice"}`, ""},
+		{"application/json", "", `{"user":"decoy","USER":"alice"}`, ""},
+		{"application/json", "", `{"user":"decoy"} {"user":"alice"}`, ""},
+		{"application/json", "", `{"USER":"alice"}`, ""},
+	} {
+		target := "/login"
+		if c.query != "" {
+			target += "?" + c.query
+		}
+		r := httptest.NewRequest(http.MethodPost, target, strings.NewReader(c.body))
+		r.Header.Set("Content-Type", c.ct)
+		if c.enc != "" {
+			r.Header.Set("Content-Encoding", c.enc)
+		}
+		if rec := f.do(r); rec.Code != http.StatusBadRequest || f.calls != 0 {
+			t.Fatalf("%+v: got %d, want 400", c, rec.Code)
+		}
+	}
+	r := loginReq("alice", "198.51.100.7", "")
+	r.Header.Add("Content-Type", "application/json")
+	if rec := f.do(r); rec.Code != http.StatusBadRequest {
+		t.Fatalf("two Content-Type headers: got %d", rec.Code)
+	}
+	for _, ct := range []string{form, form + "; charset=UTF-8"} {
+		r := loginReq("alice", "198.51.100.7", "")
+		r.Header.Set("Content-Type", ct)
+		if rec := f.do(r); rec.Code != http.StatusPaymentRequired {
+			t.Fatalf("%s: got %d, want 402", ct, rec.Code)
+		}
+	}
+	r = httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"user":"alice","pass":"x","extra":{"user":"nested"}}`))
+	r.Header.Set("Content-Type", "application/json")
+	if rec := f.do(r); rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("plain JSON login: got %d, want 402", rec.Code)
+	}
+}
+
+func TestLoginRelativeFailureRedirect(t *testing.T) {
+	route := LoginRoute{Path: "/login", Success: LoginSuccess{Status: []int{302}, LocationNotPrefix: "/login"}}
+	for loc, want := range map[string]bool{"/home": true, "login?failed=1": false, "./login": false, "/login?e=1": false, "https://x.example/login": false, "": true} {
+		if got := route.succeeded(302, loc); got != want {
+			t.Errorf("%q: got %v, want %v", loc, got, want)
+		}
+	}
+}

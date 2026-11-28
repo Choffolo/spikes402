@@ -107,30 +107,57 @@ func CheckLoginRoutes(routes []LoginRoute) error {
 	return nil
 }
 
-// loginRoute returns the route for a method and path, or nil. A trailing
-// slash and, unless case-sensitive, letter case do not matter: the origin
-// may treat "/Login/" as "/login".
+// loginRoute returns the route for a method and path, or nil. Paths are
+// compared in the canonical form used for protect (matchKey): a trailing
+// slash, ";params", trailing dots and spaces and, unless case-sensitive,
+// letter case do not matter, because some origins serve "/Login;x." as
+// "/login". The method is compared without case, because some frameworks
+// upper-case it ("post" is POST to them).
 func (g *Gate) loginRoute(method, p string) *LoginRoute {
-	p = strings.TrimSuffix(p, "/")
+	method = strings.ToUpper(method)
+	key := matchKey(p, g.opt.CaseSensitive)
 	for i := range g.opt.LoginRoutes {
 		r := &g.opt.LoginRoutes[i]
-		if r.Method != method {
-			continue
-		}
-		if q := strings.TrimSuffix(r.Path, "/"); q == p || (!g.opt.CaseSensitive && strings.EqualFold(q, p)) {
+		if r.Method == method && matchKey(r.Path, g.opt.CaseSensitive) == key {
 			return r
 		}
 	}
 	return nil
 }
 
+// isLoginPath reports whether p is the path of a login route, whatever
+// the method.
 func (g *Gate) isLoginPath(p string) bool {
-	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodPatch} {
-		if g.loginRoute(m, p) != nil {
+	key := matchKey(p, g.opt.CaseSensitive)
+	for i := range g.opt.LoginRoutes {
+		if matchKey(g.opt.LoginRoutes[i].Path, g.opt.CaseSensitive) == key {
 			return true
 		}
 	}
 	return false
+}
+
+// methodOverrideHeaders let some frameworks treat a request as another
+// method than the one it was sent with.
+var methodOverrideHeaders = []string{"X-HTTP-Method-Override", "X-HTTP-Method", "X-Method-Override"}
+
+// loginPathPassThrough reports whether a request to a login path that
+// matches no route may reach the origin unchecked: only GET, HEAD and
+// OPTIONS (showing the login page) without a method override. Any other
+// method could be a login the origin accepts under another method, so it
+// is refused (fail-closed).
+func loginPathPassThrough(r *http.Request) bool {
+	switch strings.ToUpper(r.Method) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+	default:
+		return false
+	}
+	for _, h := range methodOverrideHeaders {
+		if len(r.Header.Values(h)) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func loginResource(r *LoginRoute) string { return hashResource(r.Method + " " + r.Path) }
@@ -387,7 +414,7 @@ func (g *Gate) serveLogin(w http.ResponseWriter, r *http.Request, route *LoginRo
 		return
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
-	username, err := loginUsername(r.Header.Get("Content-Type"), body, route.UsernameField)
+	username, err := loginUsername(r, body, route.UsernameField)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -445,32 +472,121 @@ func (route *LoginRoute) succeeded(status int, location string) bool {
 	if err != nil {
 		return false
 	}
-	return !strings.HasPrefix(strings.ToLower(u.Path), strings.ToLower(route.Success.LocationNotPrefix))
+	// A relative Location ("login?failed=1") is resolved against the route.
+	p := (&url.URL{Path: route.Path}).ResolveReference(u).Path
+	return !strings.HasPrefix(strings.ToLower(p), strings.ToLower(route.Success.LocationNotPrefix))
 }
 
-// loginUsername reads the username from an urlencoded or JSON body.
-func loginUsername(contentType string, body []byte, field string) (string, error) {
-	mt, _, _ := mime.ParseMediaType(contentType)
+// loginUsername reads the username from an urlencoded or JSON body. It
+// refuses anything the origin could read as another username than the
+// one counted here: the field given twice (also under a spelling PHP or a
+// case-insensitive JSON decoder would merge, like "User", "user.name" for
+// "user_name" or "user[]"), the field in the query string, an encoded
+// body, a charset other than UTF-8, or several Content-Type headers.
+func loginUsername(r *http.Request, body []byte, field string) (string, error) {
+	for _, ce := range r.Header.Values("Content-Encoding") {
+		if !strings.EqualFold(strings.TrimSpace(ce), "identity") {
+			return "", errors.New("login request with an encoded body")
+		}
+	}
+	cts := r.Header.Values("Content-Type")
+	if len(cts) != 1 {
+		return "", errors.New("login content type must be application/x-www-form-urlencoded or application/json")
+	}
+	mt, params, err := mime.ParseMediaType(cts[0])
+	if err != nil {
+		mt = ""
+	}
+	if cs, ok := params["charset"]; ok && !strings.EqualFold(cs, "utf-8") {
+		return "", errors.New("login request must be UTF-8")
+	}
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return "", errors.New("unreadable login query string")
+	}
+	want := loginFieldKey(field)
+	for k := range q {
+		if loginFieldKey(k) == want {
+			return "", errors.New("login username in the query string")
+		}
+	}
 	var u string
+	n := 0
 	switch mt {
 	case "application/x-www-form-urlencoded":
 		v, err := url.ParseQuery(string(body))
 		if err != nil {
 			return "", errors.New("unreadable login form")
 		}
+		for k, vs := range v {
+			if loginFieldKey(k) == want {
+				n += len(vs)
+			}
+		}
 		u = v.Get(field)
 	case "application/json":
-		var m map[string]json.RawMessage
-		if json.Unmarshal(body, &m) != nil || json.Unmarshal(m[field], &u) != nil {
+		if u, n, err = loginJSONUsername(body, field); err != nil {
 			return "", errors.New("unreadable login JSON")
 		}
 	default:
 		return "", errors.New("login content type must be application/x-www-form-urlencoded or application/json")
 	}
+	if n != 1 {
+		return "", errors.New("login request must name exactly one username")
+	}
 	if strings.TrimSpace(u) == "" || len(u) > loginMaxUsername {
 		return "", errors.New("login request without a username")
 	}
 	return u, nil
+}
+
+// loginFieldKey is the form of a field name under which origins may merge
+// two spellings: letter case (JSON decoders matching struct fields), PHP's
+// renaming of " ", "." and "[" to "_", and PHP arrays ("user[]").
+func loginFieldKey(k string) string {
+	k = strings.TrimLeft(k, " ")
+	if i := strings.IndexByte(k, '['); i >= 0 && strings.IndexByte(k[i:], ']') > 0 {
+		k = k[:i]
+	}
+	return strings.ToLower(strings.NewReplacer(" ", "_", ".", "_", "[", "_").Replace(k))
+}
+
+// loginJSONUsername reads the top-level object of body and returns the
+// string under field and how many keys could mean field (see
+// loginFieldKey; Go and other decoders take the last of duplicate keys).
+func loginJSONUsername(body []byte, field string) (string, int, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return "", 0, errors.New("not a JSON object")
+	}
+	want := loginFieldKey(field)
+	var u string
+	n := 0
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return "", 0, err
+		}
+		k, _ := t.(string)
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return "", 0, err
+		}
+		if loginFieldKey(k) != want {
+			continue
+		}
+		n++
+		if k == field && json.Unmarshal(raw, &u) != nil {
+			return "", 0, errors.New("username is not a string")
+		}
+	}
+	if t, err := dec.Token(); err != nil || t != json.Delim('}') {
+		return "", 0, errors.New("not a JSON object")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return "", 0, errors.New("data after the JSON object")
+	}
+	return u, n, nil
 }
 
 // outcomeWriter remembers the status and Location the origin answered.
