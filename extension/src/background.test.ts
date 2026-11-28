@@ -639,6 +639,7 @@ describe("trusted sites", () => {
     store["spikes402"] = { settings: { sites: { "evil.example": { trusted: true, dailySats: 100, since: "2026-11-01T00:00:00.000Z" } } } };
     await boot();
     vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-26T12:00:00")); // noon: the 11 minutes below never cross midnight (a new daily budget)
     for (let i = 0; i < 10; i++) {
       await vi.advanceTimersByTimeAsync(SAME_PAGE_MS + 1); // past the same-page and rate cooldowns
       expect((await pay(`https://sub${i}.evil.example`, small(), 1 + i)).error).toBeUndefined();
