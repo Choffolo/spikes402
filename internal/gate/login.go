@@ -99,6 +99,7 @@ type LoginRoute struct {
 	Path          string       `json:"path"`             // exact path, e.g. "/login"
 	UsernameField string       `json:"username_field"`   // form or top-level JSON field
 	Success       LoginSuccess `json:"success"`
+	Price         *LoginPrice  `json:"price,omitempty"` // paying instead of the proof-of-work; overrides login_price
 }
 
 // LoginSuccess says how the origin answers a successful login. Any other
@@ -150,6 +151,9 @@ func CheckLoginRoutes(routes []LoginRoute) error {
 			// A redirect alone cannot tell success from failure: the origin
 			// may send both to a place the client chose ("next", Referer).
 			return fmt.Errorf("login_routes[%d].success: with a 3xx status, set \"set_cookie\" or \"location_prefix\"", i)
+		}
+		if err := CheckLoginPrice(r.Price); err != nil {
+			return fmt.Errorf("login_routes[%d].price: %v", i, err)
 		}
 		if c := r.Success.SetCookie; c != "" && (len(c) > 128 || strings.ContainsAny(c, " \t;,=\"()<>@:/?[]{}\\") || strings.ContainsFunc(c, func(r rune) bool { return r < 0x21 || r > 0x7e })) {
 			return fmt.Errorf("login_routes[%d].success.set_cookie must be a cookie name", i)
@@ -319,6 +323,8 @@ type loginChallenge struct {
 	ExpiresAt       time.Time `json:"expires_at"`
 	ExpectedSeconds float64   `json:"expected_seconds_one_cpu_core"`
 	Usage           string    `json:"usage"`
+	PriceSats       int64     `json:"price_sats,omitempty"`  // paying instead costs this now
+	PayInstead      string    `json:"pay_instead,omitempty"` // where to ask for an invoice
 }
 
 func loginPoW(level int) pow.Params {
@@ -359,12 +365,16 @@ func (g *Gate) newLoginChallenge(route *LoginRoute, acct, net string) (loginChal
 	if err != nil {
 		return loginChallenge{}, err
 	}
-	return loginChallenge{
+	ch := loginChallenge{
 		Challenge: token, Algorithm: p.Algorithm, Difficulty: p.Difficulty, MemoryMiB: p.MemoryMiB,
 		PreAlgorithm: pow.SHA256d, PreDifficulty: pre,
 		Level: level, ExpiresAt: exp.UTC(), ExpectedSeconds: float64(int(p.ExpectedSeconds()*10)) / 10,
 		Usage: `find nonce so that Argon2id(password = challenge + ":" + nonce, salt = "spikes402-pow-v1", time = 1, memory = memory_mib MiB, threads = 1, 32 bytes) has "difficulty" leading zero bits, and pre so that SHA256(SHA256(challenge + ":" + pre)) has "precheck_difficulty" leading zero bits, then repeat the login with "Authorization: PoW <challenge>:<nonce>:<pre>"`,
-	}, nil
+	}
+	if ch.PriceSats = g.loginPrice(route, level); ch.PriceSats > 0 {
+		ch.PayInstead = LoginInvoicePath
+	}
+	return ch, nil
 }
 
 var (
@@ -538,10 +548,19 @@ func (g *Gate) writeLoginChallenge(w http.ResponseWriter, r *http.Request, route
 		http.Error(w, "too many requests", http.StatusTooManyRequests)
 		return
 	}
+	g.sendLoginChallenge(w, r, route, acct, status, problem)
+}
+
+// sendLoginChallenge is writeLoginChallenge for a request already counted
+// against the login rate limits.
+func (g *Gate) sendLoginChallenge(w http.ResponseWriter, r *http.Request, route *LoginRoute, acct string, status int, problem string) {
 	ch, err := g.newLoginChallenge(route, acct, g.loginNetwork(r))
 	if err != nil {
 		http.Error(w, "internal error", http.StatusServiceUnavailable)
 		return
+	}
+	if status == http.StatusServiceUnavailable {
+		ch.Error, ch.PriceSats, ch.PayInstead = problem, 0, ""
 	}
 	if status == http.StatusPaymentRequired {
 		ch.Error, ch.Problem = "login proof-of-work required", problem
@@ -554,8 +573,9 @@ func (g *Gate) writeLoginChallenge(w http.ResponseWriter, r *http.Request, route
 }
 
 // serveLoginRedeem answers POST /.spikes402/login-redeem with
-// "Authorization: PoW <token>:<nonce>": a valid proof becomes a one-use
-// login pass, a cookie the browser sends with the login form.
+// "Authorization: PoW <token>:<nonce>:<pre>" or, for a paid login
+// invoice, "L402 <token>[:<preimage>]": a valid proof or payment becomes
+// a one-use login pass, a cookie the browser sends with the login form.
 func (g *Gate) serveLoginRedeem(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", protectedCacheControl)
 	if r.Method != http.MethodPost {
@@ -564,9 +584,18 @@ func (g *Gate) serveLoginRedeem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scheme, cred, _ := strings.Cut(r.Header.Get("Authorization"), " ")
-	if !strings.EqualFold(scheme, "PoW") {
+	paid := strings.EqualFold(scheme, "L402")
+	if !paid && !strings.EqualFold(scheme, "PoW") {
 		http.Error(w, errScheme.Error(), http.StatusBadRequest)
 		return
+	}
+	if paid {
+		// Polled every few seconds while the payer pays: the claim limit.
+		if ok, wait := g.claimLim.allow(g.client(r), g.clientCoarse(r), g.now()); !ok {
+			w.Header().Set("Retry-After", itoaWait(wait))
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			return
+		}
 	}
 	// The token names its route; it must still be a configured one.
 	tok, _, _ := strings.Cut(strings.TrimSpace(cred), ":")
@@ -582,7 +611,20 @@ func (g *Gate) serveLoginRedeem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	net := g.loginNetwork(r)
-	c, err := g.checkLoginWork(r, cred, c0.Resource, "", net)
+	var c claims
+	if paid {
+		c, err = g.checkLoginPay(cred, c0.Resource, net, g.now())
+		if errors.Is(err, errUnpaid) {
+			w.Header().Set("Retry-After", "2")
+			g.writeClaim(w, r, http.StatusAccepted, claimBody{Status: "unpaid"})
+			return
+		}
+		if err == nil {
+			g.observe(r, g.classify(r), OutcomePaid, c.PriceSats)
+		}
+	} else {
+		c, err = g.checkLoginWork(r, cred, c0.Resource, "", net)
+	}
 	if err != nil {
 		if errors.Is(err, errBadPre) {
 			g.loginAllow(r, g.now()) // cheap to send, but still counted
@@ -1036,5 +1078,7 @@ func (g *Gate) serveLoginReserved(w http.ResponseWriter, r *http.Request) {
 		g.serveLoginChallenge(w, r)
 	case LoginRedeemPath:
 		g.serveLoginRedeem(w, r)
+	case LoginInvoicePath:
+		g.serveLoginInvoice(w, r)
 	}
 }

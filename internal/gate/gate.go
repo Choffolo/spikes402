@@ -105,6 +105,11 @@ type Options struct {
 	// never trusted for this.
 	LoginHosts      []string
 	LoginOriginHost string
+	// LoginPrice lets a login attempt be paid for instead of worked for
+	// (nil: no paying, unless a route sets its own price), within
+	// LoginInvoiceLimits (0: the default for that limit).
+	LoginPrice         *LoginPrice
+	LoginInvoiceLimits LoginInvoiceLimits
 }
 
 // PriceRule maps a path pattern (same syntax as Protect) to a price.
@@ -147,6 +152,7 @@ type Gate struct {
 	loginSlots     *prefixSlots               // Argon2id checks in progress per /24 or /48
 	loginArgon     *argonBudget               // Argon2id memory for login checks only
 	loginHosts     []string                   // LoginHosts and LoginOriginHost
+	loginPay       *loginInvoices             // open and recent login invoices
 	loginBusyUntil atomic.Int64               // unix seconds: until then, new challenges get a harder pre-check
 
 	nodeLog  rateLog // why no invoice was offered
@@ -199,6 +205,11 @@ func New(opt Options) *Gate {
 		g.loginWideLim = newRateLimiter(loginWideFactor * opt.ChallengesPerMinute)
 		g.loginHosts = slices.DeleteFunc(append(slices.Clone(opt.LoginHosts), opt.LoginOriginHost), func(h string) bool { return h == "" })
 		g.loginSlots = newPrefixSlots(loginPrefixSlots)
+		lim, err := opt.LoginInvoiceLimits.WithDefaults()
+		if err != nil || CheckLoginPrice(opt.LoginPrice) != nil {
+			panic("gate: invalid LoginPrice or LoginInvoiceLimits")
+		}
+		g.loginPay = newLoginInvoices(lim)
 		g.loginArgon = newArgonBudget(loginArgonMaxMiB)
 		g.loginParams = loginPoW
 		g.loginPre = LoginPreBits

@@ -46,32 +46,34 @@ func checkPathPattern(what, p string, caseSensitive bool) error {
 
 // Config is the content of the configuration file. See config.example.json.
 type Config struct {
-	Listen               string             `json:"listen"`                                    // address to listen on, default ":8402" ("127.0.0.1:8402" with the fake backend)
-	Origin               string             `json:"origin"`                                    // website to protect, e.g. "http://localhost:8080"
-	PriceSats            int64              `json:"price_sats"`                                // default price per request in sats
-	Protect              []string           `json:"protect"`                                   // path patterns that require payment
-	Prices               []gate.PriceRule   `json:"prices,omitempty"`                          // optional per-path prices; first match wins
-	Surge                gate.SurgeConfig   `json:"surge,omitempty"`                           // optional demand-based price multiplier, off by default
-	Previews             []gate.PreviewRule `json:"previews,omitempty"`                        // optional teaser of a protected page on its 402 page; first match wins
-	WallMode             string             `json:"wall_mode,omitempty"`                       // "" = default two-door page; "pow_first" starts the puzzle automatically
-	LoginRoutes          []gate.LoginRoute  `json:"login_routes,omitempty"`                    // login endpoints: every attempt costs escalating Argon2id work
-	LoginSurge           *[2]int            `json:"login_surge_failures_per_minute,omitempty"` // site-wide failed logins per minute for +1 and +2 levels, default [100, 1000]
-	PowSecondsPerSat     float64            `json:"pow_seconds_per_sat"`                       // CPU-core seconds of work per sat, default 10
-	PowDifficulty        int                `json:"pow_difficulty"`                            // 0 = derived from price and pow_seconds_per_sat
-	PowAlgorithm         string             `json:"pow_algorithm"`                             // "sha256d" (default) or "argon2id"
-	Argon2MemoryMiB      int                `json:"argon2_memory_mib"`                         // argon2id memory per attempt, default 16
-	Argon2MaxMemoryMiB   int                `json:"argon2_max_memory_mib"`                     // concurrent Argon2id checks, default 256
-	ChallengeTTLSeconds  int                `json:"challenge_ttl_seconds"`                     // default 600
-	PassTTLSeconds       *int               `json:"pass_ttl_seconds"`                          // default 10; 0 = no pass; max 60
-	ChallengesPerMinute  int                `json:"challenges_per_minute"`                     // per client, default 30
-	MaxInvoicesPerMinute int                `json:"max_invoices_per_minute"`                   // all clients together, default 300
-	MaxPendingInvoices   int                `json:"max_pending_invoices"`                      // default 10000
-	ClientIPHeader       string             `json:"client_ip_header"`                          // e.g. "X-Forwarded-For", default "" (use the TCP address)
-	TrustedProxies       []string           `json:"trusted_proxies"`                           // IPs/CIDRs allowed to set forwarding and client_ip_header
-	PreserveHost         bool               `json:"preserve_host"`                             // send the public Host to the origin (trusted proxies only)
-	SecretKey            string             `json:"secret_key"`                                // or env SPIKES402_SECRET_KEY
-	StateDir             string             `json:"state_dir"`                                 // spent tokens and withdrawal intents; default "<config dir>/state"
-	Lightning            Lightning          `json:"lightning"`
+	Listen               string                  `json:"listen"`                                    // address to listen on, default ":8402" ("127.0.0.1:8402" with the fake backend)
+	Origin               string                  `json:"origin"`                                    // website to protect, e.g. "http://localhost:8080"
+	PriceSats            int64                   `json:"price_sats"`                                // default price per request in sats
+	Protect              []string                `json:"protect"`                                   // path patterns that require payment
+	Prices               []gate.PriceRule        `json:"prices,omitempty"`                          // optional per-path prices; first match wins
+	Surge                gate.SurgeConfig        `json:"surge,omitempty"`                           // optional demand-based price multiplier, off by default
+	Previews             []gate.PreviewRule      `json:"previews,omitempty"`                        // optional teaser of a protected page on its 402 page; first match wins
+	WallMode             string                  `json:"wall_mode,omitempty"`                       // "" = default two-door page; "pow_first" starts the puzzle automatically
+	LoginRoutes          []gate.LoginRoute       `json:"login_routes,omitempty"`                    // login endpoints: every attempt costs escalating Argon2id work
+	LoginSurge           *[2]int                 `json:"login_surge_failures_per_minute,omitempty"` // site-wide failed logins per minute for +1 and +2 levels, default [100, 1000]
+	LoginPrice           *gate.LoginPrice        `json:"login_price,omitempty"`                     // paying instead of the login proof-of-work (routes may override)
+	LoginInvoiceLimits   gate.LoginInvoiceLimits `json:"login_invoice_limits,omitempty"`            // invoices for login payments; 0: default
+	PowSecondsPerSat     float64                 `json:"pow_seconds_per_sat"`                       // CPU-core seconds of work per sat, default 10
+	PowDifficulty        int                     `json:"pow_difficulty"`                            // 0 = derived from price and pow_seconds_per_sat
+	PowAlgorithm         string                  `json:"pow_algorithm"`                             // "sha256d" (default) or "argon2id"
+	Argon2MemoryMiB      int                     `json:"argon2_memory_mib"`                         // argon2id memory per attempt, default 16
+	Argon2MaxMemoryMiB   int                     `json:"argon2_max_memory_mib"`                     // concurrent Argon2id checks, default 256
+	ChallengeTTLSeconds  int                     `json:"challenge_ttl_seconds"`                     // default 600
+	PassTTLSeconds       *int                    `json:"pass_ttl_seconds"`                          // default 10; 0 = no pass; max 60
+	ChallengesPerMinute  int                     `json:"challenges_per_minute"`                     // per client, default 30
+	MaxInvoicesPerMinute int                     `json:"max_invoices_per_minute"`                   // all clients together, default 300
+	MaxPendingInvoices   int                     `json:"max_pending_invoices"`                      // default 10000
+	ClientIPHeader       string                  `json:"client_ip_header"`                          // e.g. "X-Forwarded-For", default "" (use the TCP address)
+	TrustedProxies       []string                `json:"trusted_proxies"`                           // IPs/CIDRs allowed to set forwarding and client_ip_header
+	PreserveHost         bool                    `json:"preserve_host"`                             // send the public Host to the origin (trusted proxies only)
+	SecretKey            string                  `json:"secret_key"`                                // or env SPIKES402_SECRET_KEY
+	StateDir             string                  `json:"state_dir"`                                 // spent tokens and withdrawal intents; default "<config dir>/state"
+	Lightning            Lightning               `json:"lightning"`
 
 	Paused bool `json:"paused,omitempty"` // serve protected paths free; no invoices (dashboard toggle)
 
@@ -356,6 +358,12 @@ func (c *Config) complete() error {
 		c.LoginSurge = &v
 	}
 	if err := gate.CheckLoginSurge(*c.LoginSurge); err != nil {
+		return err
+	}
+	if err := gate.CheckLoginPrice(c.LoginPrice); err != nil {
+		return fmt.Errorf(`"login_price": %v`, err)
+	}
+	if c.LoginInvoiceLimits, err = c.LoginInvoiceLimits.WithDefaults(); err != nil {
 		return err
 	}
 	if c.PowAlgorithm == pow.Argon2id && c.Argon2MemoryMiB > c.Argon2MaxMemoryMiB {

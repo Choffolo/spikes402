@@ -220,7 +220,7 @@ func (g *Gate) serveReserved(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case WorkerPath:
 		serveScript(w, r, powWorkerJS)
-	case LoginScriptPath, Argon2idWorkerPath, LoginChallengePath, LoginRedeemPath:
+	case LoginScriptPath, Argon2idWorkerPath, LoginChallengePath, LoginRedeemPath, LoginInvoicePath:
 		g.serveLoginReserved(w, r)
 	case ClaimPath:
 		g.serveClaim(w, r)
