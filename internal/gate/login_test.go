@@ -66,6 +66,7 @@ func newLoginFixtureWith(t *testing.T, surge [2]int) *loginFixture {
 	f.gate.loginParams = func(level int) pow.Params {
 		return pow.Params{Algorithm: pow.Argon2id, Difficulty: min(level-LoginBaseLevel, 2), MemoryMiB: 8}
 	}
+	f.gate.loginPre = 4
 	return f
 }
 
@@ -104,7 +105,11 @@ func solveLogin(t *testing.T, ch loginChallenge) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return "PoW " + ch.Challenge + ":" + strconv.FormatUint(n, 10)
+	pre, err := pow.Params{Algorithm: ch.PreAlgorithm, Difficulty: ch.PreDifficulty}.Solve(context.Background(), ch.Challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "PoW " + ch.Challenge + ":" + strconv.FormatUint(n, 10) + ":" + strconv.FormatUint(pre, 10)
 }
 
 // attempt runs one full API login (402, solve, retry) and returns the level paid.
@@ -284,9 +289,15 @@ func TestLoginBrowserFlow(t *testing.T) {
 func TestLoginBusyArgonIs503(t *testing.T) {
 	f := newLoginFixture(t)
 	ch := decodeChallenge(t, f.do(loginReq("alice", "192.0.2.1", "")))
+	// A full API budget does not touch logins: they have their own.
 	f.gate.argon.acquire(f.gate.argon.max, 0)
-	if rec := f.do(loginReq("alice", "192.0.2.1", solveLogin(t, ch))); rec.Code != http.StatusServiceUnavailable || f.calls != 0 {
-		t.Fatalf("got %d with %d origin calls, want 503 and none", rec.Code, f.calls)
+	if rec := f.do(loginReq("alice", "192.0.2.1", solveLogin(t, ch))); rec.Code != http.StatusFound {
+		t.Fatalf("full API budget: got %d, want the origin's 302", rec.Code)
+	}
+	ch = decodeChallenge(t, f.do(loginReq("alice", "192.0.2.1", "")))
+	f.gate.loginArgon.acquire(f.gate.loginArgon.max, 0)
+	if rec := f.do(loginReq("alice", "192.0.2.1", solveLogin(t, ch))); rec.Code != http.StatusServiceUnavailable || f.calls != 1 {
+		t.Fatalf("got %d with %d origin calls, want 503 and no new call", rec.Code, f.calls)
 	}
 }
 
@@ -315,12 +326,85 @@ func TestLoginStateLimitsAndSurge(t *testing.T) {
 	if got := f.gate.login.Level("c", "n", f.now); got != LoginBaseLevel+1 {
 		t.Fatalf("configured surge: level %d", got)
 	}
-	// A full table: unknown keys start at the network cap.
+	// A full table forgets its lightest counters: the heavy ones stay,
+	// newcomers are tracked from the base level.
 	s = NewLoginState()
-	s.max = 3
-	s.admit("a", "n", LoginBaseLevel, now)
-	if got := s.Level("b", "m", now); got != LoginBaseLevel+loginNetCap {
-		t.Fatalf("full table: level %d", got)
+	s.max = 30
+	for range 5 {
+		s.admit("attacked", "botnet", LoginMaxLevel, now)
+	}
+	for i := 0; len(s.m) < s.max; i++ {
+		s.admit("u"+strconv.Itoa(i), "n"+strconv.Itoa(i), LoginMaxLevel, now.Add(-time.Hour))
+	}
+	if got := s.Level("new", "fresh", now); got != LoginBaseLevel {
+		t.Fatalf("full table: newcomer level %d, want base", got)
+	}
+	s.admit("new", "fresh", LoginMaxLevel, now)
+	if len(s.m) > s.max {
+		t.Fatalf("table grew to %d", len(s.m))
+	}
+	if got := s.Level("new", "fresh", now); got != LoginBaseLevel+1 {
+		t.Fatalf("newcomer not tracked: level %d", got)
+	}
+	if got := s.Level("attacked", "botnet", now); got != LoginBaseLevel+6 {
+		t.Fatalf("heavy counter evicted: level %d", got)
+	}
+}
+
+// The level of an account seen from another network shows one bit.
+func TestLoginAccountLevelShowsOneBit(t *testing.T) {
+	s := NewLoginState()
+	now := time.Unix(1_800_000_000, 0)
+	for i := range 10 {
+		s.admit("victim", "n"+strconv.Itoa(i/4), LoginMaxLevel, now) // at most 4 per network
+		want := LoginBaseLevel
+		if i+1 >= loginAcctShow {
+			want += loginAcctCap
+		}
+		if got := s.Level("victim", "elsewhere", now); got != want {
+			t.Fatalf("after %d failures: level %d, want %d", i+1, got, want)
+		}
+	}
+}
+
+func TestLoginPreCheckAndPrefixLimit(t *testing.T) {
+	f := newLoginFixture(t)
+	f.gate.loginPre = 20
+	ch := decodeChallenge(t, f.do(loginReq("alice", "192.0.2.1", "")))
+	if ch.PreAlgorithm != pow.SHA256d || ch.PreDifficulty != 20 {
+		t.Fatalf("challenge %+v", ch)
+	}
+	// A wrong pre-check costs no Argon2id check and does not spend the token.
+	f.gate.loginArgon.acquire(f.gate.loginArgon.max, 0)
+	for _, cred := range []string{ch.Challenge + ":1:1", ch.Challenge + ":1", ch.Challenge + ":1:x"} {
+		rec := f.do(loginReq("alice", "192.0.2.1", "PoW "+cred))
+		if rec.Code != http.StatusPaymentRequired {
+			t.Fatalf("%q: got %d, want 402 (not 503: no Argon2id check)", cred, rec.Code)
+		}
+	}
+	f.gate.loginArgon.release(f.gate.loginArgon.max)
+	f.gate.loginPre = 4
+	ch.PreDifficulty = 4
+	if rec := f.do(loginReq("alice", "192.0.2.1", solveLogin(t, ch))); rec.Code != http.StatusFound {
+		t.Fatalf("right proof after wrong pre-checks: got %d", rec.Code)
+	}
+	// Many addresses of one IPv6 /48 share one prefix allowance.
+	g := newLoginFixture(t)
+	g.gate.loginLim = newRateLimiter(1000)
+	g.gate.loginPrefixLim = newRateLimiter(5)
+	codes := map[int]int{}
+	for i := range 8 {
+		r := loginReq("alice", "", "")
+		r.RemoteAddr = "[2001:db8:1:" + strconv.Itoa(i) + "::1]:1234"
+		codes[g.do(r).Code]++
+	}
+	if codes[http.StatusPaymentRequired] != 5 || codes[http.StatusTooManyRequests] != 3 {
+		t.Fatalf("one /48: %v", codes)
+	}
+	r := loginReq("alice", "", "")
+	r.RemoteAddr = "[2001:db8:2::1]:1234"
+	if rec := g.do(r); rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("another /48: got %d", rec.Code)
 	}
 }
 

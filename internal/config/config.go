@@ -358,9 +358,6 @@ func (c *Config) complete() error {
 	if err := gate.CheckLoginSurge(*c.LoginSurge); err != nil {
 		return err
 	}
-	if len(c.LoginRoutes) > 0 && c.Argon2MaxMemoryMiB < gate.LoginArgonMemoryMiB {
-		return fmt.Errorf(`"login_routes" need "argon2_max_memory_mib" of at least %d`, gate.LoginArgonMemoryMiB)
-	}
 	if c.PowAlgorithm == pow.Argon2id && c.Argon2MemoryMiB > c.Argon2MaxMemoryMiB {
 		return fmt.Errorf(`"argon2_memory_mib" (%d) is more than "argon2_max_memory_mib" (%d)`, c.Argon2MemoryMiB, c.Argon2MaxMemoryMiB)
 	}

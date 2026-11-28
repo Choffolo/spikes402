@@ -12,26 +12,37 @@
   "use strict";
   var me = document.currentScript;
   var field = (me && me.getAttribute("data-field")) || "username";
-  var WORKER = "__WORKER__";
+  var WORKER = "__WORKER__", POW_WORKER = "__POW_WORKER__";
 
-  function solve(ch) {
+  // run starts one worker and resolves with the first nonce it finds.
+  function run(url, msg, workers) {
     return new Promise(function (resolve, reject) {
-      var mem = navigator.deviceMemory || 4;
-      var n = Math.max(1, Math.min(navigator.hardwareConcurrency || 2, mem < 4 ? 2 : 8));
-      var workers = [];
-      function stop() { workers.forEach(function (w) { w.terminate(); }); }
-      try {
-        for (var i = 0; i < n; i++) {
-          var w = new Worker(WORKER);
-          w.onmessage = function (e) {
-            if (e.data.nonce !== undefined) { stop(); resolve(ch.challenge + ":" + e.data.nonce); }
-          };
-          w.onerror = function () { stop(); reject(new Error("worker failed")); };
-          w.postMessage({ challenge: ch.challenge, difficulty: ch.difficulty, memoryMiB: ch.memory_mib, start: i, step: n });
-          workers.push(w);
-        }
-      } catch (err) { stop(); reject(err); }
+      var w = new Worker(url);
+      workers.push(w);
+      w.onmessage = function (e) { if (e.data.nonce !== undefined) { w.terminate(); resolve(e.data.nonce); } };
+      w.onerror = function () { reject(new Error("worker failed")); };
+      w.postMessage(msg);
     });
+  }
+
+  // solve finds the Argon2id nonce (several workers) and the sha256d
+  // pre-check (one worker) at the same time: "challenge:nonce:pre".
+  function solve(ch) {
+    var argonW = [], preW = [];
+    function stop(list) { list.forEach(function (w) { w.terminate(); }); }
+    var mem = navigator.deviceMemory || 4;
+    var n = Math.max(1, Math.min(navigator.hardwareConcurrency || 2, mem < 4 ? 2 : 8));
+    var argon = [], pre;
+    try {
+      for (var i = 0; i < n; i++) {
+        argon.push(run(WORKER, { challenge: ch.challenge, difficulty: ch.difficulty, memoryMiB: ch.memory_mib, start: i, step: n }, argonW));
+      }
+      pre = run(POW_WORKER, { challenge: ch.challenge, difficulty: ch.precheck_difficulty, start: 0 }, preW);
+    } catch (err) { stop(argonW); stop(preW); return Promise.reject(err); }
+    var nonce = Promise.race(argon).then(function (v) { stop(argonW); return v; });
+    return Promise.all([nonce, pre]).then(function (r) {
+      return ch.challenge + ":" + r[0] + ":" + r[1];
+    }, function (err) { stop(argonW); stop(preW); throw err; });
   }
 
   function setup(form) {

@@ -128,7 +128,7 @@ A JSON file (see [`config.example.json`](config.example.json)):
 | `pow_difficulty` | Leading zero bits for the puzzle. `0` = derive from the price and `pow_seconds_per_sat` | `0` |
 | `pow_algorithm` | `"sha256d"` or `"argon2id"` (memory-hard, see [Argon2id](#argon2id-memory-hard-proof-of-work)) | `"sha256d"` |
 | `argon2_memory_mib` | Memory per Argon2id attempt, 8–256 MiB | `16` |
-| `argon2_max_memory_mib` | Memory all concurrent Argon2id checks may use together. A check that needs more than this is refused at startup. Extra checks wait briefly, then `503` | `256` |
+| `argon2_max_memory_mib` | Memory all concurrent Argon2id checks of the API puzzle may use together (login checks have their own 128 MiB, see [Login protection](#login-protection)). A check that needs more than this is refused at startup. Extra checks wait briefly, then `503` | `256` |
 | `challenge_ttl_seconds` | How long a 402 offer (token and invoice) stays valid | `600` |
 | `pass_ttl_seconds` | How long the post-unlock access pass lasts (0-60). `0` means every request needs a fresh payment or proof-of-work | `10` |
 | `challenges_per_minute` | 402 answers per client per minute; beyond that, `429 Too Many Requests` | `30` |
@@ -348,8 +348,11 @@ it needs ~256 MiB per verifier and a C library. Not implemented.
 
 List your login endpoints in `login_routes` and every login attempt costs
 work, always, for everyone. Each failed attempt makes the next one cost
-more. Nothing is ever blocked: the wall only gets more expensive, so
-nobody can lock a real user out.
+more. Failures alone never block an account: they only make attempts more
+expensive, and an attacker can raise a real user's price by at most the
+account cap (+4 levels). A real user can still be slowed or stopped by
+load: while the login Argon2id budget is full, logins get `503`, and the
+rate limits below apply to everyone behind the same address or prefix.
 
 ```json
 "login_routes": [{
@@ -417,8 +420,28 @@ input:
 **API clients and bots**
 
 A login request without a proof gets `402` with a JSON challenge and a
-`WWW-Authenticate: PoW ...` header. Solve it (for example with `pow.Params.Solve`), then repeat the request with
-`Authorization: PoW <challenge>:<nonce>`.
+`WWW-Authenticate: PoW ...` header. Solve two puzzles on the same
+challenge (for example with `pow.Params.Solve`): the Argon2id one
+(`algorithm`, `difficulty`, `memory_mib`) for `nonce`, and a sha256d
+pre-check (`precheck_algorithm`, `precheck_difficulty`, 18 bits) for
+`pre`. Then repeat the request with
+`Authorization: PoW <challenge>:<nonce>:<pre>`.
+
+**Cost to the server**
+
+Checking a proof costs the server one Argon2id hash, so it only does so
+after cheap checks pass: the signature and binding of the challenge, that
+it is unspent, and the sha256d pre-check, which costs the client about
+2^18 hashes (~0.15 s in a browser worker, more than the server's Argon2id
+check in native code) and the server one. Each challenge is checked with
+Argon2id at most once. Login challenges and checks are rate limited per
+client (`challenges_per_minute`, per IPv4 address or IPv6 /64) and per
+prefix (four times that, per IPv4 /24 or IPv6 /48). Login checks have
+their own Argon2id memory budget of 128 MiB (8 at a time), separate from
+`argon2_max_memory_mib`, so a flood of logins and the API puzzle cannot
+starve each other. The pre-check is plain sha256d: an attacker with GPUs
+or ASICs pays it almost nothing, and is then held back only by the rate
+limits and the budget.
 
 **Fail-closed**
 
@@ -430,7 +453,8 @@ the origin. That covers:
 - an unknown content type, no username, or an ambiguous one (see above);
 - a method other than the route's (except `GET`, `HEAD`, `OPTIONS`);
 - a wrong, reused, expired or underpriced proof;
-- a full Argon2id budget (the answer is `503`).
+- a missing or wrong pre-check;
+- a full login Argon2id budget (the answer is `503`).
 
 **Escalation**
 
@@ -443,8 +467,9 @@ level = 23 + max(pair, min(account, 4), min(network, 6)) + surge, at most 33
 
 - `pair` counts failures for this account from this network (a /24 for
   IPv4, a /64 for IPv6).
-- `account` counts failures for this account from anywhere. Its cap stops an
-  attacker from making a real user's login expensive.
+- `account` counts failures for this account from anywhere. It adds
+  nothing below 4 failures, then the full cap of 4 at once. The cap stops
+  an attacker from making a real user's login expensive.
 - `network` counts failures from this network on any account.
 - Failure counts map to extra levels as 0, 1, 2, 3, 4, 6, 8, 10 for
   0, 1, 2 … 7+ failures.
@@ -476,13 +501,29 @@ browser figure assumes ~86 ms per attempt per worker, measured with the
 JavaScript solver in V8. Phones are slower; more cores are faster. All
 times are averages.
 
+**What a challenge reveals**
+
+Anyone can ask for a challenge for any username, and the level is in the
+answer, so it reveals a little:
+
+- about the account, one bit: whether it had about 4 or more recent
+  failures from anywhere (the account term is 0 or +4, nothing between);
+- about the asker's own network: its recent failures, on that account and
+  overall, which people sharing the network (an office, a carrier NAT)
+  can see;
+- the site-wide surge.
+
+It never reveals whether an account exists.
+
 **What is stored**
 
 - The counters live in memory, at most 1,000,000 entries.
 - Their keys are HMACs (with `secret_key`) of the account name and the
   network. No username, password or IP address is kept.
-- When the table is full, accounts and networks it cannot track start at the
-  network cap (+6).
+- When the table is full, the tenth of the counters that weigh least now
+  (fewest failures, decayed most) are forgotten to make room. The counters
+  of an attack in progress weigh most and stay; newcomers start at the
+  base level.
 - With a configured `secret_key`, the counters are saved every minute to
   `state_dir/login-counters`, sealed with an HMAC, so a restart does not
   forget an attack. A file that fails its seal stops the proxy at startup

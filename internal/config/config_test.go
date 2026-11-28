@@ -373,7 +373,6 @@ func TestLoginRoutesConfig(t *testing.T) {
 	for _, bad := range []string{
 		`"login_routes":[{"path":"/login","success":{"status":[302]}}]}`,
 		`"login_routes":[{"path":"/login/*","username_field":"u","success":{"status":[302]}}]}`,
-		`"argon2_max_memory_mib":8,"login_routes":[{"path":"/login","username_field":"u","success":{"status":[302]}}]}`,
 		`"login_surge_failures_per_minute":[1000,100]}`,
 		`"login_surge_failures_per_minute":[0,100]}`,
 		`"login_surge_failures_per_minute":[100]}`,

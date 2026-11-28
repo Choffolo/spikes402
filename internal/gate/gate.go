@@ -131,9 +131,12 @@ type Gate struct {
 	claimLim *rateLimiter  // polls of /.spikes402/claim, per client
 	surge    *surger       // optional per-group demand / price multiplier
 
-	login       *LoginState                // failure counters of login routes
-	loginParams func(level int) pow.Params // the puzzle for a level (smaller in tests)
-	loginLim    *rateLimiter               // login challenges and checks, per client
+	login          *LoginState                // failure counters of login routes
+	loginParams    func(level int) pow.Params // the puzzle for a level (smaller in tests)
+	loginPre       int                        // sha256d pre-check bits (smaller in tests)
+	loginLim       *rateLimiter               // login challenges and checks, per client
+	loginPrefixLim *rateLimiter               // the same, per /24 or /48
+	loginArgon     *argonBudget               // Argon2id memory for login checks only
 
 	nodeLog  rateLog // why no invoice was offered
 	classLog rateLog // bot classifications
@@ -168,9 +171,6 @@ func New(opt Options) *Gate {
 	}
 	g.invoices.now = func() time.Time { return g.now() }
 	if len(opt.LoginRoutes) > 0 {
-		if g.argon.max < LoginArgonMemoryMiB {
-			panic("gate: Argon2MaxMemoryMiB too small for login routes")
-		}
 		g.login = opt.LoginState
 		if g.login == nil {
 			g.login = NewLoginState()
@@ -184,7 +184,10 @@ func New(opt Options) *Gate {
 			g.login.mu.Unlock()
 		}
 		g.loginLim = newRateLimiter(opt.ChallengesPerMinute)
+		g.loginPrefixLim = newRateLimiter(loginPrefixFactor * opt.ChallengesPerMinute)
+		g.loginArgon = newArgonBudget(loginArgonMaxMiB)
 		g.loginParams = loginPoW
+		g.loginPre = LoginPreBits
 	}
 	g.live.Store(&Settings{
 		PriceSats: opt.PriceSats, Prices: append([]PriceRule(nil), opt.Prices...),

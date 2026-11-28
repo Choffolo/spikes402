@@ -38,6 +38,23 @@ const (
 	loginLevelToArgon   = 16
 	loginAcctCap        = 4 // most extra levels failures from anywhere can add to one account
 	loginNetCap         = 6 // most extra levels failures from one network can add
+	// An account's own failures add nothing until they round to
+	// loginAcctShow, then loginAcctCap at once: anyone may ask for a
+	// challenge for any username, so the level shows only that one bit.
+	loginAcctShow = 4
+
+	// Pre-check: before any Argon2id check, the proof must carry a
+	// sha256d solution of this many bits for the same token. It costs the
+	// client about 2^18 hashes (~0.15 s in one browser worker, more than
+	// the server's Argon2id check in native code) and the server one hash,
+	// so junk proofs cannot buy Argon2id checks for free.
+	LoginPreBits = 18
+	// Logins have their own Argon2id memory budget (8 checks at once), so
+	// a flood of login proofs never starves the API puzzle, or the reverse.
+	loginArgonMaxMiB = 128
+	// Per network prefix (/24 IPv4, /48 IPv6), challenges and checks
+	// together, on top of the per-client challenges_per_minute.
+	loginPrefixFactor = 4
 
 	loginChallengeTTL = 120 * time.Second
 	loginPassTTL      = 60 * time.Second
@@ -195,6 +212,8 @@ type loginChallenge struct {
 	Algorithm       string    `json:"algorithm"`
 	Difficulty      int       `json:"difficulty"`
 	MemoryMiB       int       `json:"memory_mib"`
+	PreAlgorithm    string    `json:"precheck_algorithm"`
+	PreDifficulty   int       `json:"precheck_difficulty"`
 	Level           int       `json:"level"`
 	ExpiresAt       time.Time `json:"expires_at"`
 	ExpectedSeconds float64   `json:"expected_seconds_one_cpu_core"`
@@ -223,14 +242,16 @@ func (g *Gate) newLoginChallenge(route *LoginRoute, acct, net string) (loginChal
 	}
 	return loginChallenge{
 		Challenge: token, Algorithm: p.Algorithm, Difficulty: p.Difficulty, MemoryMiB: p.MemoryMiB,
+		PreAlgorithm: pow.SHA256d, PreDifficulty: g.loginPre,
 		Level: level, ExpiresAt: exp.UTC(), ExpectedSeconds: float64(int(p.ExpectedSeconds()*10)) / 10,
-		Usage: `find nonce so that Argon2id(password = challenge + ":" + nonce, salt = "spikes402-pow-v1", time = 1, memory = memory_mib MiB, threads = 1, 32 bytes) has "difficulty" leading zero bits, then repeat the login with "Authorization: PoW <challenge>:<nonce>"`,
+		Usage: `find nonce so that Argon2id(password = challenge + ":" + nonce, salt = "spikes402-pow-v1", time = 1, memory = memory_mib MiB, threads = 1, 32 bytes) has "difficulty" leading zero bits, and pre so that SHA256(SHA256(challenge + ":" + pre)) has "precheck_difficulty" leading zero bits, then repeat the login with "Authorization: PoW <challenge>:<nonce>:<pre>"`,
 	}, nil
 }
 
 var (
 	errLoginBinding = errors.New("proof is for another account, network or login route")
 	errLoginLevel   = errors.New("proof is below the current level; get a new challenge")
+	errBadPre       = errors.New("missing or wrong sha256d pre-check")
 )
 
 // checkLoginClaims verifies a login token or pass: its kind, expiry and
@@ -249,13 +270,16 @@ func (g *Gate) checkLoginClaims(value, kind, resHash, acct, net string) (claims,
 	return c, nil
 }
 
-// checkLoginWork verifies "<token>:<nonce>" for a login challenge and
-// spends the token, right or wrong: one check per token, ever. The
-// Argon2id check is rate limited per client and bounded by the memory
-// budget; when the budget is full the answer is 503, never a pass.
+// checkLoginWork verifies "<token>:<nonce>:<pre>" for a login challenge
+// and spends the token, right or wrong: one Argon2id check per token,
+// ever. Before that check come the cheap ones: the signature, binding,
+// spent set and the sha256d pre-check, then the rate limits per client
+// and per prefix. The Argon2id check runs in the login memory budget;
+// when it is full the answer is 503, never a pass.
 func (g *Gate) checkLoginWork(r *http.Request, cred, resHash, acct, net string) (claims, error) {
-	token, nonceStr, ok := strings.Cut(strings.TrimSpace(cred), ":")
-	if !ok {
+	token, rest, ok := strings.Cut(strings.TrimSpace(cred), ":")
+	nonceStr, preStr, ok2 := strings.Cut(rest, ":")
+	if !ok || !ok2 {
 		return claims{}, errBadToken
 	}
 	c, err := g.checkLoginClaims(token, "login", resHash, acct, net)
@@ -263,21 +287,25 @@ func (g *Gate) checkLoginWork(r *http.Request, cred, resHash, acct, net string) 
 		return claims{}, err
 	}
 	nonce, err := strconv.ParseUint(nonceStr, 10, 64)
+	pre, err2 := strconv.ParseUint(preStr, 10, 64)
 	p := c.powParams()
-	if err != nil || p != g.loginParams(c.Level) || p.Validate() != nil {
+	if err != nil || err2 != nil || p != g.loginParams(c.Level) || p.Validate() != nil {
 		return claims{}, errBadProof
 	}
 	now := g.now()
 	if g.spent.has(spentKey("PoW", c.ID)) {
 		return claims{}, errReplay
 	}
-	if ok, wait := g.loginLim.allow(g.client(r), now); !ok {
+	if !(pow.Params{Algorithm: pow.SHA256d, Difficulty: g.loginPre}).Check(token, pre) {
+		return claims{}, errBadPre
+	}
+	if ok, wait := g.loginAllow(r, now); !ok {
 		return claims{}, &busyError{http.StatusTooManyRequests, wait, "too many requests"}
 	}
-	if !g.argon.acquire(p.MemoryMiB, argonAcquireWait) {
+	if !g.loginArgon.acquire(p.MemoryMiB, argonAcquireWait) {
 		return claims{}, &busyError{http.StatusServiceUnavailable, time.Second, "busy checking proofs of work, retry shortly"}
 	}
-	defer g.argon.release(p.MemoryMiB)
+	defer g.loginArgon.release(p.MemoryMiB)
 	if err := g.spent.use(spentKey("PoW", c.ID), time.Unix(c.Expires, 0), now); err != nil {
 		return claims{}, err
 	}
@@ -285,6 +313,29 @@ func (g *Gate) checkLoginWork(r *http.Request, cred, resHash, acct, net string) 
 		return claims{}, errBadProof
 	}
 	return c, nil
+}
+
+// loginPrefix is the client's /24 (IPv4) or /48 (IPv6): what one
+// operator easily holds many addresses of.
+func (g *Gate) loginPrefix(r *http.Request) string {
+	ip := g.clientIP(r)
+	switch {
+	case ip == nil:
+		return r.RemoteAddr
+	case ip.To4() != nil:
+		return ip.To4().Mask(net.CIDRMask(24, 32)).String() + "/24"
+	default:
+		return ip.Mask(net.CIDRMask(48, 128)).String() + "/48"
+	}
+}
+
+// loginAllow counts one login challenge or check against the client's
+// limit and its prefix's.
+func (g *Gate) loginAllow(r *http.Request, now time.Time) (bool, time.Duration) {
+	if ok, wait := g.loginLim.allow(g.client(r), now); !ok {
+		return false, wait
+	}
+	return g.loginPrefixLim.allow(g.loginPrefix(r), now)
 }
 
 // serveLoginChallenge answers POST /.spikes402/login-challenge
@@ -313,7 +364,7 @@ func (g *Gate) serveLoginChallenge(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gate) writeLoginChallenge(w http.ResponseWriter, r *http.Request, route *LoginRoute, acct string, status int, problem string) {
-	if ok, wait := g.loginLim.allow(g.client(r), g.now()); !ok {
+	if ok, wait := g.loginAllow(r, g.now()); !ok {
 		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
 		http.Error(w, "too many requests", http.StatusTooManyRequests)
 		return
@@ -325,7 +376,7 @@ func (g *Gate) writeLoginChallenge(w http.ResponseWriter, r *http.Request, route
 	}
 	if status == http.StatusPaymentRequired {
 		ch.Error, ch.Problem = "login proof-of-work required", problem
-		w.Header().Add("WWW-Authenticate", fmt.Sprintf(`PoW challenge=%q, difficulty="%d", algorithm="argon2id", memory-mib="%d"`, ch.Challenge, ch.Difficulty, ch.MemoryMiB))
+		w.Header().Add("WWW-Authenticate", fmt.Sprintf(`PoW challenge=%q, difficulty="%d", algorithm="argon2id", memory-mib="%d", precheck-difficulty="%d"`, ch.Challenge, ch.Difficulty, ch.MemoryMiB, ch.PreDifficulty))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", protectedCacheControl)
@@ -627,8 +678,10 @@ var (
 
 	// loginJS points at the worker by content hash, so a new release is
 	// never served from an old cached copy.
-	loginJS = strings.Replace(loginJSTemplate, "__WORKER__",
-		Argon2idWorkerPath+"?v="+hex.EncodeToString(sha256Sum([]byte(argon2idWorkerJS))[:6]), 1)
+	loginJS = strings.NewReplacer(
+		"__WORKER__", Argon2idWorkerPath+"?v="+hex.EncodeToString(sha256Sum([]byte(argon2idWorkerJS))[:6]),
+		"__POW_WORKER__", workerSrc,
+	).Replace(loginJSTemplate)
 )
 
 func (g *Gate) serveLoginReserved(w http.ResponseWriter, r *http.Request) {

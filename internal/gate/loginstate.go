@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -96,25 +97,21 @@ func loginKey(kind byte, parts ...string) counterKey {
 }
 
 // levelLocked returns the level required now for acct (hex HMAC) from net.
-// Keys that cannot be tracked because the table is full start at the
-// network cap: never cheaper than a known attacker network.
+// The account's own counter shows as one bit (see loginAcctShow).
 func (s *LoginState) levelLocked(acct, net string, now int64) int {
-	extra := 0
-	full := len(s.m) >= s.max
 	read := func(kind byte, k counterKey) int {
-		c, ok := s.m[k]
-		if !ok {
-			if full {
-				extra = loginNetCap
-			}
-			return 0
+		if c, ok := s.m[k]; ok {
+			return loginStep(c.at(kind, now))
 		}
-		return loginStep(c.at(kind, now))
+		return 0
 	}
 	pair := read(counterPair, loginKey(counterPair, acct, net))
-	acc := min(read(counterAcct, loginKey(counterAcct, acct)), loginAcctCap)
+	acc := 0
+	if read(counterAcct, loginKey(counterAcct, acct)) >= loginAcctShow {
+		acc = loginAcctCap
+	}
 	nt := min(read(counterNet, loginKey(counterNet, net)), loginNetCap)
-	lvl := LoginBaseLevel + max(pair, acc, nt, extra) + s.surgeLocked(now)
+	lvl := LoginBaseLevel + max(pair, acc, nt) + s.surgeLocked(now)
 	return min(lvl, LoginMaxLevel)
 }
 
@@ -169,8 +166,11 @@ func (s *LoginState) failed(now time.Time) {
 
 func (s *LoginState) addLocked(kind byte, k counterKey, d float64, now int64) {
 	c, ok := s.m[k]
-	if !ok && (d <= 0 || len(s.m) >= s.max) {
+	if !ok && d <= 0 {
 		return
+	}
+	if !ok && len(s.m) >= s.max {
+		s.evictLocked(now)
 	}
 	f := max(c.at(kind, now)+d, 0)
 	if f < counterForget {
@@ -193,6 +193,31 @@ func (s *LoginState) sweepLocked(now int64) {
 			s.dirty = true
 		}
 	}
+}
+
+// evictLocked makes room in a full table by forgetting the tenth of the
+// counters that weigh least now (fewest failures, decayed the most). The
+// heaviest counters, those of an attack in progress, are kept; pushing one
+// out would take as many heavier counters, each paid for with proofs at
+// a rising level. Newcomers are then tracked from the base level.
+func (s *LoginState) evictLocked(now int64) {
+	vals := make([]float64, 0, len(s.m))
+	for k, c := range s.m {
+		vals = append(vals, c.at(k[0], now))
+	}
+	slices.Sort(vals)
+	n := max(len(vals)/10, 1)
+	limit, removed := vals[n-1], 0
+	for k, c := range s.m {
+		if removed >= n {
+			break
+		}
+		if c.at(k[0], now) <= limit {
+			delete(s.m, k)
+			removed++
+		}
+	}
+	s.dirty = true
 }
 
 func (s *LoginState) rollLocked(now int64) {
