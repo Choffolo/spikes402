@@ -64,7 +64,7 @@ func newLoginFixtureWith(t *testing.T, surge [2]int) *loginFixture {
 		SecretKey: []byte(strings.Repeat("s", 32)), Lightning: lightning.NewFake(), Next: origin,
 		ChallengesPerMinute: 1000, MaxInvoicesPerMinute: 6000, MaxPendingInvoices: 1000,
 		LoginRoutes: []LoginRoute{{Path: "/login", UsernameField: "user",
-			Success: LoginSuccess{Status: []int{302}, LocationNotPrefix: "/login"}}},
+			Success: LoginSuccess{Status: []int{302}, LocationPrefix: "/home"}}},
 		LoginSurge: surge,
 	})
 	if err := CheckLoginRoutes(f.gate.opt.LoginRoutes); err != nil {
@@ -463,7 +463,7 @@ func TestCheckLoginSurge(t *testing.T) {
 }
 
 func TestCheckLoginRoutes(t *testing.T) {
-	ok := LoginSuccess{Status: []int{302}}
+	ok := LoginSuccess{Status: []int{302}, SetCookie: "sid"}
 	bad := []LoginRoute{
 		{Path: "login", UsernameField: "u", Success: ok},
 		{Path: "/a/../login", UsernameField: "u", Success: ok},
@@ -634,6 +634,25 @@ func TestLoginUnicodeFieldFolding(t *testing.T) {
 	if rec := f.do(r); rec.Code != http.StatusMethodNotAllowed || f.calls != 0 {
 		t.Fatalf("GET with a folded username in the query: got %d", rec.Code)
 	}
+	// R3-3: the dotless ı (U+0131) and dotted İ (U+0130) merge with i/I.
+	for _, k := range []string{"emaıl", "EMAİL", "Email", "EMAIL", "emaİl"} {
+		if loginFieldKey(k) != loginFieldKey("email") {
+			t.Errorf("%q does not fold to email", k)
+		}
+	}
+	f.gate.opt.LoginRoutes[0].UsernameField = "uid"
+	for _, c := range []struct{ ct, body string }{
+		{"application/json", `{"uid":"attacker","uıd":"victim"}`},
+		{"application/json", `{"uid":"attacker","UİD":"victim"}`},
+		{"application/x-www-form-urlencoded", "uid=attacker&u%C4%B1d=victim&pass=x"},
+		{"application/x-www-form-urlencoded", "uid=attacker&U%C4%B0D=victim&pass=x"},
+	} {
+		r := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(c.body))
+		r.Header.Set("Content-Type", c.ct)
+		if rec := f.do(r); rec.Code != http.StatusBadRequest || f.calls != 0 {
+			t.Fatalf("%s: got %d, want 400", c.body, rec.Code)
+		}
+	}
 }
 
 // B2, B3 and case: nothing that could be a login reaches the origin
@@ -679,7 +698,7 @@ func TestLoginNearPathsAndSafeMethods(t *testing.T) {
 	if f.do(httptest.NewRequest(http.MethodPost, "/loginx", strings.NewReader("a=b"))); f.calls == 0 {
 		t.Fatal("POST /loginx is not near /login")
 	}
-	if err := CheckLoginRoutes([]LoginRoute{{Path: "/", UsernameField: "u", Success: LoginSuccess{Status: []int{302}}}}); err == nil {
+	if err := CheckLoginRoutes([]LoginRoute{{Path: "/", UsernameField: "u", Success: LoginSuccess{Status: []int{302}, SetCookie: "sid"}}}); err == nil {
 		t.Fatal(`accepted "/" as a login path`)
 	}
 }
@@ -860,6 +879,82 @@ func TestLoginSuccessCriteria(t *testing.T) {
 	if CheckLoginRoutes([]LoginRoute{{Path: "/l", UsernameField: "u", Success: LoginSuccess{Status: []int{302}, SetCookie: "a b"}}}) == nil ||
 		CheckLoginRoutes([]LoginRoute{{Path: "/l", UsernameField: "u", Success: LoginSuccess{Status: []int{302}, LocationPrefix: "x"}}}) == nil {
 		t.Fatal("bad success criteria accepted")
+	}
+}
+
+// R3-1: a 3xx success needs set_cookie or location_prefix, and with
+// location_prefix the Referer/"next" heuristic is skipped, so honest
+// logins that go back to where the user was are successes.
+func TestLoginRedirectSuccessNeedsPositiveCriterion(t *testing.T) {
+	for _, s := range []LoginSuccess{
+		{Status: []int{302}},
+		{Status: []int{200, 303}, LocationNotPrefix: "/login"},
+		{Status: []int{399}},
+	} {
+		if CheckLoginRoutes([]LoginRoute{{Path: "/l", UsernameField: "u", Success: s}}) == nil {
+			t.Errorf("accepted %+v", s)
+		}
+	}
+	for _, s := range []LoginSuccess{
+		{Status: []int{302}, SetCookie: "sid"},
+		{Status: []int{303}, LocationPrefix: "/app"},
+		{Status: []int{200}},
+		{Status: []int{200, 400}},
+	} {
+		if err := CheckLoginRoutes([]LoginRoute{{Path: "/l", UsernameField: "u", Success: s}}); err != nil {
+			t.Errorf("refused %+v: %v", s, err)
+		}
+	}
+	now := time.Unix(1_800_000_000, 0)
+	route := LoginRoute{Path: "/login", Success: LoginSuccess{Status: []int{302}, LocationPrefix: "/app"}}
+	if !route.succeeded(&outcomeWriter{status: 302, location: "/app/inbox"}, []string{"/app/inbox", "https://site.example/app/inbox"}, now) {
+		t.Fatal("location_prefix: a login back to the page the user came from counted as failure")
+	}
+	// End to end: the origin sends honest logins back to "next".
+	f := newLoginFixture(t)
+	f.respond = func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, r.URL.Query().Get("next"), http.StatusFound)
+	}
+	for range 3 {
+		ch := decodeChallenge(t, f.do(loginReq("alice", "192.0.2.1", "")))
+		r := loginReq("alice", "192.0.2.1", solveLogin(t, ch))
+		r.URL.RawQuery = "next=/home/inbox"
+		f.do(r)
+	}
+	if ch := decodeChallenge(t, f.do(loginReq("alice", "192.0.2.1", ""))); ch.Level != LoginBaseLevel {
+		t.Fatalf("honest logins to \"next\" counted as failures: level %d", ch.Level)
+	}
+}
+
+// R3-2: proofs with a right pre-check but a wrong nonce count on their own
+// counter, worth at most +1 level: 8 of them no longer push a /24
+// neighbour up by +6. They still use up the rate limits.
+func TestLoginJunkProofsCapped(t *testing.T) {
+	f := newLoginFixture(t)
+	hard := pow.Params{Algorithm: pow.Argon2id, Difficulty: 12, MemoryMiB: 8}
+	f.gate.loginParams = func(int) pow.Params { return hard }
+	junk := func(ip string) int {
+		ch := decodeChallenge(t, f.do(loginReq("dave", ip, "")))
+		pre, _ := pow.Params{Algorithm: pow.SHA256d, Difficulty: ch.PreDifficulty}.Solve(context.Background(), ch.Challenge)
+		nonce := uint64(0)
+		for hard.Check(ch.Challenge, nonce) {
+			nonce++
+		}
+		return f.do(loginReq("dave", ip, "PoW "+ch.Challenge+":"+strconv.FormatUint(nonce, 10)+":"+strconv.FormatUint(pre, 10))).Code
+	}
+	for range 8 {
+		if code := junk("192.0.2.1"); code != http.StatusPaymentRequired {
+			t.Fatalf("junk proof: %d", code)
+		}
+	}
+	neighbour := f.gate.loginNetwork(loginReq("", "192.0.2.77", ""))
+	if got := f.gate.login.Level(f.gate.loginAccount("erin"), neighbour, f.now); got != LoginBaseLevel+loginJunkCap {
+		t.Fatalf("8 junk proofs pushed a /24 neighbour to level %d, want base+%d", got, loginJunkCap)
+	}
+	f.gate.loginLim = newRateLimiter(2)
+	junk("198.51.100.1")
+	if rec := f.do(loginReq("dave", "198.51.100.1", "")); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("junk proofs not rate-limited: %d", rec.Code)
 	}
 }
 

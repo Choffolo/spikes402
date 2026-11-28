@@ -41,6 +41,7 @@ const (
 	loginLevelToArgon   = 16
 	loginAcctCap        = 4 // most extra levels failures from anywhere can add to one account
 	loginNetCap         = 6 // most extra levels failures from one network can add
+	loginJunkCap        = 1 // most extra levels junk proofs from one network can add
 	// An account's own failures add nothing until they round to
 	// loginAcctShow, then loginAcctCap at once: anyone may ask for a
 	// challenge for any username, so the level shows only that one bit.
@@ -137,6 +138,11 @@ func CheckLoginRoutes(routes []LoginRoute) error {
 		}
 		if p := r.Success.LocationPrefix; p != "" && !strings.HasPrefix(p, "/") {
 			return fmt.Errorf("login_routes[%d].success.location_prefix must start with /", i)
+		}
+		if r.Success.SetCookie == "" && r.Success.LocationPrefix == "" && slices.ContainsFunc(r.Success.Status, func(s int) bool { return s >= 300 && s < 400 }) {
+			// A redirect alone cannot tell success from failure: the origin
+			// may send both to a place the client chose ("next", Referer).
+			return fmt.Errorf("login_routes[%d].success: with a 3xx status, set \"set_cookie\" or \"location_prefix\"", i)
 		}
 		if c := r.Success.SetCookie; c != "" && (len(c) > 128 || strings.ContainsAny(c, " \t;,=\"()<>@:/?[]{}\\") || strings.ContainsFunc(c, func(r rune) bool { return r < 0x21 || r > 0x7e })) {
 			return fmt.Errorf("login_routes[%d].success.set_cookie must be a cookie name", i)
@@ -326,7 +332,8 @@ func (g *Gate) checkLoginClaims(value, kind, resHash, acct, net string) (claims,
 // spent set and the sha256d pre-check, then the rate limits. The Argon2id
 // check needs one of its network's few slots and room in the login
 // memory budget; otherwise the answer is 503, never a pass. A right
-// pre-check with a wrong nonce counts as a failure of the network.
+// pre-check with a wrong nonce counts as junk from the network (worth at
+// most +1 level, see LoginState.junkProof).
 func (g *Gate) checkLoginWork(r *http.Request, cred, resHash, acct, net string) (claims, error) {
 	token, rest, ok := strings.Cut(strings.TrimSpace(cred), ":")
 	nonceStr, preStr, ok2 := strings.Cut(rest, ":")
@@ -367,7 +374,7 @@ func (g *Gate) checkLoginWork(r *http.Request, cred, resHash, acct, net string) 
 		return claims{}, err
 	}
 	if !p.Check(token, nonce) {
-		g.login.netFailed(net, now)
+		g.login.junkProof(net, now)
 		return claims{}, errBadProof
 	}
 	return c, nil
@@ -597,10 +604,11 @@ func (g *Gate) serveLogin(w http.ResponseWriter, r *http.Request, route *LoginRo
 
 // succeeded reports whether the origin's answer is a success (see
 // LoginSuccess). An answer the origin never wrote is a failure. Without a
-// set_cookie criterion, a redirect to a place the request itself named
-// (the Referer, a "next" parameter, any query or body value) is a
-// failure: an origin that sends failed logins back there must not reset
-// the counters.
+// set_cookie or location_prefix criterion (allowed only when no 3xx
+// status counts, see CheckLoginRoutes), a redirect to a place the request
+// itself named (the Referer, a "next" parameter, any query or body value)
+// is a failure: an origin that sends failed logins back there must not
+// reset the counters.
 func (route *LoginRoute) succeeded(o *outcomeWriter, steer []string, now time.Time) bool {
 	s := route.Success
 	if o.status == 0 || !slices.Contains(s.Status, o.status) {
@@ -628,7 +636,7 @@ func (route *LoginRoute) succeeded(o *outcomeWriter, steer []string, now time.Ti
 		}
 		return false
 	}
-	if loc != "" {
+	if loc != "" && s.LocationPrefix == "" {
 		for _, v := range steer {
 			if k, ok := route.redirectKey(v); ok && k == loc {
 				return false
@@ -764,13 +772,18 @@ func loginFieldKey(k string) string {
 	return strings.Map(foldRune, k)
 }
 
-// foldRune maps r to the smallest rune of its Unicode case-folding orbit,
-// so every spelling a case-insensitive decoder treats as one letter ("s",
-// "S", "ſ"; "k", "K", "K") gives the same rune.
+// foldRune maps r to the smallest rune of the Unicode case-folding orbits
+// of r, its lower case and its upper case, so every spelling a
+// case-insensitive decoder may treat as one letter ("s", "S", "ſ"; "k",
+// "K", the Kelvin sign; "i", "I", the dotless ı and the dotted İ) gives
+// the same rune.
 func foldRune(r rune) rune {
 	m := r
-	for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
-		m = min(m, f)
+	for _, s := range [...]rune{r, unicode.ToLower(r), unicode.ToUpper(r)} {
+		m = min(m, s)
+		for f := unicode.SimpleFold(s); f != s; f = unicode.SimpleFold(f) {
+			m = min(m, f)
+		}
 	}
 	return m
 }

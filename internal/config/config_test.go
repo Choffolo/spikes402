@@ -366,7 +366,7 @@ func TestPublicStatsFlag(t *testing.T) {
 
 func TestLoginRoutesConfig(t *testing.T) {
 	base := `{"origin":"http://o","price_sats":2,"protect":["/x"],"lightning":{"backend":"fake"},`
-	c, err := load(t, base+`"login_routes":[{"path":"/login","username_field":"email","success":{"status":[302]}}]}`)
+	c, err := load(t, base+`"login_routes":[{"path":"/login","username_field":"email","success":{"status":[302],"set_cookie":"sid"}}]}`)
 	if err != nil || len(c.LoginRoutes) != 1 || c.LoginRoutes[0].Method != "POST" || *c.LoginSurge != [2]int{100, 1000} {
 		t.Fatalf("valid route: %+v %v", c.LoginRoutes, err)
 	}

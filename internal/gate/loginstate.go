@@ -26,6 +26,7 @@ const (
 	counterPair byte = 1 // this account from this network
 	counterAcct byte = 2 // this account from anywhere
 	counterNet  byte = 3 // this network, any account
+	counterJunk byte = 4 // this network: proofs with a right pre-check but a wrong nonce
 
 	maxLoginCounters = 1_000_000
 	loginStateFile   = "login-counters"
@@ -41,7 +42,7 @@ type counter struct {
 }
 
 func halfLife(kind byte) float64 {
-	if kind == counterNet {
+	if kind == counterNet || kind == counterJunk {
 		return 15 * 60
 	}
 	return 30 * 60
@@ -111,7 +112,8 @@ func (s *LoginState) levelLocked(acct, net string, now int64) int {
 		acc = loginAcctCap
 	}
 	nt := min(read(counterNet, loginKey(counterNet, net)), loginNetCap)
-	lvl := LoginBaseLevel + max(pair, acc, nt) + s.surgeLocked(now)
+	junk := min(read(counterJunk, loginKey(counterJunk, net)), loginJunkCap)
+	lvl := LoginBaseLevel + max(pair, acc, nt, junk) + s.surgeLocked(now)
 	return min(lvl, LoginMaxLevel)
 }
 
@@ -156,14 +158,17 @@ func (s *LoginState) succeeded(acct, net string, now time.Time) {
 	s.dirty = true
 }
 
-// netFailed counts one failure for a network that sent a proof with a
-// right pre-check but a wrong Argon2id nonce.
-func (s *LoginState) netFailed(net string, now time.Time) {
+// junkProof counts a proof with a right pre-check but a wrong Argon2id
+// nonce from net. It has its own counter, worth at most +1 level
+// (loginJunkCap): junk is cheaper to send than a real failed attempt,
+// so it must not push the neighbours of a network up to the network cap.
+// Junk is still held back by the rate limits and the per-network slots.
+func (s *LoginState) junkProof(net string, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	unix := now.Unix()
 	s.sweepLocked(unix)
-	s.addLocked(counterNet, loginKey(counterNet, net), 1, unix)
+	s.addLocked(counterJunk, loginKey(counterJunk, net), 1, unix)
 }
 
 // failed records an admitted attempt that did not log in (the counters

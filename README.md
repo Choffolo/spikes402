@@ -354,7 +354,8 @@ expensive. But a real user's price can be raised by others:
 - by an attacker anywhere, by up to +4 levels (the account term);
 - by anyone sharing the user's /24 or IPv6 /48 (an office, a carrier NAT),
   by up to +10 when they fail on the same account (the pair term) and +6
-  when they fail on any account (the network term);
+  when they fail on any account (the network term), or +1 by sending
+  proofs that skip the Argon2id work;
 - by everyone, by +1 or +2 while the whole site sees a surge of failures.
 
 Load can slow or stop a real user too: while the login Argon2id budget, or
@@ -396,11 +397,18 @@ limits below (`429`) apply to everyone behind the same address or prefix.
   - it does not redirect under `location_not_prefix`;
   - if `location_prefix` is set, it redirects under it;
   - if `set_cookie` is set, it sets that cookie (non-empty, not expired);
-  - if `set_cookie` is not set, it does not redirect to a place the
-    request itself named: the `Referer`, or any query or body value (a
-    `next` parameter, say). An origin that sends failed logins back there
-    must not reset the counters. Successful logins that follow `next` then
-    count as failures too, which is why `set_cookie` is recommended.
+  - if neither `set_cookie` nor `location_prefix` is set, it does not
+    redirect to a place the request itself named: the `Referer`, or any
+    query or body value (a `next` parameter, say), so an origin that sends
+    failed logins back there cannot reset the counters.
+
+  If `success.status` lists any `3xx`, the proxy refuses to start unless
+  `set_cookie` or `location_prefix` is set: a redirect alone cannot tell
+  a success from a failure, and the guess above would count honest logins
+  that follow `next` as failures. With either set, the guess is skipped.
+  `set_cookie` is the most robust; `location_prefix` trusts that the
+  origin never sends a failed login under that prefix, whatever `next`
+  says.
 
   A relative `Location` is resolved against the route. Get this right: if
   a failed login can look like a success (for example a site that answers
@@ -412,8 +420,9 @@ limits below (`429`) apply to everyone behind the same address or prefix.
   find `username_field`. It never stores or logs the body. A request the
   origin could read as another username is refused with `400`: the field
   given more than once under any spelling some framework merges with it
-  (letter case under full Unicode case folding, so `User`, `uſer` with a
-  long s, or a Kelvin sign for `k`; PHP's `user[]`, or `user.name` for
+  (letter case under full Unicode case folding plus upper- and
+  lower-casing, so `User`, `uſer` with a long s, a Kelvin sign for `k`, or
+  the Turkish dotless `ı` and dotted `İ` for `i`; PHP's `user[]`, or `user.name` for
   `user_name`), the field in the query string, a `Content-Encoding`, a
   charset other than UTF-8, or more than one `Content-Type` header. The
   username *value* is compared after trimming spaces and lower-casing; an
@@ -453,6 +462,8 @@ input:
    `worker-src` and `connect-src` from `'self'`.
 5. `data-text-working` and `data-text-failed` (which may contain
    `{error}`) replace the status messages, for example in another language.
+6. `login.js` only handles plain HTML forms. A single-page app that logs
+   in with `fetch` or XHR must use the API flow below instead.
 
 **API clients and bots**
 
@@ -485,8 +496,10 @@ challenge is checked with Argon2id at most once. Then:
   of the 8 at a time.
 - **Pushback**: for a minute after the budget was full, new challenges ask
   for a 22-bit pre-check (16 times the work). A proof with a right
-  pre-check and a wrong Argon2id nonce counts as a failure of its network,
-  and wrong pre-checks count against the rate limits.
+  pre-check and a wrong Argon2id nonce counts against its network on a
+  separate counter that adds at most +1 level (junk is cheaper to send
+  than a real failed login), and such proofs and wrong pre-checks count
+  against the rate limits.
 
 The pre-check is plain sha256d: an attacker with GPUs or ASICs pays it
 almost nothing, and is then held back only by the rate limits, the
