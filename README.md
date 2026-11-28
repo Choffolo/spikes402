@@ -348,53 +348,84 @@ it needs ~256 MiB per verifier and a C library. Not implemented.
 
 List your login endpoints in `login_routes` and every login attempt costs
 work, always, for everyone. Each failed attempt makes the next one cost
-more. Failures alone never block an account: they only make attempts more
-expensive, and an attacker can raise a real user's price by at most the
-account cap (+4 levels). A real user can still be slowed or stopped by
-load: while the login Argon2id budget is full, logins get `503`, and the
-rate limits below apply to everyone behind the same address or prefix.
+more. Failures alone never block an account; they only make attempts more
+expensive. But a real user's price can be raised by others:
+
+- by an attacker anywhere, by up to +4 levels (the account term);
+- by anyone sharing the user's /24 or IPv6 /48 (an office, a carrier NAT),
+  by up to +10 when they fail on the same account (the pair term) and +6
+  when they fail on any account (the network term);
+- by everyone, by +1 or +2 while the whole site sees a surge of failures.
+
+Load can slow or stop a real user too: while the login Argon2id budget, or
+the user's network's share of it, is full, logins get `503`; and the rate
+limits below (`429`) apply to everyone behind the same address or prefix.
 
 ```json
 "login_routes": [{
   "method": "POST",
   "path": "/login",
   "username_field": "email",
-  "success": { "status": [302, 303], "location_not_prefix": "/login" }
+  "success": { "status": [302, 303], "location_not_prefix": "/login", "set_cookie": "session_auth" }
 }]
 ```
 
 **How the proxy checks a login**
 
 - **Matching.** `path` is matched in the same canonical form as `protect`
-  (see [Path matching](#path-matching)): a trailing slash, `;params`,
-  trailing dots and spaces and, unless `protect_case_sensitive` is set,
-  letter case are ignored, so `/Login;jsessionid=1` is the `/login` route.
-  `method` defaults to `POST` and is compared without letter case.
-- **Other methods.** On a login path, only `GET`, `HEAD` and `OPTIONS`
-  without a method-override header (`X-HTTP-Method-Override` and the like)
-  pass to the origin unchecked, to show the login page. Any other method
-  that is not a configured route gets `405`.
-- **Success and failure.** An answer whose status is in `success.status`,
-  and does not redirect under `location_not_prefix`, is a success. Anything
-  else is a failure. A relative `Location` is resolved against the route.
-  Get this right: if a failed login can look like a success (for example a
-  site that answers `200` both ways), every failure resets the counters
-  and the price never grows.
+  (see [Path matching](#path-matching)), but always without letter case,
+  whatever `protect_case_sensitive` says: a trailing slash, `;params`,
+  trailing dots and spaces and case are ignored, so `/Login;jsessionid=1`
+  is the `/login` route. `method` defaults to `POST` and is compared
+  without letter case. `"/"` cannot be a login path.
+- **Near paths and other methods.** Some frameworks serve a login under
+  more paths: a format suffix (`/login.json`, `/login.do`) or a path below
+  it (`/login/x`). On the login path and on those, only a `GET`, `HEAD` or
+  `OPTIONS` that cannot carry a login passes to the origin unchecked: no
+  body, no method-override header (`X-HTTP-Method-Override` and the like),
+  and no `username_field` in the query string (PHP's `$_REQUEST` and
+  Flask's `request.values` read it there). Everything else that is not the
+  configured route gets `405`. So a `POST` to an endpoint below a login
+  path (for example `/login/2fa`) is refused: move it elsewhere. A link
+  that pre-fills the username in the query (`/login?email=...`) gets
+  `405` too.
+- **Success and failure.** An answer is a success only if all of these
+  hold; anything else, including an answer the origin never wrote, is a
+  failure:
+  - its status is in `success.status`;
+  - it does not redirect under `location_not_prefix`;
+  - if `location_prefix` is set, it redirects under it;
+  - if `set_cookie` is set, it sets that cookie (non-empty, not expired);
+  - if `set_cookie` is not set, it does not redirect to a place the
+    request itself named: the `Referer`, or any query or body value (a
+    `next` parameter, say). An origin that sends failed logins back there
+    must not reset the counters. Successful logins that follow `next` then
+    count as failures too, which is why `set_cookie` is recommended.
+
+  A relative `Location` is resolved against the route. Get this right: if
+  a failed login can look like a success (for example a site that answers
+  `200` both ways and sets the cookie on every answer), every failure
+  undoes itself and the price never grows. Pick a cookie the origin sets
+  only after a successful login.
 - **Username.** The proxy reads at most 16 KiB of an
   `application/x-www-form-urlencoded` or `application/json` body, only to
   find `username_field`. It never stores or logs the body. A request the
   origin could read as another username is refused with `400`: the field
-  given more than once (also as `User`, `user[]`, or `user.name` for
-  `user_name`, spellings some frameworks merge), the field in the query
-  string, a `Content-Encoding`, a charset other than UTF-8, or more than
-  one `Content-Type` header. The username is compared after trimming
-  spaces and lower-casing; an origin that also normalises Unicode (for
-  example full-width letters) can see two spellings as one account.
+  given more than once under any spelling some framework merges with it
+  (letter case under full Unicode case folding, so `User`, `uſer` with a
+  long s, or a Kelvin sign for `k`; PHP's `user[]`, or `user.name` for
+  `user_name`), the field in the query string, a `Content-Encoding`, a
+  charset other than UTF-8, or more than one `Content-Type` header. The
+  username *value* is compared after trimming spaces and lower-casing; an
+  origin that also normalises Unicode (for example full-width letters)
+  can see two spellings as one account.
 - **Multipart forms are refused.** A login sent as `multipart/form-data`
   (a form with `enctype="multipart/form-data"`), or with any other content
   type, gets `400` and never reaches the origin. This is deliberate, so
   parsing stays small. Make the login form use the default encoding (no
   `enctype`), or send JSON.
+- **Forwarding.** The origin gets exactly the body that was checked, with
+  its length set and no chunked encoding or trailers.
 - **Precedence.** Login routes are checked before `protect`. Neither
   `paused` nor bot policies apply to them.
 
@@ -408,14 +439,20 @@ input:
 ```
 
 1. When the username field loses focus, the script asks
-   `POST /.spikes402/login-challenge` for a challenge bound to that account.
-2. It solves the challenge in Web Workers (`/.spikes402/argon2id-worker.js`)
-   while the password is typed.
+   `POST /.spikes402/login-challenge` for a challenge bound to that account
+   and to where the form submits (the form's `action` and `method`, or the
+   clicked button's `formaction` and `formmethod`; no method means `GET`,
+   as in HTML, and a `GET` form is not a login route).
+2. It solves the challenge in Web Workers (`/.spikes402/argon2id-worker.js`
+   and `/.spikes402/pow-worker.js` for the pre-check) while the password is
+   typed.
 3. On submit it trades the solution at `POST /.spikes402/login-redeem` for a
    one-use cookie, valid for 60 s, and submits the form as usual. Password
    managers keep working.
 4. If the page has a Content-Security-Policy, it must allow `script-src`,
    `worker-src` and `connect-src` from `'self'`.
+5. `data-text-working` and `data-text-failed` (which may contain
+   `{error}`) replace the status messages, for example in another language.
 
 **API clients and bots**
 
@@ -423,25 +460,37 @@ A login request without a proof gets `402` with a JSON challenge and a
 `WWW-Authenticate: PoW ...` header. Solve two puzzles on the same
 challenge (for example with `pow.Params.Solve`): the Argon2id one
 (`algorithm`, `difficulty`, `memory_mib`) for `nonce`, and a sha256d
-pre-check (`precheck_algorithm`, `precheck_difficulty`, 18 bits) for
-`pre`. Then repeat the request with
-`Authorization: PoW <challenge>:<nonce>:<pre>`.
+pre-check (`precheck_algorithm`, `precheck_difficulty`) for `pre`. Then
+repeat the request with `Authorization: PoW <challenge>:<nonce>:<pre>`.
 
 **Cost to the server**
 
 Checking a proof costs the server one Argon2id hash, so it only does so
 after cheap checks pass: the signature and binding of the challenge, that
-it is unspent, and the sha256d pre-check, which costs the client about
-2^18 hashes (~0.15 s in a browser worker, more than the server's Argon2id
-check in native code) and the server one. Each challenge is checked with
-Argon2id at most once. Login challenges and checks are rate limited per
-client (`challenges_per_minute`, per IPv4 address or IPv6 /64) and per
-prefix (four times that, per IPv4 /24 or IPv6 /48). Login checks have
-their own Argon2id memory budget of 128 MiB (8 at a time), separate from
-`argon2_max_memory_mib`, so a flood of logins and the API puzzle cannot
-starve each other. The pre-check is plain sha256d: an attacker with GPUs
-or ASICs pays it almost nothing, and is then held back only by the rate
-limits and the budget.
+it is unspent, and the sha256d pre-check. The pre-check is 18 bits: about
+2^18 hashes for the client (~0.15 s in a browser worker, more than the
+server's Argon2id check in native code) and one for the server. Each
+challenge is checked with Argon2id at most once. Then:
+
+- **Rate limits** on login challenges and checks together: per client
+  (`challenges_per_minute`, per IPv4 address or IPv6 /64), per IPv4 /24
+  or IPv6 /48 (four times that) and per IPv4 /16 or IPv6 /40 (32 times
+  that). A browser login takes a challenge and a check, so with the
+  default 30 that is about 15 logins a minute per address, 60 per /24 and
+  480 per /16; past that, `429`. A busy office or carrier NAT behind one
+  /24 can hit 60.
+- **Memory**: login checks have their own Argon2id budget of 128 MiB (8 at
+  a time), separate from `argon2_max_memory_mib`, so a flood of logins and
+  the API puzzle cannot starve each other. One /24 or /48 gets at most 2
+  of the 8 at a time.
+- **Pushback**: for a minute after the budget was full, new challenges ask
+  for a 22-bit pre-check (16 times the work). A proof with a right
+  pre-check and a wrong Argon2id nonce counts as a failure of its network,
+  and wrong pre-checks count against the rate limits.
+
+The pre-check is plain sha256d: an attacker with GPUs or ASICs pays it
+almost nothing, and is then held back only by the rate limits, the
+per-network slots and the budget.
 
 **Fail-closed**
 
@@ -451,10 +500,10 @@ the origin. That covers:
 
 - a body that is too large;
 - an unknown content type, no username, or an ambiguous one (see above);
-- a method other than the route's (except `GET`, `HEAD`, `OPTIONS`);
+- a method other than the route's, or a near path (see above);
 - a wrong, reused, expired or underpriced proof;
 - a missing or wrong pre-check;
-- a full login Argon2id budget (the answer is `503`).
+- a full login Argon2id budget, or a network's share of it (`503`).
 
 **Escalation**
 
@@ -462,14 +511,14 @@ The level is counted in sha256d-equivalent bits. The puzzle is Argon2id at
 16 MiB with *level − 16* bits, and each level doubles the work.
 
 ```
-level = 23 + max(pair, min(account, 4), min(network, 6)) + surge, at most 33
+level = 23 + max(pair, account, min(network, 6)) + surge, at most 33
 ```
 
 - `pair` counts failures for this account from this network (a /24 for
-  IPv4, a /64 for IPv6).
+  IPv4, a /48 for IPv6).
 - `account` counts failures for this account from anywhere. It adds
-  nothing below 4 failures, then the full cap of 4 at once. The cap stops
-  an attacker from making a real user's login expensive.
+  nothing below 4 failures, then 4 at once (see below). The cap stops an
+  attacker from making a real user's login expensive.
 - `network` counts failures from this network on any account.
 - Failure counts map to extra levels as 0, 1, 2, 3, 4, 6, 8, 10 for
   0, 1, 2 … 7+ failures.
@@ -480,8 +529,10 @@ level = 23 + max(pair, min(account, 4), min(network, 6)) + surge, at most 33
   normal failure rate.
 - Every attempt counts as a failure until the origin answers success, so
   parallel attempts cannot share one level.
-- After a success, the account counters start again from zero. The network
-  counter only decays.
+- After a success, the pair counter starts again from zero. The account
+  and network counters lose only that attempt and otherwise decay, so a
+  real user's login does not show to others (through the account term)
+  and does not wipe a network's failures.
 - Counters halve every 30 minutes (pair and account) and every 15 minutes
   (network).
 
@@ -507,11 +558,14 @@ Anyone can ask for a challenge for any username, and the level is in the
 answer, so it reveals a little:
 
 - about the account, one bit: whether it had about 4 or more recent
-  failures from anywhere (the account term is 0 or +4, nothing between);
+  failures from anywhere (the account term is 0 or +4, nothing between).
+  A successful login does not clear that bit, so it does not show when
+  the real user logs in;
 - about the asker's own network: its recent failures, on that account and
   overall, which people sharing the network (an office, a carrier NAT)
   can see;
-- the site-wide surge.
+- the site-wide surge, and whether the login budget was recently full
+  (the pre-check difficulty).
 
 It never reveals whether an account exists.
 

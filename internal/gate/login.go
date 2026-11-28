@@ -15,9 +15,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode"
 
 	"github.com/Choffolo/spikes402/pow"
 )
@@ -53,8 +56,18 @@ const (
 	// a flood of login proofs never starves the API puzzle, or the reverse.
 	loginArgonMaxMiB = 128
 	// Per network prefix (/24 IPv4, /48 IPv6), challenges and checks
-	// together, on top of the per-client challenges_per_minute.
+	// together, on top of the per-client challenges_per_minute; and per
+	// wider prefix (/16 IPv4, /40 IPv6).
 	loginPrefixFactor = 4
+	loginWideFactor   = 32
+	// At most this many Argon2id checks at once for one /24 or /48, so
+	// one network cannot fill the login budget alone.
+	loginPrefixSlots = 2
+	// While the login budget has been full in the last minute, new
+	// challenges ask for this many more pre-check bits (16x the work).
+	loginPreBoost = 4
+	loginBusyFor  = 60      // seconds
+	loginNoIPKey  = "no-ip" // one shared bucket for clients without an IP
 
 	loginChallengeTTL = 120 * time.Second
 	loginPassTTL      = 60 * time.Second
@@ -85,6 +98,8 @@ type LoginRoute struct {
 type LoginSuccess struct {
 	Status            []int  `json:"status"`
 	LocationNotPrefix string `json:"location_not_prefix,omitempty"` // a redirect here is a failure, e.g. "/login"
+	LocationPrefix    string `json:"location_prefix,omitempty"`     // if set, only a redirect here is a success, e.g. "/account"
+	SetCookie         string `json:"set_cookie,omitempty"`          // if set, only an answer setting this cookie is a success
 }
 
 // CheckLoginRoutes validates routes and fills in defaults.
@@ -102,7 +117,7 @@ func CheckLoginRoutes(routes []LoginRoute) error {
 		default:
 			return fmt.Errorf("login_routes[%d].method must be POST, PUT or PATCH", i)
 		}
-		if !strings.HasPrefix(r.Path, "/") || strings.HasPrefix(r.Path, ReservedPrefix) ||
+		if !strings.HasPrefix(r.Path, "/") || r.Path == "/" || strings.HasPrefix(r.Path, ReservedPrefix) ||
 			strings.ContainsAny(r.Path, "*?[]\\") || checkPath(&url.URL{Path: r.Path}, nil) != "" {
 			return fmt.Errorf("login_routes[%d].path %q must be an exact canonical path outside %s", i, r.Path, ReservedPrefix)
 		}
@@ -120,58 +135,82 @@ func CheckLoginRoutes(routes []LoginRoute) error {
 		if p := r.Success.LocationNotPrefix; p != "" && !strings.HasPrefix(p, "/") {
 			return fmt.Errorf("login_routes[%d].success.location_not_prefix must start with /", i)
 		}
+		if p := r.Success.LocationPrefix; p != "" && !strings.HasPrefix(p, "/") {
+			return fmt.Errorf("login_routes[%d].success.location_prefix must start with /", i)
+		}
+		if c := r.Success.SetCookie; c != "" && (len(c) > 128 || strings.ContainsAny(c, " \t;,=\"()<>@:/?[]{}\\") || strings.ContainsFunc(c, func(r rune) bool { return r < 0x21 || r > 0x7e })) {
+			return fmt.Errorf("login_routes[%d].success.set_cookie must be a cookie name", i)
+		}
 	}
 	return nil
 }
 
 // loginRoute returns the route for a method and path, or nil. Paths are
-// compared in the canonical form used for protect (matchKey): a trailing
-// slash, ";params", trailing dots and spaces and, unless case-sensitive,
-// letter case do not matter, because some origins serve "/Login;x." as
-// "/login". The method is compared without case, because some frameworks
-// upper-case it ("post" is POST to them).
+// compared in the canonical form used for protect (matchKey), always
+// without letter case: a trailing slash, ";params", trailing dots and
+// spaces and case do not matter, because some origins serve "/Login;x."
+// as "/login". The method is compared without case, because some
+// frameworks upper-case it ("post" is POST to them).
 func (g *Gate) loginRoute(method, p string) *LoginRoute {
 	method = strings.ToUpper(method)
-	key := matchKey(p, g.opt.CaseSensitive)
+	key := matchKey(p, false)
 	for i := range g.opt.LoginRoutes {
 		r := &g.opt.LoginRoutes[i]
-		if r.Method == method && matchKey(r.Path, g.opt.CaseSensitive) == key {
+		if r.Method == method && matchKey(r.Path, false) == key {
 			return r
 		}
 	}
 	return nil
 }
 
-// isLoginPath reports whether p is the path of a login route, whatever
-// the method.
-func (g *Gate) isLoginPath(p string) bool {
-	key := matchKey(p, g.opt.CaseSensitive)
+// nearLoginRoutes returns the routes p is, or that an origin could serve
+// p as: with a format suffix ("/login.json", "/login.do") or below it
+// ("/login/x").
+func (g *Gate) nearLoginRoutes(p string) []*LoginRoute {
+	key := matchKey(p, false)
+	var near []*LoginRoute
 	for i := range g.opt.LoginRoutes {
-		if matchKey(g.opt.LoginRoutes[i].Path, g.opt.CaseSensitive) == key {
-			return true
+		rk := matchKey(g.opt.LoginRoutes[i].Path, false)
+		if key == rk || strings.HasPrefix(key, rk+".") || strings.HasPrefix(key, rk+"/") {
+			near = append(near, &g.opt.LoginRoutes[i])
 		}
 	}
-	return false
+	return near
 }
 
 // methodOverrideHeaders let some frameworks treat a request as another
 // method than the one it was sent with.
 var methodOverrideHeaders = []string{"X-HTTP-Method-Override", "X-HTTP-Method", "X-Method-Override"}
 
-// loginPathPassThrough reports whether a request to a login path that
-// matches no route may reach the origin unchecked: only GET, HEAD and
-// OPTIONS (showing the login page) without a method override. Any other
-// method could be a login the origin accepts under another method, so it
+// loginPathPassThrough reports whether a request on or near a login path
+// (see nearLoginRoutes) that is not itself a route may reach the origin
+// unchecked: only a GET, HEAD or OPTIONS that cannot carry a login, i.e.
+// no body, no method override, and no username field in the query (PHP's
+// $_REQUEST, Flask's request.values read logins from it). Anything else
 // is refused (fail-closed).
-func loginPathPassThrough(r *http.Request) bool {
+func loginPathPassThrough(r *http.Request, near []*LoginRoute) bool {
 	switch strings.ToUpper(r.Method) {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
 	default:
 		return false
 	}
+	if r.ContentLength != 0 || len(r.TransferEncoding) > 0 {
+		return false
+	}
 	for _, h := range methodOverrideHeaders {
 		if len(r.Header.Values(h)) > 0 {
 			return false
+		}
+	}
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return false
+	}
+	for k := range q {
+		for _, route := range near {
+			if loginFieldKey(k) == loginFieldKey(route.UsernameField) {
+				return false
+			}
 		}
 	}
 	return true
@@ -191,17 +230,24 @@ func (g *Gate) loginAccount(username string) string {
 	return g.loginID("account", strings.ToLower(strings.TrimSpace(username)))
 }
 
-// loginNetwork is the client's /24 (IPv4) or /64 (IPv6): wide enough to
-// survive a phone changing address, narrow enough to stay one network.
+// loginNetwork is the client's /24 (IPv4) or /48 (IPv6): wide enough to
+// survive a phone changing address, and to catch an attacker rotating
+// addresses inside one allocation.
 func (g *Gate) loginNetwork(r *http.Request) string {
+	return g.loginID("network", g.loginPrefix(r, 24, 48))
+}
+
+// loginPrefix is the client's IPv4 /v4 or IPv6 /v6 prefix, or one shared
+// bucket when the client has no IP address.
+func (g *Gate) loginPrefix(r *http.Request, v4, v6 int) string {
 	ip := g.clientIP(r)
 	switch {
 	case ip == nil:
-		return g.loginID("network", r.RemoteAddr)
+		return loginNoIPKey
 	case ip.To4() != nil:
-		return g.loginID("network", ip.To4().Mask(net.CIDRMask(24, 32)).String()+"/24")
+		return ip.To4().Mask(net.CIDRMask(v4, 32)).String() + "/" + strconv.Itoa(v4)
 	default:
-		return g.loginID("network", ip.Mask(net.CIDRMask(64, 128)).String()+"/64")
+		return ip.Mask(net.CIDRMask(v6, 128)).String() + "/" + strconv.Itoa(v6)
 	}
 }
 
@@ -229,20 +275,24 @@ func (g *Gate) newLoginChallenge(route *LoginRoute, acct, net string) (loginChal
 	now := g.now()
 	level := g.login.Level(acct, net, now)
 	p := g.loginParams(level)
+	pre := g.loginPre
+	if now.Unix() < g.loginBusyUntil.Load() {
+		pre += loginPreBoost
+	}
 	id := make([]byte, 16)
 	rand.Read(id) // never fails (crypto/rand)
 	exp := now.Add(loginChallengeTTL)
 	token, err := g.sign.sign(claims{
 		ID: hex.EncodeToString(id), Resource: loginResource(route), Expires: exp.Unix(),
 		PowBits: p.Difficulty, PowAlg: p.Algorithm, PowMem: p.MemoryMiB,
-		Kind: "login", Acct: acct, Net: net, Level: level,
+		Kind: "login", Acct: acct, Net: net, Level: level, Pre: pre,
 	})
 	if err != nil {
 		return loginChallenge{}, err
 	}
 	return loginChallenge{
 		Challenge: token, Algorithm: p.Algorithm, Difficulty: p.Difficulty, MemoryMiB: p.MemoryMiB,
-		PreAlgorithm: pow.SHA256d, PreDifficulty: g.loginPre,
+		PreAlgorithm: pow.SHA256d, PreDifficulty: pre,
 		Level: level, ExpiresAt: exp.UTC(), ExpectedSeconds: float64(int(p.ExpectedSeconds()*10)) / 10,
 		Usage: `find nonce so that Argon2id(password = challenge + ":" + nonce, salt = "spikes402-pow-v1", time = 1, memory = memory_mib MiB, threads = 1, 32 bytes) has "difficulty" leading zero bits, and pre so that SHA256(SHA256(challenge + ":" + pre)) has "precheck_difficulty" leading zero bits, then repeat the login with "Authorization: PoW <challenge>:<nonce>:<pre>"`,
 	}, nil
@@ -273,9 +323,10 @@ func (g *Gate) checkLoginClaims(value, kind, resHash, acct, net string) (claims,
 // checkLoginWork verifies "<token>:<nonce>:<pre>" for a login challenge
 // and spends the token, right or wrong: one Argon2id check per token,
 // ever. Before that check come the cheap ones: the signature, binding,
-// spent set and the sha256d pre-check, then the rate limits per client
-// and per prefix. The Argon2id check runs in the login memory budget;
-// when it is full the answer is 503, never a pass.
+// spent set and the sha256d pre-check, then the rate limits. The Argon2id
+// check needs one of its network's few slots and room in the login
+// memory budget; otherwise the answer is 503, never a pass. A right
+// pre-check with a wrong nonce counts as a failure of the network.
 func (g *Gate) checkLoginWork(r *http.Request, cred, resHash, acct, net string) (claims, error) {
 	token, rest, ok := strings.Cut(strings.TrimSpace(cred), ":")
 	nonceStr, preStr, ok2 := strings.Cut(rest, ":")
@@ -289,20 +340,26 @@ func (g *Gate) checkLoginWork(r *http.Request, cred, resHash, acct, net string) 
 	nonce, err := strconv.ParseUint(nonceStr, 10, 64)
 	pre, err2 := strconv.ParseUint(preStr, 10, 64)
 	p := c.powParams()
-	if err != nil || err2 != nil || p != g.loginParams(c.Level) || p.Validate() != nil {
+	if err != nil || err2 != nil || p != g.loginParams(c.Level) || p.Validate() != nil || c.Pre < g.loginPre {
 		return claims{}, errBadProof
 	}
 	now := g.now()
 	if g.spent.has(spentKey("PoW", c.ID)) {
 		return claims{}, errReplay
 	}
-	if !(pow.Params{Algorithm: pow.SHA256d, Difficulty: g.loginPre}).Check(token, pre) {
+	if !(pow.Params{Algorithm: pow.SHA256d, Difficulty: c.Pre}).Check(token, pre) {
 		return claims{}, errBadPre
 	}
 	if ok, wait := g.loginAllow(r, now); !ok {
 		return claims{}, &busyError{http.StatusTooManyRequests, wait, "too many requests"}
 	}
+	slot := g.loginPrefix(r, 24, 48)
+	if !g.loginSlots.acquire(slot) {
+		return claims{}, &busyError{http.StatusServiceUnavailable, time.Second, "busy checking proofs of work from your network, retry shortly"}
+	}
+	defer g.loginSlots.release(slot)
 	if !g.loginArgon.acquire(p.MemoryMiB, argonAcquireWait) {
+		g.loginBusyUntil.Store(now.Unix() + loginBusyFor)
 		return claims{}, &busyError{http.StatusServiceUnavailable, time.Second, "busy checking proofs of work, retry shortly"}
 	}
 	defer g.loginArgon.release(p.MemoryMiB)
@@ -310,32 +367,53 @@ func (g *Gate) checkLoginWork(r *http.Request, cred, resHash, acct, net string) 
 		return claims{}, err
 	}
 	if !p.Check(token, nonce) {
+		g.login.netFailed(net, now)
 		return claims{}, errBadProof
 	}
 	return c, nil
 }
 
-// loginPrefix is the client's /24 (IPv4) or /48 (IPv6): what one
-// operator easily holds many addresses of.
-func (g *Gate) loginPrefix(r *http.Request) string {
-	ip := g.clientIP(r)
-	switch {
-	case ip == nil:
-		return r.RemoteAddr
-	case ip.To4() != nil:
-		return ip.To4().Mask(net.CIDRMask(24, 32)).String() + "/24"
-	default:
-		return ip.Mask(net.CIDRMask(48, 128)).String() + "/48"
-	}
-}
-
 // loginAllow counts one login challenge or check against the client's
-// limit and its prefix's.
+// limit, its /24 or /48's and its /16 or /40's.
 func (g *Gate) loginAllow(r *http.Request, now time.Time) (bool, time.Duration) {
-	if ok, wait := g.loginLim.allow(g.client(r), now); !ok {
+	client := loginNoIPKey
+	if g.clientIP(r) != nil {
+		client = g.client(r)
+	}
+	if ok, wait := g.loginLim.allow(client, now); !ok {
 		return false, wait
 	}
-	return g.loginPrefixLim.allow(g.loginPrefix(r), now)
+	if ok, wait := g.loginPrefixLim.allow(g.loginPrefix(r, 24, 48), now); !ok {
+		return false, wait
+	}
+	return g.loginWideLim.allow(g.loginPrefix(r, 16, 40), now)
+}
+
+// prefixSlots counts Argon2id checks in progress per network.
+type prefixSlots struct {
+	mu  sync.Mutex
+	n   map[string]int
+	max int
+}
+
+func newPrefixSlots(max int) *prefixSlots { return &prefixSlots{n: map[string]int{}, max: max} }
+
+func (s *prefixSlots) acquire(k string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.n[k] >= s.max {
+		return false
+	}
+	s.n[k]++
+	return true
+}
+
+func (s *prefixSlots) release(k string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.n[k]--; s.n[k] <= 0 {
+		delete(s.n, k)
+	}
 }
 
 // serveLoginChallenge answers POST /.spikes402/login-challenge
@@ -418,6 +496,9 @@ func (g *Gate) serveLoginRedeem(w http.ResponseWriter, r *http.Request) {
 		err = errLoginLevel
 	}
 	if err != nil {
+		if errors.Is(err, errBadPre) {
+			g.loginAllow(r, g.now()) // cheap to send, but still counted
+		}
 		writeLoginError(w, err, http.StatusForbidden)
 		return
 	}
@@ -502,30 +583,109 @@ func (g *Gate) serveLogin(w http.ResponseWriter, r *http.Request, route *LoginRo
 		return
 	}
 
+	// The origin gets exactly the body that was checked.
+	r.ContentLength, r.TransferEncoding, r.Trailer = int64(len(body)), nil, nil
+	steer := loginSteerValues(r, body)
 	ow := &outcomeWriter{ResponseWriter: w}
 	g.opt.Next.ServeHTTP(ow, r)
-	if route.succeeded(ow.code(), ow.location) {
+	if route.succeeded(ow, steer, g.now()) {
 		g.login.succeeded(acct, net, g.now())
 	} else {
 		g.login.failed(g.now())
 	}
 }
 
-func (route *LoginRoute) succeeded(status int, location string) bool {
-	ok := false
-	for _, s := range route.Success.Status {
-		ok = ok || s == status
-	}
-	if !ok || route.Success.LocationNotPrefix == "" || location == "" {
-		return ok
-	}
-	u, err := url.Parse(location)
-	if err != nil {
+// succeeded reports whether the origin's answer is a success (see
+// LoginSuccess). An answer the origin never wrote is a failure. Without a
+// set_cookie criterion, a redirect to a place the request itself named
+// (the Referer, a "next" parameter, any query or body value) is a
+// failure: an origin that sends failed logins back there must not reset
+// the counters.
+func (route *LoginRoute) succeeded(o *outcomeWriter, steer []string, now time.Time) bool {
+	s := route.Success
+	if o.status == 0 || !slices.Contains(s.Status, o.status) {
 		return false
 	}
-	// A relative Location ("login?failed=1") is resolved against the route.
-	p := (&url.URL{Path: route.Path}).ResolveReference(u).Path
-	return !strings.HasPrefix(strings.ToLower(p), strings.ToLower(route.Success.LocationNotPrefix))
+	loc := ""
+	if o.location != "" {
+		k, ok := route.redirectKey(o.location)
+		if !ok {
+			return false
+		}
+		loc = k
+	}
+	if s.LocationNotPrefix != "" && loc != "" && strings.HasPrefix(loc, matchKey(s.LocationNotPrefix, false)) {
+		return false
+	}
+	if s.LocationPrefix != "" && (loc == "" || !strings.HasPrefix(loc, matchKey(s.LocationPrefix, false))) {
+		return false
+	}
+	if s.SetCookie != "" {
+		for _, c := range (&http.Response{Header: http.Header{"Set-Cookie": o.cookies}}).Cookies() {
+			if c.Name == s.SetCookie && c.Value != "" && c.MaxAge >= 0 && (c.Expires.IsZero() || c.Expires.After(now)) {
+				return true
+			}
+		}
+		return false
+	}
+	if loc != "" {
+		for _, v := range steer {
+			if k, ok := route.redirectKey(v); ok && k == loc {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// redirectKey is the canonical path (matchKey, no case) a Location or a
+// client value points at, resolved against the route.
+func (route *LoginRoute) redirectKey(v string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(v))
+	if err != nil {
+		return "", false
+	}
+	return matchKey((&url.URL{Path: route.Path}).ResolveReference(u).Path, false), true
+}
+
+// loginSteerValues are the values a client chose in a login request that
+// an origin may redirect to: the Referer and every query and body string
+// value (nested JSON included).
+func loginSteerValues(r *http.Request, body []byte) []string {
+	v := append([]string(nil), r.Header.Values("Referer")...)
+	q, _ := url.ParseQuery(r.URL.RawQuery)
+	for _, vs := range q {
+		v = append(v, vs...)
+	}
+	mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	switch mt {
+	case "application/x-www-form-urlencoded":
+		f, _ := url.ParseQuery(string(body))
+		for _, vs := range f {
+			v = append(v, vs...)
+		}
+	case "application/json":
+		var doc any
+		if json.Unmarshal(body, &doc) == nil {
+			var walk func(any)
+			walk = func(x any) {
+				switch x := x.(type) {
+				case string:
+					v = append(v, x)
+				case []any:
+					for _, e := range x {
+						walk(e)
+					}
+				case map[string]any:
+					for _, e := range x {
+						walk(e)
+					}
+				}
+			}
+			walk(doc)
+		}
+	}
+	return v
 }
 
 // loginUsername reads the username from an urlencoded or JSON body. It
@@ -592,14 +752,27 @@ func loginUsername(r *http.Request, body []byte, field string) (string, error) {
 }
 
 // loginFieldKey is the form of a field name under which origins may merge
-// two spellings: letter case (JSON decoders matching struct fields), PHP's
-// renaming of " ", "." and "[" to "_", and PHP arrays ("user[]").
+// two spellings: Unicode case folding (JSON decoders matching struct
+// fields fold "ſ" to "s" and the Kelvin sign to "k"), PHP's renaming of
+// " ", "." and "[" to "_", and PHP arrays ("user[]").
 func loginFieldKey(k string) string {
 	k = strings.TrimLeft(k, " ")
 	if i := strings.IndexByte(k, '['); i >= 0 && strings.IndexByte(k[i:], ']') > 0 {
 		k = k[:i]
 	}
-	return strings.ToLower(strings.NewReplacer(" ", "_", ".", "_", "[", "_").Replace(k))
+	k = strings.NewReplacer(" ", "_", ".", "_", "[", "_").Replace(k)
+	return strings.Map(foldRune, k)
+}
+
+// foldRune maps r to the smallest rune of its Unicode case-folding orbit,
+// so every spelling a case-insensitive decoder treats as one letter ("s",
+// "S", "ſ"; "k", "K", "K") gives the same rune.
+func foldRune(r rune) rune {
+	m := r
+	for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+		m = min(m, f)
+	}
+	return m
 }
 
 // loginJSONUsername reads the top-level object of body and returns the
@@ -640,16 +813,19 @@ func loginJSONUsername(body []byte, field string) (string, int, error) {
 	return u, n, nil
 }
 
-// outcomeWriter remembers the status and Location the origin answered.
+// outcomeWriter remembers the status, Location and Set-Cookie headers
+// the origin answered (status 0: it wrote nothing).
 type outcomeWriter struct {
 	http.ResponseWriter
 	status   int
 	location string
+	cookies  []string
 }
 
 func (o *outcomeWriter) WriteHeader(code int) {
 	if o.status == 0 && code >= 200 {
 		o.status, o.location = code, o.Header().Get("Location")
+		o.cookies = append([]string(nil), o.Header().Values("Set-Cookie")...)
 	}
 	o.ResponseWriter.WriteHeader(code)
 }
@@ -662,13 +838,6 @@ func (o *outcomeWriter) Write(p []byte) (int, error) {
 }
 
 func (o *outcomeWriter) Unwrap() http.ResponseWriter { return o.ResponseWriter }
-
-func (o *outcomeWriter) code() int {
-	if o.status == 0 {
-		return http.StatusOK
-	}
-	return o.status
-}
 
 var (
 	//go:embed assets/login.js

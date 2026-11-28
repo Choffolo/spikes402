@@ -27,6 +27,7 @@ type claims struct {
 	Acct        string `json:"acct,omitempty"` // login: keyed hash of the account
 	Net         string `json:"net,omitempty"`  // login: keyed hash of the client network
 	Level       int    `json:"lvl,omitempty"`  // login: level the work was priced at
+	Pre         int    `json:"pre,omitempty"`  // login: sha256d pre-check bits
 }
 
 func (c claims) powParams() pow.Params {

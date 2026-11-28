@@ -8,9 +8,9 @@ import (
 	"errors"
 	"log"
 	"math"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
-	"slices"
 	"sync"
 	"time"
 
@@ -142,17 +142,28 @@ func (s *LoginState) admit(acct, net string, lvl int, now time.Time) (need int, 
 }
 
 // succeeded undoes the provisional failure of an admitted attempt that
-// logged in: the account counters start again from zero; the network
-// counter only decays, so logging into one's own account does not wipe
-// the failures of a network.
+// logged in: the pair counter (this account from this network) starts
+// again from zero; the account and network counters only lose that one
+// attempt and decay, so a login wipes neither the failures of a network
+// nor, visibly to others, those of the account.
 func (s *LoginState) succeeded(acct, net string, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	unix := now.Unix()
 	delete(s.m, loginKey(counterPair, acct, net))
-	delete(s.m, loginKey(counterAcct, acct))
+	s.addLocked(counterAcct, loginKey(counterAcct, acct), -1, unix)
 	s.addLocked(counterNet, loginKey(counterNet, net), -1, unix)
 	s.dirty = true
+}
+
+// netFailed counts one failure for a network that sent a proof with a
+// right pre-check but a wrong Argon2id nonce.
+func (s *LoginState) netFailed(net string, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unix := now.Unix()
+	s.sweepLocked(unix)
+	s.addLocked(counterNet, loginKey(counterNet, net), 1, unix)
 }
 
 // failed records an admitted attempt that did not log in (the counters
@@ -205,9 +216,8 @@ func (s *LoginState) evictLocked(now int64) {
 	for k, c := range s.m {
 		vals = append(vals, c.at(k[0], now))
 	}
-	slices.Sort(vals)
 	n := max(len(vals)/10, 1)
-	limit, removed := vals[n-1], 0
+	limit, removed := nthSmallest(vals, n-1), 0
 	for k, c := range s.m {
 		if removed >= n {
 			break
@@ -218,6 +228,38 @@ func (s *LoginState) evictLocked(now int64) {
 		}
 	}
 	s.dirty = true
+}
+
+// nthSmallest returns the k-th smallest value of a (0-based), reordering
+// a: quickselect with random pivots, O(len(a)) on average.
+func nthSmallest(a []float64, k int) float64 {
+	lo, hi := 0, len(a)-1
+	for lo < hi {
+		p := a[lo+rand.IntN(hi-lo+1)]
+		i, j := lo, hi
+		for i <= j {
+			for a[i] < p {
+				i++
+			}
+			for a[j] > p {
+				j--
+			}
+			if i <= j {
+				a[i], a[j] = a[j], a[i]
+				i++
+				j--
+			}
+		}
+		switch {
+		case k <= j:
+			hi = j
+		case k >= i:
+			lo = i
+		default:
+			return a[k]
+		}
+	}
+	return a[k]
 }
 
 func (s *LoginState) rollLocked(now int64) {
@@ -257,19 +299,28 @@ type loginSnapshot struct {
 	E [][]interface{} `json:"e"` // [key hex, failures, unix seconds]
 }
 
-// Save writes a sealed snapshot to dir if anything changed.
+// Save writes a sealed snapshot to dir if anything changed. The counters
+// are copied under the lock; formatting and writing happen outside it.
 func (s *LoginState) Save(dir string, key []byte) error {
+	type entry struct {
+		k counterKey
+		c counter
+	}
 	s.mu.Lock()
 	if !s.dirty {
 		s.mu.Unlock()
 		return nil
 	}
-	snap := loginSnapshot{V: 1, E: make([][]interface{}, 0, len(s.m))}
+	entries := make([]entry, 0, len(s.m))
 	for k, c := range s.m {
-		snap.E = append(snap.E, []interface{}{hex.EncodeToString(k[:]), c.f, c.t})
+		entries = append(entries, entry{k, c})
 	}
 	s.dirty = false
 	s.mu.Unlock()
+	snap := loginSnapshot{V: 1, E: make([][]interface{}, 0, len(entries))}
+	for _, e := range entries {
+		snap.E = append(snap.E, []interface{}{hex.EncodeToString(e.k[:]), e.c.f, e.c.t})
+	}
 	data, err := json.Marshal(snap)
 	if err == nil {
 		err = persist.WriteFile(dir, loginStateFile, []byte(persist.Seal(key, data)+"\n"))

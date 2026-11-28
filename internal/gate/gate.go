@@ -136,7 +136,10 @@ type Gate struct {
 	loginPre       int                        // sha256d pre-check bits (smaller in tests)
 	loginLim       *rateLimiter               // login challenges and checks, per client
 	loginPrefixLim *rateLimiter               // the same, per /24 or /48
+	loginWideLim   *rateLimiter               // the same, per /16 or /40
+	loginSlots     *prefixSlots               // Argon2id checks in progress per /24 or /48
 	loginArgon     *argonBudget               // Argon2id memory for login checks only
+	loginBusyUntil atomic.Int64               // unix seconds: until then, new challenges get a harder pre-check
 
 	nodeLog  rateLog // why no invoice was offered
 	classLog rateLog // bot classifications
@@ -185,6 +188,8 @@ func New(opt Options) *Gate {
 		}
 		g.loginLim = newRateLimiter(opt.ChallengesPerMinute)
 		g.loginPrefixLim = newRateLimiter(loginPrefixFactor * opt.ChallengesPerMinute)
+		g.loginWideLim = newRateLimiter(loginWideFactor * opt.ChallengesPerMinute)
+		g.loginSlots = newPrefixSlots(loginPrefixSlots)
 		g.loginArgon = newArgonBudget(loginArgonMaxMiB)
 		g.loginParams = loginPoW
 		g.loginPre = LoginPreBits
@@ -213,17 +218,19 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	set := g.live.Load()         // one consistent snapshot for this request
 	// Refuse paths like "/free/../paid" or "/free%2f..%2fpaid": the origin
 	// could normalise them into a protected path we did not recognise.
-	if why := checkPath(r.URL, func(p string) bool { return g.protected(p, set) || g.isLoginPath(p) }); why != "" {
+	if why := checkPath(r.URL, func(p string) bool { return g.protected(p, set) || len(g.nearLoginRoutes(p)) > 0 }); why != "" {
 		http.Error(w, "bad path: "+why, http.StatusBadRequest)
 		return
 	}
-	if route := g.loginRoute(r.Method, r.URL.Path); route != nil {
-		g.serveLogin(w, r, route, passes)
-		return
-	}
-	if g.isLoginPath(r.URL.Path) && !loginPathPassThrough(r) {
-		http.Error(noStore(w), "method not allowed on a login route", http.StatusMethodNotAllowed)
-		return
+	if near := g.nearLoginRoutes(r.URL.Path); len(near) > 0 {
+		if route := g.loginRoute(r.Method, r.URL.Path); route != nil {
+			g.serveLogin(w, r, route, passes)
+			return
+		}
+		if !loginPathPassThrough(r, near) {
+			http.Error(noStore(w), "not allowed on a login route", http.StatusMethodNotAllowed)
+			return
+		}
 	}
 	if !g.protected(r.URL.Path, set) {
 		g.opt.Next.ServeHTTP(w, r)

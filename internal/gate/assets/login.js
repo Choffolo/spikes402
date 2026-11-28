@@ -3,6 +3,9 @@
 //
 //   <script src="/.spikes402/login.js" data-field="username" defer></script>
 //
+// Optional: data-text-working and data-text-failed replace the status
+// messages (data-text-failed may contain {error}).
+//
 // When the username field loses focus, the script asks the proxy for a
 // challenge bound to that account and solves it (Argon2id, in Web Workers)
 // while the password is typed. On submit it trades the solution for a
@@ -12,6 +15,18 @@
   "use strict";
   var me = document.currentScript;
   var field = (me && me.getAttribute("data-field")) || "username";
+  var textWorking = (me && me.getAttribute("data-text-working")) || "Checking this login with a short proof-of-work…";
+  var textFailed = (me && me.getAttribute("data-text-failed")) || "The login check did not work ({error}). Please try again.";
+
+  // routeOf is where a submission goes, as HTML decides it: the
+  // submitter's formaction / formmethod first, then the form's action and
+  // method; no method means GET.
+  function routeOf(form, submitter) {
+    var s = submitter && submitter.form === form ? submitter : null;
+    var action = (s && s.getAttribute("formaction")) || form.getAttribute("action") || location.href;
+    var method = (s && s.getAttribute("formmethod")) || form.getAttribute("method") || "GET";
+    return { method: method.toUpperCase(), path: new URL(action, location.href).pathname };
+  }
   var WORKER = "__WORKER__", POW_WORKER = "__POW_WORKER__";
 
   // run starts one worker and resolves with the first nonce it finds.
@@ -55,12 +70,13 @@
     status.setAttribute("aria-live", "polite");
     form.appendChild(status);
 
-    function start() {
+    function start(submitter) {
       var user = input.value;
       if (!user) return null;
-      if (job && job.user === user && Date.now() < job.until) return job.proof;
-      var u = new URL(form.getAttribute("action") || location.href, location.href);
-      var body = JSON.stringify({ method: (form.getAttribute("method") || "POST").toUpperCase(), path: u.pathname, username: user });
+      var route = routeOf(form, submitter);
+      var key = route.method + " " + route.path + " " + user;
+      if (job && job.key === key && Date.now() < job.until) return job.proof;
+      var body = JSON.stringify({ method: route.method, path: route.path, username: user });
       var proof = fetch("/.spikes402/login-challenge", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: body, credentials: "same-origin", cache: "no-store"
       }).then(function (r) {
@@ -70,22 +86,22 @@
         j.until = Date.parse(ch.expires_at) - 10000;
         return solve(ch);
       });
-      var j = job = { user: user, until: Date.now() + 110000, proof: proof };
+      var j = job = { key: key, until: Date.now() + 110000, proof: proof };
       proof.catch(function () { if (job === j) job = null; });
       return proof;
     }
 
-    input.addEventListener("change", start);
-    input.addEventListener("blur", start);
+    input.addEventListener("change", function () { start(); });
+    input.addEventListener("blur", function () { start(); });
     form.addEventListener("submit", function (e) {
       if (ready) { ready = false; return; } // our own resubmission: let it go
       e.preventDefault();
       var submitter = e.submitter;
       if (busy) return;
-      var proof = start();
+      var proof = start(submitter);
       if (!proof) return;
       busy = true;
-      status.textContent = "Checking this login with a short proof-of-work…";
+      status.textContent = textWorking;
       proof.then(function (p) {
         return fetch("/.spikes402/login-redeem", {
           method: "POST", headers: { Authorization: "PoW " + p }, credentials: "same-origin", cache: "no-store"
@@ -94,12 +110,13 @@
         job = null; // one proof per attempt
         if (r.status !== 204) throw new Error("proof refused (" + r.status + ")");
         status.textContent = "";
-        ready = true;
-        if (form.requestSubmit) form.requestSubmit(submitter && submitter.form === form ? submitter : undefined);
-        else HTMLFormElement.prototype.submit.call(form);
+        if (form.requestSubmit) {
+          ready = true; // requestSubmit fires "submit" synchronously, unless validation fails
+          try { form.requestSubmit(submitter && submitter.form === form ? submitter : undefined); } finally { ready = false; }
+        } else HTMLFormElement.prototype.submit.call(form);
       }).catch(function (err) {
         job = null;
-        status.textContent = "The login check did not work (" + err.message + "). Please try again.";
+        status.textContent = textFailed.replace("{error}", err.message);
       }).then(function () { busy = false; });
     });
   }

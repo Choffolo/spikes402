@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,6 +27,9 @@ type loginFixture struct {
 	now     time.Time
 	calls   int
 	succeed func(user string) bool // what the origin decides
+	respond http.HandlerFunc       // if set, answers instead of the default origin
+	lastCL  int64                  // ContentLength and TransferEncoding the origin saw
+	lastTE  []string
 }
 
 func newLoginFixture(t *testing.T) *loginFixture {
@@ -41,6 +45,11 @@ func newLoginFixtureWith(t *testing.T, surge [2]int) *loginFixture {
 			t.Error("login proof leaked to the origin")
 		}
 		f.calls++
+		f.lastCL, f.lastTE = r.ContentLength, r.TransferEncoding
+		if f.respond != nil {
+			f.respond(w, r)
+			return
+		}
 		r.ParseForm()
 		if f.succeed(r.PostForm.Get("user")) {
 			http.Redirect(w, r, "/home", http.StatusFound)
@@ -182,13 +191,19 @@ func TestLoginEscalatesAndResets(t *testing.T) {
 	if got := f.attempt(t, "alice", "192.0.2.1"); got != 29 {
 		t.Fatalf("after decay: level %d, want 29", got)
 	}
-	// A success resets the account, but not the network's own counter.
+	// A success resets the pair, but neither the account counter (so the
+	// one-bit account term does not show when the real user logs in) nor
+	// the network's own counter: both only decay.
 	f.succeed = func(string) bool { return true }
 	f.attempt(t, "alice", "192.0.2.1")
 	f.succeed = func(string) bool { return false }
-	if got := f.gate.login.Level(f.gate.loginAccount("alice"), f.gate.loginNetwork(loginReq("", "192.0.2.1", "")), f.now); got != 26 {
+	net := f.gate.loginNetwork(loginReq("", "192.0.2.1", ""))
+	if got := f.gate.login.Level(f.gate.loginAccount("alice"), net, f.now); got != LoginBaseLevel+loginAcctCap {
+		t.Fatalf("after success: level %d, want the account term %d", got, LoginBaseLevel+loginAcctCap)
+	}
+	if got := f.gate.login.Level(f.gate.loginAccount("someone-else"), net, f.now); got != 26 {
 		// The network still weighs 3 failures (9 halved twice, plus one): +3.
-		t.Fatalf("after success: level %d, want 26", got)
+		t.Fatalf("after success, other account: level %d, want 26", got)
 	}
 }
 
@@ -383,8 +398,6 @@ func TestLoginPreCheckAndPrefixLimit(t *testing.T) {
 		}
 	}
 	f.gate.loginArgon.release(f.gate.loginArgon.max)
-	f.gate.loginPre = 4
-	ch.PreDifficulty = 4
 	if rec := f.do(loginReq("alice", "192.0.2.1", solveLogin(t, ch))); rec.Code != http.StatusFound {
 		t.Fatalf("right proof after wrong pre-checks: got %d", rec.Code)
 	}
@@ -593,8 +606,301 @@ func TestLoginUsernameAmbiguityRefused(t *testing.T) {
 func TestLoginRelativeFailureRedirect(t *testing.T) {
 	route := LoginRoute{Path: "/login", Success: LoginSuccess{Status: []int{302}, LocationNotPrefix: "/login"}}
 	for loc, want := range map[string]bool{"/home": true, "login?failed=1": false, "./login": false, "/login?e=1": false, "https://x.example/login": false, "": true} {
-		if got := route.succeeded(302, loc); got != want {
+		if got := route.succeeded(&outcomeWriter{status: 302, location: loc}, nil, time.Now()); got != want {
 			t.Errorf("%q: got %v, want %v", loc, got, want)
 		}
+	}
+}
+
+// B1: field names a Unicode case-insensitive decoder folds onto the
+// username field ("ſ" for "s", the Kelvin sign for "k") are refused.
+func TestLoginUnicodeFieldFolding(t *testing.T) {
+	if loginFieldKey("uſer") != loginFieldKey("user") || loginFieldKey("\u212Aey") != loginFieldKey("key") || loginFieldKey("USER") != loginFieldKey("user") {
+		t.Fatal("folding")
+	}
+	f := newLoginFixture(t)
+	for _, c := range []struct{ ct, body string }{
+		{"application/json", `{"user":"attacker","uſer":"victim"}`},
+		{"application/json", `{"user":"attacker","u\u017fer":"victim"}`},
+		{"application/x-www-form-urlencoded", "user=attacker&u%C5%BFer=victim&pass=x"},
+	} {
+		r := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(c.body))
+		r.Header.Set("Content-Type", c.ct)
+		if rec := f.do(r); rec.Code != http.StatusBadRequest || f.calls != 0 {
+			t.Fatalf("%s: got %d, want 400", c.body, rec.Code)
+		}
+	}
+	r := httptest.NewRequest(http.MethodGet, "/login?u%C5%BFer=victim", nil)
+	if rec := f.do(r); rec.Code != http.StatusMethodNotAllowed || f.calls != 0 {
+		t.Fatalf("GET with a folded username in the query: got %d", rec.Code)
+	}
+}
+
+// B2, B3 and case: nothing that could be a login reaches the origin
+// without a proof.
+func TestLoginNearPathsAndSafeMethods(t *testing.T) {
+	f := newLoginFixture(t)
+	f.gate.opt.CaseSensitive = true // login routes ignore it
+	refused := func(name string, r *http.Request, want int) {
+		t.Helper()
+		if rec := f.do(r); rec.Code != want || f.calls != 0 {
+			t.Fatalf("%s: got %d, want %d (origin calls %d)", name, rec.Code, want, f.calls)
+		}
+	}
+	for _, p := range []string{"/login.json", "/login.do", "/login/x", "/Login.JSON", "/login/x/y"} {
+		r := loginReq("alice", "192.0.2.1", "")
+		r.URL.Path = p
+		refused("POST "+p, r, http.StatusMethodNotAllowed)
+	}
+	r := loginReq("alice", "192.0.2.1", "")
+	r.URL.Path = "/LOGIN"
+	refused("POST /LOGIN with case_sensitive", r, http.StatusPaymentRequired)
+	body := httptest.NewRequest(http.MethodGet, "/login", strings.NewReader("user=alice&pass=x"))
+	chunked := httptest.NewRequest(http.MethodGet, "/login", strings.NewReader("user=alice"))
+	chunked.ContentLength, chunked.TransferEncoding = -1, []string{"chunked"}
+	headBody := httptest.NewRequest(http.MethodHead, "/login/x", strings.NewReader("user=alice"))
+	for name, r := range map[string]*http.Request{
+		"GET with a body":           body,
+		"GET chunked":               chunked,
+		"HEAD with a body":          headBody,
+		"GET with user in query":    httptest.NewRequest(http.MethodGet, "/login?user=alice&pass=x", nil),
+		"GET with User in query":    httptest.NewRequest(http.MethodGet, "/login.json?User=alice", nil),
+		"OPTIONS with user[] query": httptest.NewRequest(http.MethodOptions, "/login?user[]=alice", nil),
+		"GET with a bad query":      httptest.NewRequest(http.MethodGet, "/login?%zz", nil),
+	} {
+		refused(name, r, http.StatusMethodNotAllowed)
+	}
+	for _, target := range []string{"/login", "/login?next=/home", "/login/x", "/login.css", "/loginx"} {
+		before := f.calls
+		if f.do(httptest.NewRequest(http.MethodGet, target, nil)); f.calls != before+1 {
+			t.Fatalf("GET %s should reach the origin", target)
+		}
+	}
+	if f.do(httptest.NewRequest(http.MethodPost, "/loginx", strings.NewReader("a=b"))); f.calls == 0 {
+		t.Fatal("POST /loginx is not near /login")
+	}
+	if err := CheckLoginRoutes([]LoginRoute{{Path: "/", UsernameField: "u", Success: LoginSuccess{Status: []int{302}}}}); err == nil {
+		t.Fatal(`accepted "/" as a login path`)
+	}
+}
+
+// SF2: rotating /64s inside one /48 is one network.
+func TestLoginIPv6NetworkIs48(t *testing.T) {
+	f := newLoginFixture(t)
+	r1, r2 := loginReq("alice", "", ""), loginReq("alice", "", "")
+	r1.RemoteAddr, r2.RemoteAddr = "[2001:db8:7:1::1]:1", "[2001:db8:7:2::1]:1"
+	if f.gate.loginNetwork(r1) != f.gate.loginNetwork(r2) {
+		t.Fatal("two /64s of one /48 are two networks")
+	}
+	ch := decodeChallenge(t, f.do(r1))
+	r := loginReq("alice", "", solveLogin(t, ch))
+	r.RemoteAddr = "[2001:db8:7:3::9]:1"
+	if rec := f.do(r); rec.Code != http.StatusFound {
+		t.Fatalf("proof from another /64 of the /48: got %d", rec.Code)
+	}
+	r = loginReq("alice", "", "")
+	r.RemoteAddr = "[2001:db8:7:4::1]:1"
+	if ch := decodeChallenge(t, f.do(r)); ch.Level != LoginBaseLevel+1 {
+		t.Fatalf("failure not counted for the /48: level %d", ch.Level)
+	}
+}
+
+// SF3: per-network Argon2id slots, the wide limiter, a harder pre-check
+// while the budget is full, pre-checked junk counted, bad pre-checks on
+// the redeem path counted.
+func TestLoginBudgetSaturation(t *testing.T) {
+	f := newLoginFixture(t)
+	ch := decodeChallenge(t, f.do(loginReq("alice", "192.0.2.1", "")))
+	f.gate.loginSlots.acquire("192.0.2.0/24")
+	f.gate.loginSlots.acquire("192.0.2.0/24")
+	if rec := f.do(loginReq("alice", "192.0.2.1", solveLogin(t, ch))); rec.Code != http.StatusServiceUnavailable || f.calls != 0 {
+		t.Fatalf("network out of slots: got %d", rec.Code)
+	}
+	ch2 := decodeChallenge(t, f.do(loginReq("bob", "198.51.100.1", "")))
+	if rec := f.do(loginReq("bob", "198.51.100.1", solveLogin(t, ch2))); rec.Code != http.StatusFound {
+		t.Fatalf("another network: got %d", rec.Code)
+	}
+	f.gate.loginSlots.release("192.0.2.0/24")
+	f.gate.loginSlots.release("192.0.2.0/24")
+	if len(f.gate.loginSlots.n) != 0 {
+		t.Fatal("slots leak")
+	}
+
+	// A full budget makes new challenges ask for a harder pre-check.
+	ch = decodeChallenge(t, f.do(loginReq("carol", "203.0.113.1", "")))
+	f.gate.loginArgon.acquire(f.gate.loginArgon.max, 0)
+	f.do(loginReq("carol", "203.0.113.1", solveLogin(t, ch)))
+	f.gate.loginArgon.release(f.gate.loginArgon.max)
+	hard := decodeChallenge(t, f.do(loginReq("carol", "203.0.113.1", "")))
+	if hard.PreDifficulty != f.gate.loginPre+loginPreBoost {
+		t.Fatalf("pre-check while busy: %d bits", hard.PreDifficulty)
+	}
+	// A pre-check solved at the old difficulty only is refused.
+	argon, _ := pow.Params{Algorithm: hard.Algorithm, Difficulty: hard.Difficulty, MemoryMiB: hard.MemoryMiB}.Solve(context.Background(), hard.Challenge)
+	easyPre := uint64(0)
+	for !(pow.Params{Algorithm: pow.SHA256d, Difficulty: f.gate.loginPre}).Check(hard.Challenge, easyPre) ||
+		(pow.Params{Algorithm: pow.SHA256d, Difficulty: hard.PreDifficulty}).Check(hard.Challenge, easyPre) {
+		easyPre++
+	}
+	cred := "PoW " + hard.Challenge + ":" + strconv.FormatUint(argon, 10) + ":" + strconv.FormatUint(easyPre, 10)
+	if rec := f.do(loginReq("carol", "203.0.113.1", cred)); rec.Code != http.StatusPaymentRequired || !strings.Contains(rec.Body.String(), "pre-check") {
+		t.Fatalf("easy pre-check on a hard challenge: %d %s", rec.Code, rec.Body)
+	}
+	f.now = f.now.Add(loginBusyFor * time.Second)
+	if ch := decodeChallenge(t, f.do(loginReq("carol", "203.0.113.1", ""))); ch.PreDifficulty != f.gate.loginPre {
+		t.Fatalf("pre-check after the busy minute: %d bits", ch.PreDifficulty)
+	}
+
+	// A right pre-check with a wrong nonce counts against the network.
+	g := newLoginFixture(t)
+	g.gate.loginParams = func(level int) pow.Params {
+		return pow.Params{Algorithm: pow.Argon2id, Difficulty: 12, MemoryMiB: 8}
+	}
+	ch = decodeChallenge(t, g.do(loginReq("dave", "192.0.2.1", "")))
+	pre, _ := pow.Params{Algorithm: pow.SHA256d, Difficulty: ch.PreDifficulty}.Solve(context.Background(), ch.Challenge)
+	nonce := uint64(0)
+	for (pow.Params{Algorithm: pow.Argon2id, Difficulty: 12, MemoryMiB: 8}).Check(ch.Challenge, nonce) {
+		nonce++
+	}
+	g.do(loginReq("dave", "192.0.2.1", "PoW "+ch.Challenge+":"+strconv.FormatUint(nonce, 10)+":"+strconv.FormatUint(pre, 10)))
+	net := g.gate.loginNetwork(loginReq("", "192.0.2.1", ""))
+	if got := g.gate.login.Level(g.gate.loginAccount("erin"), net, g.now); got != LoginBaseLevel+1 {
+		t.Fatalf("junk with a right pre-check: network level %d", got)
+	}
+
+	// Bad pre-checks on the redeem path use up the client's allowance.
+	h := newLoginFixture(t)
+	h.gate.loginPre = 20
+	h.gate.loginLim = newRateLimiter(3)
+	r := httptest.NewRequest(http.MethodPost, LoginChallengePath, strings.NewReader(`{"path":"/login","username":"a"}`))
+	r.RemoteAddr = "192.0.2.9:1"
+	ch = decodeChallenge(t, h.do(r))
+	for range 2 {
+		r := httptest.NewRequest(http.MethodPost, LoginRedeemPath, nil)
+		r.RemoteAddr = "192.0.2.9:1"
+		r.Header.Set("Authorization", "PoW "+ch.Challenge+":1:1")
+		h.do(r)
+	}
+	r = httptest.NewRequest(http.MethodPost, LoginChallengePath, strings.NewReader(`{"path":"/login","username":"a"}`))
+	r.RemoteAddr = "192.0.2.9:1"
+	if rec := h.do(r); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("after bad pre-checks on redeem: got %d, want 429", rec.Code)
+	}
+
+	// One /16 shares the wide allowance across its /24s.
+	w := newLoginFixture(t)
+	w.gate.loginLim, w.gate.loginPrefixLim, w.gate.loginWideLim = newRateLimiter(100), newRateLimiter(100), newRateLimiter(3)
+	codes := map[int]int{}
+	for i := range 5 {
+		codes[w.do(loginReq("alice", "10.20."+strconv.Itoa(i)+".1", "")).Code]++
+	}
+	if codes[http.StatusPaymentRequired] != 3 || codes[http.StatusTooManyRequests] != 2 {
+		t.Fatalf("one /16: %v", codes)
+	}
+}
+
+// SF5: success needs the positive criteria when set; an unwritten answer
+// and a redirect the client steered are failures.
+func TestLoginSuccessCriteria(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	route := LoginRoute{Path: "/login", Success: LoginSuccess{Status: []int{302, 200}, LocationNotPrefix: "/login"}}
+	ok := func(r LoginRoute, o *outcomeWriter, steer ...string) bool { return r.succeeded(o, steer, now) }
+	if ok(route, &outcomeWriter{}) {
+		t.Fatal("unwritten answer counted as success")
+	}
+	if !ok(route, &outcomeWriter{status: 302, location: "/home"}) {
+		t.Fatal("plain success")
+	}
+	for _, steer := range []string{"https://site.example/home", "/home", "home", "/Home/"} {
+		if ok(route, &outcomeWriter{status: 302, location: "/home"}, steer) {
+			t.Fatalf("redirect steered by %q counted as success", steer)
+		}
+	}
+	pre := route
+	pre.Success.LocationPrefix = "/account"
+	if ok(pre, &outcomeWriter{status: 302, location: "/home"}) || ok(pre, &outcomeWriter{status: 200}) || !ok(pre, &outcomeWriter{status: 302, location: "/account/me"}) {
+		t.Fatal("location_prefix")
+	}
+	ck := route
+	ck.Success.SetCookie = "auth"
+	for _, c := range []struct {
+		cookies []string
+		want    bool
+	}{
+		{nil, false},
+		{[]string{"other=1"}, false},
+		{[]string{"auth="}, false},
+		{[]string{"auth=x; Max-Age=0"}, false},
+		{[]string{"auth=x; Expires=Thu, 01 Jan 1970 00:00:00 GMT"}, false},
+		{[]string{"a=1", "auth=x; Path=/; HttpOnly"}, true},
+	} {
+		if got := ok(ck, &outcomeWriter{status: 302, location: "/home", cookies: c.cookies}, "/home"); got != c.want {
+			t.Errorf("set_cookie %v: got %v", c.cookies, got)
+		}
+	}
+	// End to end: an origin sending failed logins back to the Referer.
+	f := newLoginFixture(t)
+	f.respond = func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, r.Referer(), http.StatusFound) }
+	for range 3 {
+		ch := decodeChallenge(t, f.do(loginReq("alice", "192.0.2.1", "")))
+		r := loginReq("alice", "192.0.2.1", solveLogin(t, ch))
+		r.Header.Set("Referer", "https://site.example/dashboard")
+		f.do(r)
+	}
+	if ch := decodeChallenge(t, f.do(loginReq("alice", "192.0.2.1", ""))); ch.Level != LoginBaseLevel+3 {
+		t.Fatalf("Referer-steered redirects reset the counters: level %d", ch.Level)
+	}
+	// An origin that writes nothing.
+	f.respond = func(http.ResponseWriter, *http.Request) {}
+	ch := decodeChallenge(t, f.do(loginReq("bob", "198.51.100.1", "")))
+	f.do(loginReq("bob", "198.51.100.1", solveLogin(t, ch)))
+	if ch := decodeChallenge(t, f.do(loginReq("bob", "198.51.100.1", ""))); ch.Level != LoginBaseLevel+1 {
+		t.Fatalf("unwritten answer: level %d", ch.Level)
+	}
+	if CheckLoginRoutes([]LoginRoute{{Path: "/l", UsernameField: "u", Success: LoginSuccess{Status: []int{302}, SetCookie: "a b"}}}) == nil ||
+		CheckLoginRoutes([]LoginRoute{{Path: "/l", UsernameField: "u", Success: LoginSuccess{Status: []int{302}, LocationPrefix: "x"}}}) == nil {
+		t.Fatal("bad success criteria accepted")
+	}
+}
+
+// SF6: quickselect agrees with sorting.
+func TestNthSmallest(t *testing.T) {
+	for n := 1; n < 200; n += 7 {
+		a := make([]float64, n)
+		for i := range a {
+			a[i] = float64((i * 7919) % 13) // many ties
+		}
+		sorted := append([]float64(nil), a...)
+		slices.Sort(sorted)
+		for k := 0; k < n; k++ {
+			b := append([]float64(nil), a...)
+			if got := nthSmallest(b, k); got != sorted[k] {
+				t.Fatalf("n=%d k=%d: %v, want %v", n, k, got, sorted[k])
+			}
+		}
+	}
+}
+
+// Nits: the origin gets the checked body with its real length; clients
+// without an IP share one bucket.
+func TestLoginForwardingAndNoIP(t *testing.T) {
+	f := newLoginFixture(t)
+	ch := decodeChallenge(t, f.do(loginReq("alice", "192.0.2.1", "")))
+	r := loginReq("alice", "192.0.2.1", solveLogin(t, ch))
+	n := r.ContentLength
+	r.ContentLength, r.TransferEncoding = -1, []string{"chunked"}
+	if rec := f.do(r); rec.Code != http.StatusFound || f.lastCL != n || len(f.lastTE) != 0 {
+		t.Fatalf("forwarded with length %d, TE %v (want %d, none): %d", f.lastCL, f.lastTE, n, rec.Code)
+	}
+	g := newLoginFixture(t)
+	g.gate.loginLim = newRateLimiter(2)
+	codes := map[int]int{}
+	for i := range 3 {
+		r := loginReq("alice", "", "")
+		r.RemoteAddr = "unix-socket-" + strconv.Itoa(i)
+		codes[g.do(r).Code]++
+	}
+	if codes[http.StatusTooManyRequests] != 1 {
+		t.Fatalf("clients without an IP: %v", codes)
 	}
 }
