@@ -526,6 +526,10 @@ func (g *Gate) serveLoginChallenge(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !g.loginSameSite(r) { // a hostile page must not spend a visitor's rate limits
+		http.Error(w, errCrossSite, http.StatusForbidden)
+		return
+	}
 	var req struct{ Method, Path, Username string }
 	if err := json.NewDecoder(io.LimitReader(r.Body, 2<<10)).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -581,6 +585,12 @@ func (g *Gate) serveLoginRedeem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Authorization already forces a CORS preflight, which fails; this
+	// also refuses a cross-site redeem outright.
+	if !g.loginSameSite(r) {
+		http.Error(w, errCrossSite, http.StatusForbidden)
 		return
 	}
 	scheme, cred, _ := strings.Cut(r.Header.Get("Authorization"), " ")

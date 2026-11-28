@@ -122,14 +122,14 @@ func TestPhoenixdLookupIncomingPaidAndUnpaid(t *testing.T) {
 			w.Write([]byte(`{"paymentHash":"` + hash + `","isPaid":false,"isExpired":true,"receivedSat":0}`))
 			return
 		}
-		w.Write([]byte(`{"paymentHash":"` + hash + `","isPaid":true,"preimage":"` + pre + `","receivedSat":21}`))
+		w.Write([]byte(`{"paymentHash":"` + hash + `","isPaid":true,"preimage":"` + pre + `","receivedSat":18,"fees":2500}`))
 	}))
 	defer srv.Close()
 
 	// paid
 	p := &Phoenixd{URL: srv.URL, Password: "secret"}
 	got, err := p.LookupIncoming(context.Background(), sum)
-	if err != nil || !got.Paid || got.ReceivedSat != 21 || got.Preimage != bytes32(preimage) {
+	if err != nil || !got.Paid || got.ReceivedSat != 21 || got.Preimage != bytes32(preimage) { // 18 + 2.5 fee, rounded up
 		t.Fatalf("paid: %+v, %v", got, err)
 	}
 

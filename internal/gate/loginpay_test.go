@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +22,7 @@ func newPayFixture(t *testing.T) *loginFixture {
 func (f *loginFixture) invoiceFor(user, ip string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(http.MethodPost, LoginInvoicePath, strings.NewReader(`{"method":"POST","path":"/login","username":"`+user+`"}`))
 	r.RemoteAddr = ip + ":1"
+	r.Header.Set("Content-Type", "application/json")
 	return f.do(r)
 }
 
@@ -250,8 +252,19 @@ func TestLoginPayLimits(t *testing.T) {
 			t.Fatalf("paying offered while off: %+v", ch)
 		}
 		f.gate.opt.LoginPrice = &LoginPrice{BaseSats: 10}
-		f.gate.opt.Paused = true
+		// Paused from the dashboard at run time (the live settings).
+		set := f.gate.Settings()
+		set.Paused = true
+		if err := f.gate.UpdateSettings(set); err != nil {
+			t.Fatal(err)
+		}
 		refused(t, f.invoiceFor("alice", "192.0.2.1"))
+		if ch := decodeChallenge(t, f.do(loginReq("alice", "192.0.2.1", ""))); ch.PriceSats != 0 || ch.PayInstead != "" {
+			t.Fatalf("paying offered while paused: %+v", ch)
+		}
+		set.Paused = false
+		f.gate.UpdateSettings(set)
+		decodeInvoice(t, f.invoiceFor("alice", "192.0.2.1"))
 	})
 }
 
@@ -275,23 +288,37 @@ func TestLoginPriceShowsNoMoreThanLevel(t *testing.T) {
 
 func TestLoginPriceMapping(t *testing.T) {
 	g := &Gate{opt: Options{LoginPrice: &LoginPrice{BaseSats: 5, MaxSats: 100}}}
+	g.live.Store(&Settings{})
 	route := &LoginRoute{}
 	for lvl, want := range map[int]int64{LoginBaseLevel: 5, LoginBaseLevel + 1: 10, LoginBaseLevel + 4: 80, LoginBaseLevel + 5: 100, LoginMaxLevel: 100, LoginMaxLevel + 50: 100} {
 		if got := g.loginPrice(route, lvl); got != want {
 			t.Errorf("level %d: %d, want %d", lvl, got, want)
 		}
 	}
-	g.opt.LoginPrice.MaxSats = 0
-	if got := g.loginPrice(route, LoginMaxLevel+50); got != 5<<(LoginMaxLevel-LoginBaseLevel) {
-		t.Errorf("uncapped top: %d", got)
+	g.opt.LoginPrice.MaxSats = 0 // default cap: 64 × base_sats
+	if got := g.loginPrice(route, LoginMaxLevel+50); got != 5*loginDefaultMaxFactor {
+		t.Errorf("default cap: %d", got)
 	}
+	if got := g.loginPrice(route, LoginBaseLevel+5); got != 5<<5 {
+		t.Errorf("below the default cap: %d", got)
+	}
+	g.opt.LoginPrice.BaseSats = maxLoginBaseSats
+	if got := g.loginPrice(route, LoginMaxLevel); got != maxLoginMaxSats {
+		t.Errorf("default cap is bounded: %d", got)
+	}
+	g.opt.LoginPrice.BaseSats = 5
+	g.live.Store(&Settings{Paused: true}) // the live pause, not the startup option
+	if got := g.loginPrice(route, LoginBaseLevel); got != 0 {
+		t.Errorf("paused: %d", got)
+	}
+	g.live.Store(&Settings{})
 	if got := g.loginPrice(&LoginRoute{Price: &LoginPrice{BaseSats: 1}}, LoginBaseLevel+2); got != 4 {
 		t.Errorf("route override: %d", got)
 	}
 	if got := g.loginPrice(&LoginRoute{Price: &LoginPrice{}}, LoginBaseLevel); got != 0 {
 		t.Errorf("route off: %d", got)
 	}
-	for _, bad := range []LoginPrice{{BaseSats: -1}, {BaseSats: maxLoginBaseSats + 1}, {BaseSats: 10, MaxSats: 5}, {BaseSats: 1, MaxSats: maxLoginMaxSats + 1}} {
+	for _, bad := range []LoginPrice{{BaseSats: -1}, {BaseSats: maxLoginBaseSats + 1}, {BaseSats: 10, MaxSats: 5}, {BaseSats: 1, MaxSats: maxLoginMaxSats + 1}, {BaseSats: 1, MaxSats: -1}} {
 		if CheckLoginPrice(&bad) == nil {
 			t.Errorf("accepted %+v", bad)
 		}
@@ -351,5 +378,110 @@ func TestLoginPay503RevealsNoReason(t *testing.T) {
 		if g != got[0] {
 			t.Errorf("answer %d differs:\n%s\n%s", i, g, got[0])
 		}
+	}
+}
+
+// A hostile page must not create invoices (or challenges, or redeem) in a
+// visitor's browser: simple cross-site POSTs, foreign Origins and
+// cross-site or same-site fetches are refused.
+func TestLoginPayCrossSite(t *testing.T) {
+	f := newPayFixture(t)
+	f.gate.loginHosts = []string{"example.com", "127.0.0.1:8080"}
+	req := func(path, ct string, h map[string]string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"method":"POST","path":"/login","username":"alice"}`))
+		r.Host = "proxy.internal:8402"
+		r.RemoteAddr = "192.0.2.1:1"
+		if ct != "" {
+			r.Header.Set("Content-Type", ct)
+		}
+		for k, v := range h {
+			r.Header.Set(k, v)
+		}
+		return f.do(r)
+	}
+	for name, c := range map[string]struct {
+		ct   string
+		h    map[string]string
+		want int
+	}{
+		"text/plain":            {"text/plain", nil, http.StatusUnsupportedMediaType},
+		"form":                  {"application/x-www-form-urlencoded", nil, http.StatusUnsupportedMediaType},
+		"no Content-Type":       {"", nil, http.StatusUnsupportedMediaType},
+		"cross-site fetch":      {"application/json", map[string]string{"Sec-Fetch-Site": "cross-site"}, http.StatusForbidden},
+		"same-site fetch":       {"application/json", map[string]string{"Sec-Fetch-Site": "same-site"}, http.StatusForbidden},
+		"foreign Origin":        {"application/json", map[string]string{"Origin": "https://evil.example"}, http.StatusForbidden},
+		"null Origin":           {"application/json", map[string]string{"Origin": "null"}, http.StatusForbidden},
+		"lookalike Origin":      {"application/json", map[string]string{"Origin": "https://example.com.evil.example"}, http.StatusForbidden},
+		"API client":            {"application/json", nil, http.StatusOK},
+		"same-origin fetch":     {"application/json; charset=utf-8", map[string]string{"Sec-Fetch-Site": "same-origin", "Origin": "http://proxy.internal:8402"}, http.StatusOK},
+		"public host Origin":    {"application/json", map[string]string{"Origin": "https://example.com"}, http.StatusOK},
+		"origin host as Origin": {"application/json", map[string]string{"Origin": "http://127.0.0.1:8080"}, http.StatusOK},
+	} {
+		f.gate.loginPay = newLoginInvoices(LoginInvoiceLimits{100, 100, 100, 100, 100})
+		if rec := req(LoginInvoicePath, c.ct, c.h); rec.Code != c.want {
+			t.Errorf("invoice, %s: got %d, want %d: %s", name, rec.Code, c.want, rec.Body)
+		}
+	}
+	evil := map[string]string{"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site", "Authorization": "L402 x:y"}
+	for _, p := range []string{LoginChallengePath, LoginRedeemPath} {
+		if rec := req(p, "application/json", evil); rec.Code != http.StatusForbidden {
+			t.Errorf("%s cross-site: got %d", p, rec.Code)
+		}
+	}
+	if rec := req(LoginChallengePath, "text/plain", map[string]string{"Sec-Fetch-Site": "same-origin"}); rec.Code != http.StatusOK {
+		t.Errorf("same-origin challenge: got %d", rec.Code) // the challenge's API stays as it was
+	}
+}
+
+// underpayingNode reports every paid invoice as paid with one sat less.
+type underpayingNode struct{ *lightning.Fake }
+
+func (u underpayingNode) LookupIncoming(ctx context.Context, h [32]byte) (lightning.IncomingPayment, error) {
+	p, err := u.Fake.LookupIncoming(ctx, h)
+	p.ReceivedSat--
+	return p, err
+}
+
+// sameHashNode hands out one payment hash for every invoice.
+type sameHashNode struct {
+	*lightning.Fake
+	first *lightning.Invoice
+}
+
+func (s *sameHashNode) CreateInvoice(ctx context.Context, sat int64, memo string, exp time.Duration) (lightning.Invoice, error) {
+	if s.first != nil {
+		return *s.first, nil
+	}
+	inv, err := s.Fake.CreateInvoice(ctx, sat, memo, exp)
+	s.first = &inv
+	return inv, err
+}
+
+func TestLoginPayUnderpaidAndRepeatedHash(t *testing.T) {
+	f := newPayFixture(t)
+	fake := f.gate.opt.Lightning.(*lightning.Fake)
+	f.gate.invoices.lookup = underpayingNode{fake}
+	inv := decodeInvoice(t, f.invoiceFor("alice", "192.0.2.1"))
+	pre := f.pay(t, inv)
+	if rec := f.redeemPaid("L402 "+inv.Challenge, "192.0.2.1"); rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "less than the price") {
+		t.Fatalf("underpaid lookup: %d %s", rec.Code, rec.Body)
+	}
+	f.gate.invoices.lookup = fake
+
+	// One preimage, two tokens with the same payment hash: one attempt.
+	f = newPayFixture(t)
+	node := &sameHashNode{Fake: f.gate.opt.Lightning.(*lightning.Fake)}
+	f.gate.node.backend = node
+	a := decodeInvoice(t, f.invoiceFor("alice", "192.0.2.1"))
+	b := decodeInvoice(t, f.invoiceFor("alice", "192.0.2.1"))
+	pre = f.pay(t, a)
+	if rec := f.redeemPaid("L402 "+a.Challenge+":"+pre, "192.0.2.1"); rec.Code != http.StatusNoContent {
+		t.Fatalf("first: %d", rec.Code)
+	}
+	if rec := f.redeemPaid("L402 "+b.Challenge+":"+pre, "192.0.2.1"); rec.Code != http.StatusForbidden {
+		t.Fatalf("same hash, second token: %d %s", rec.Code, rec.Body)
+	}
+	if rec := f.redeemPaid("L402 "+b.Challenge, "192.0.2.1"); rec.Code != http.StatusForbidden {
+		t.Fatalf("same hash, second token by lookup: %d %s", rec.Code, rec.Body)
 	}
 }

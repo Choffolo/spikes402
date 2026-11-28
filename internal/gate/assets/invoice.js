@@ -22,6 +22,7 @@ function tick(){
     if(r.status===200)return r.json().then(function(j){if(j&&j.status==="paid")unlock();else later(1500)});
     if(r.status===410){say("This invoice has expired. Reload the page for a new one.",true);return}
     if(r.status===409){location.replace(location.href);return}
+    if(r.status===402){say("The node reports that less than the price arrived for this invoice. Reload the page for a new one.",true);return}
     later(r.status===429?3000:2000);
   }).catch(function(){later(2000)});
 }

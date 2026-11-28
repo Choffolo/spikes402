@@ -132,6 +132,7 @@ func (p *Phoenixd) LookupIncoming(ctx context.Context, paymentHash [32]byte) (In
 		IsPaid      bool   `json:"isPaid"`
 		IsExpired   bool   `json:"isExpired"`
 		ReceivedSat int64  `json:"receivedSat"`
+		FeesMsat    int64  `json:"fees"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		return IncomingPayment{}, fmt.Errorf("phoenixd: bad response: %w", err)
@@ -140,7 +141,9 @@ func (p *Phoenixd) LookupIncoming(ctx context.Context, paymentHash [32]byte) (In
 	if err != nil || len(got) != 32 {
 		return IncomingPayment{}, fmt.Errorf("phoenixd: bad payment hash: %q", out.PaymentHash)
 	}
-	pay := IncomingPayment{Expired: out.IsExpired, ReceivedSat: out.ReceivedSat}
+	// receivedSat is net of the fees phoenixd took on receipt (on-the-fly
+	// liquidity, in millisatoshis); the payer paid both.
+	pay := IncomingPayment{Expired: out.IsExpired, ReceivedSat: out.ReceivedSat + (max(out.FeesMsat, 0)+999)/1000}
 	copy(pay.PaymentHash[:], got)
 	if !out.IsPaid {
 		return pay, nil

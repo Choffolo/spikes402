@@ -9,7 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -38,12 +41,24 @@ const (
 )
 
 // LoginPrice turns a login level into sats: BaseSats at LoginBaseLevel,
-// doubling with each level above it, at most MaxSats (0: no cap but the
-// top level's). The price depends on nothing but the level, so it tells
-// no more than the level does.
+// doubling with each level above it, at most MaxSats (0:
+// loginDefaultMaxFactor times BaseSats). The price depends on nothing but
+// the level, so it tells no more than the level does.
 type LoginPrice struct {
 	BaseSats int64 `json:"base_sats"`
 	MaxSats  int64 `json:"max_sats,omitempty"`
+}
+
+// loginDefaultMaxFactor caps the price at six doublings (64 × base_sats)
+// when max_sats is not set: a real user whose level others raised by the
+// account and network terms still pays a bounded price.
+const loginDefaultMaxFactor = 64
+
+func (p *LoginPrice) maxSats() int64 {
+	if p.MaxSats > 0 {
+		return p.MaxSats
+	}
+	return min(p.BaseSats*loginDefaultMaxFactor, maxLoginMaxSats)
 }
 
 // LoginInvoiceLimits bound the invoices login payments may ask the node
@@ -72,8 +87,8 @@ func CheckLoginPrice(p *LoginPrice) error {
 	if p.BaseSats < 0 || p.BaseSats > maxLoginBaseSats {
 		return fmt.Errorf("base_sats must be between 0 and %d", maxLoginBaseSats)
 	}
-	if p.MaxSats != 0 && (p.MaxSats < p.BaseSats || p.MaxSats > maxLoginMaxSats) {
-		return fmt.Errorf("max_sats must be 0 or between base_sats and %d", maxLoginMaxSats)
+	if p.MaxSats < 0 || p.MaxSats != 0 && (p.MaxSats < p.BaseSats || p.MaxSats > maxLoginMaxSats) {
+		return fmt.Errorf("max_sats must be between base_sats and %d (default %d × base_sats)", maxLoginMaxSats, loginDefaultMaxFactor)
 	}
 	return nil
 }
@@ -102,14 +117,11 @@ func (g *Gate) loginPrice(route *LoginRoute, level int) int64 {
 	if route.Price != nil {
 		p = route.Price
 	}
-	if p == nil || p.BaseSats <= 0 || g.opt.Paused {
+	if p == nil || p.BaseSats <= 0 || g.live.Load().Paused {
 		return 0
 	}
 	sats := p.BaseSats << min(max(level-LoginBaseLevel, 0), LoginMaxLevel-LoginBaseLevel)
-	if p.MaxSats > 0 {
-		sats = min(sats, p.MaxSats)
-	}
-	return sats
+	return min(sats, p.maxSats())
 }
 
 // loginInvoices counts open login invoices and recent ones, so paying can
@@ -226,6 +238,16 @@ func (g *Gate) serveLoginInvoice(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Not a "simple" cross-site request: a hostile page must not be able
+	// to create invoices in a visitor's name and fill their limits.
+	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+	if !g.loginSameSite(r) {
+		http.Error(w, errCrossSite, http.StatusForbidden)
+		return
+	}
 	var req struct{ Method, Path, Username string }
 	if err := json.NewDecoder(io.LimitReader(r.Body, 2<<10)).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -249,7 +271,7 @@ func (g *Gate) serveLoginInvoice(w http.ResponseWriter, r *http.Request) {
 	inv, err := g.newLoginInvoice(route, acct, net, now)
 	if err != nil {
 		if err != errLoginPayOff {
-			g.nodeLog.printf(now, "spikes402: no login invoice, offering proof-of-work only: %v", err)
+			g.nodeLog.printf(now, "spikes402: no login invoice, offering proof-of-work only: %s", sanitize(err.Error()))
 		}
 		g.sendLoginChallenge(w, r, route, acct, http.StatusServiceUnavailable, errNoLoginInvoice)
 		return
@@ -293,7 +315,38 @@ func (g *Gate) newLoginInvoice(route *LoginRoute, acct, net string, now time.Tim
 	}, nil
 }
 
-var errUnpaid = errors.New("invoice not paid yet")
+var (
+	errUnpaid    = errors.New("invoice not paid yet")
+	errUnderpaid = errors.New("the node reports less than the price received for this invoice")
+)
+
+const errCrossSite = "cross-site request refused"
+
+// loginSameSite reports whether a browser request to a login endpoint
+// comes from this site's own pages (login.js fetches same-origin). A
+// request without Sec-Fetch-Site or Origin (API clients, old browsers)
+// passes: the checks only stop a hostile page acting in a visitor's
+// browser, whose requests always carry Origin on POST. Only "same-origin"
+// and "none" pass Sec-Fetch-Site ("same-site" is a sibling subdomain);
+// Origin must name the request's own Host (a page cannot choose the Host
+// of the visitor's request), one of public_hosts or the origin's host.
+func (g *Gate) loginSameSite(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "none":
+	default:
+		return false
+	}
+	o := r.Header.Values("Origin")
+	if len(o) == 0 {
+		return true
+	}
+	u, err := url.Parse(o[0])
+	if len(o) != 1 || err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+		return false // includes "null"
+	}
+	return strings.EqualFold(u.Host, r.Host) ||
+		slices.ContainsFunc(g.loginHosts, func(h string) bool { return strings.EqualFold(u.Hostname(), hostOnly(h)) })
+}
 
 // checkLoginPay verifies "<token>[:<preimage>]" for a login invoice and
 // spends the token: one paid attempt per invoice. Like a proof, a payment
@@ -322,15 +375,27 @@ func (g *Gate) checkLoginPay(cred, resHash, net string, now time.Time) (claims, 
 			return claims{}, errBadProof
 		}
 	} else {
-		pay, err := g.invoices.get(c.PaymentHash, time.Unix(c.Expires, 0), now)
+		pay, err := g.invoices.getFor(c.PaymentHash, time.Unix(c.Expires, 0), now, true)
 		switch {
 		case err == errLookupBusy || err == errNoLookup || (err != nil && err != lightning.ErrNotFound):
 			return claims{}, &busyError{http.StatusServiceUnavailable, 2 * time.Second, "cannot ask the node right now; retry shortly, or send the preimage"}
 		case err != nil || !pay.Paid:
 			return claims{}, errUnpaid
+		case pay.ReceivedSat < c.PriceSats:
+			return claims{}, errUnderpaid
 		}
 	}
+	// The payment hash is spent too, for the token's lifetime: a node that
+	// handed out one payment hash twice must not let one preimage redeem
+	// two tokens.
+	hashKey := "loginpay-hash:" + c.PaymentHash
+	if g.spent.has(hashKey) {
+		return claims{}, errReplay
+	}
 	if err := g.spent.use(key, time.Unix(c.Expires, 0), now); err != nil {
+		return claims{}, err
+	}
+	if err := g.spent.use(hashKey, time.Unix(c.Expires, 0), now); err != nil {
 		return claims{}, err
 	}
 	g.loginPay.drop(c.ID)
